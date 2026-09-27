@@ -135,10 +135,18 @@ void app_mouseTrace(const char * file, unsigned int line,
   if (result < 0)
     return;
 
+#ifdef _WIN32
+  _lock_file(stderr);
+#else
   flockfile(stderr);
-  debug_info(file, line, function, "Mouse %06lu: %s", seq,
+#endif
+  debug_info(file, line, function, "Mouse %06" PRIu64 ": %s", seq,
       message);
+#ifdef _WIN32
+  _unlock_file(stderr);
+#else
   funlockfile(stderr);
+#endif
 }
 
 bool app_isCaptureOnlyMode(void)

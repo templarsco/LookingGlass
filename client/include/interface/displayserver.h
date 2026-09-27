@@ -23,7 +23,9 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#ifdef ENABLE_EGL
 #include <EGL/egl.h>
+#endif
 #include "common/types.h"
 #include "common/debug.h"
 #include "interface/clipboard.h"

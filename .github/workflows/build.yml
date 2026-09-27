@@ -193,11 +193,18 @@ jobs:
         cmake ..
         make -j$(nproc)
         ctest --output-on-failure
-    - name: Cross-compile the Windows client
+    - name: Cross-compile the Windows client loopback
       run: |
         mkdir windows-client/build
         cd windows-client/build
         cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake ..
+        make -j$(nproc)
+    - name: Cross-compile the Windows client
+      run: |
+        mkdir client/build-windows
+        cd client/build-windows
+        cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake \
+          -DOPTIMIZE_FOR_NATIVE=OFF ..
         make -j$(nproc)
 
   windows-client-native:
@@ -219,6 +226,48 @@ jobs:
       run: |
         cd windows-client\build
         ctest --output-on-failure
+
+  windows-client-display:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        submodules: recursive
+    - name: Install MinGW-w64, CMake and Mesa with MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          make
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-mesa
+          mingw-w64-x86_64-python
+    - name: Configure Windows client with test capture
+      run: |
+        mkdir client/build
+        cd client/build
+        cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DOPTIMIZE_FOR_NATIVE=OFF ..
+    - name: Build Windows client
+      run: |
+        cd client/build
+        make -j$(nproc)
+    - name: Check a test frame in a Windows window
+      run: |
+        # the runner has no GPU, so the client uses Mesa's software OpenGL
+        cp /mingw64/bin/opengl32.dll client/build/
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
+          --output smoke client/build/looking-glass-client.exe
+    - name: Upload Windows client smoke test output
+      if: failure()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-smoke
+        path: smoke/
 
   idd:
     runs-on: windows-2022

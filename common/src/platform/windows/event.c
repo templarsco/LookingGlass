@@ -82,9 +82,12 @@ bool lgSignalEvent(LGEvent * event)
   return SetEvent((HANDLE)event);
 }
 
+// returns if the event was signaled, as the Linux implementation does
 bool lgResetEvent(LGEvent * event)
 {
-  return ResetEvent((HANDLE)event);
+  const bool signaled = WaitForSingleObject((HANDLE)event, 0) == WAIT_OBJECT_0;
+  ResetEvent((HANDLE)event);
+  return signaled;
 }
 
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION

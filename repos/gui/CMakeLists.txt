@@ -48,12 +48,21 @@ if(ENABLE_EGL)
   target_compile_definitions(lg_gui PUBLIC CIMGUI_USE_OPENGL3=1)
 endif()
 
+target_compile_definitions(lg_gui PUBLIC IMGUI_IMPL_API=extern\t"C"\t)
 if(WIN32)
-  target_compile_definitions(lg_gui PUBLIC
-    IMGUI_IMPL_API=extern\t"C"\t__declspec\(dllexport\)
+  # lg_gui is linked statically, so the executable must not export its API
+  target_compile_definitions(lg_gui PUBLIC CIMGUI_NO_EXPORT)
+
+  # the PE linker resolves the demo window calls in the cimgui wrappers even
+  # though nothing uses them, so link the empty versions of those windows
+  set(LG_GUI_DEMO_SOURCES
+    cimgui/imgui/imgui_demo.cpp
+    cimplot/implot/implot_demo.cpp
   )
-else()
-  target_compile_definitions(lg_gui PUBLIC IMGUI_IMPL_API=extern\t"C"\t)
+  target_sources(lg_gui PRIVATE ${LG_GUI_DEMO_SOURCES})
+  set_source_files_properties(${LG_GUI_DEMO_SOURCES} PROPERTIES
+    COMPILE_DEFINITIONS IMGUI_DISABLE_DEMO_WINDOWS
+  )
 endif()
 
 target_include_directories(lg_gui PUBLIC

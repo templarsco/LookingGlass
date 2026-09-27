@@ -26,20 +26,33 @@ include(OptimizeForNative) # option(OPTIMIZE_FOR_NATIVE)
 include(UninstallTarget)
 
 find_package(PkgConfig)
-pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
-pkg_check_modules(FUSE3 REQUIRED IMPORTED_TARGET fuse3>=3.10)
+if(NOT WIN32)
+  pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
+  pkg_check_modules(FUSE3 REQUIRED IMPORTED_TARGET fuse3>=3.10)
+endif()
+
+# Windows has no EGL, PipeWire or PulseAudio, it uses the OpenGL renderer
+if(WIN32)
+  set(PLATFORM_DEFAULT OFF)
+else()
+  set(PLATFORM_DEFAULT ON)
+endif()
 
 option(ENABLE_OPENGL "Enable the OpenGL renderer"       ON)
 add_feature_info(ENABLE_OPENGL ENABLE_OPENGL "Legacy OpenGL renderer.")
 
-option(ENABLE_EGL    "Enable the EGL renderer"          ON)
+option(ENABLE_EGL    "Enable the EGL renderer"          ${PLATFORM_DEFAULT})
 add_feature_info(ENABLE_EGL ENABLE_EGL "EGL renderer.")
+
+if(WIN32 AND ENABLE_EGL)
+  message(FATAL_ERROR "The EGL renderer is not supported on Windows")
+endif()
 
 option(ENABLE_TESTS "Build all client tests and test support" OFF)
 add_feature_info(ENABLE_TESTS ENABLE_TESTS
   "Client unit and integration tests with synthetic transport support.")
 if(ENABLE_TESTS)
-  if(NOT ENABLE_EGL)
+  if(NOT ENABLE_EGL AND NOT WIN32)
     message(FATAL_ERROR "ENABLE_TESTS requires ENABLE_EGL")
   endif()
   add_definitions(-D ENABLE_TESTS)
@@ -54,7 +67,7 @@ add_feature_info(ENABLE_ASAN ENABLE_ASAN "AddressSanitizer support.")
 option(ENABLE_UBSAN "Build with UndefinedBehaviorSanitizer" OFF)
 add_feature_info(ENABLE_UBSAN ENABLE_UBSAN "UndefinedBehaviorSanitizer support.")
 
-option(ENABLE_AUDIO "Build with audio support" ON)
+option(ENABLE_AUDIO "Build with audio support" ${PLATFORM_DEFAULT})
 
 cmake_dependent_option(
   ENABLE_PIPEWIRE
@@ -122,7 +135,14 @@ if(ENABLE_BACKTRACE)
   )
 endif()
 
-set(EXE_FLAGS "-Wl,--gc-sections -z noexecstack")
+if(WIN32)
+  # link the MinGW runtime statically so the executable runs on its own
+  set(EXE_FLAGS "-Wl,--gc-sections -Wl,--nxcompat -static")
+  add_compile_options("-fdebug-prefix-map=${PROJECT_TOP}/=")
+  add_compile_definitions(__USE_MINGW_ANSI_STDIO=1)
+else()
+  set(EXE_FLAGS "-Wl,--gc-sections -z noexecstack")
+endif()
 set(CMAKE_C_STANDARD 11)
 
 if (ENABLE_OPENGL)
@@ -148,6 +168,7 @@ add_definitions(-D GL_GLEXT_PROTOTYPES)
 
 add_custom_command(
   OUTPUT  ${CMAKE_BINARY_DIR}/version.c
+    ${CMAKE_BINARY_DIR}/include/version.h
     ${CMAKE_BINARY_DIR}/_version.c
   COMMAND ${CMAKE_COMMAND} -D PROJECT_TOP=${PROJECT_TOP} -P
     ${PROJECT_TOP}/version.cmake
@@ -161,11 +182,23 @@ include_directories(
   ${PROJECT_TOP}/repos/nanosvg/src
 )
 
-link_libraries(
-  ${CMAKE_DL_LIBS}
-  rt
-  m
-)
+if(WIN32)
+  # provides linux/input.h with the evdev key codes the client uses
+  include_directories(
+    ${PROJECT_SOURCE_DIR}/platform/Windows/include
+    ${PROJECT_TOP}/vendor/linux-input
+  )
+endif()
+
+if(WIN32)
+  link_libraries(m)
+else()
+  link_libraries(
+    ${CMAKE_DL_LIBS}
+    rt
+    m
+  )
+endif()
 
 set(SOURCES
   ${CMAKE_BINARY_DIR}/version.c
@@ -215,6 +248,20 @@ if(ENABLE_AUDIO)
   )
 endif()
 
+if(WIN32)
+  # FUSE file transfers, evdev input and EGL only exist on Linux
+  list(REMOVE_ITEM SOURCES
+    src/clipboard_files.c
+    src/evdev.c
+    src/egl_dynprocs.c
+    src/eglutil.c
+  )
+  list(APPEND SOURCES
+    platform/Windows/stubs.c
+    platform/Windows/uifont.c
+  )
+endif()
+
 add_subdirectory("${PROJECT_TOP}/resources"       "${CMAKE_BINARY_DIR}/resources")
 add_subdirectory("${PROJECT_TOP}/common"          "${CMAKE_BINARY_DIR}/common"   )
 add_subdirectory("${PROJECT_TOP}/repos/LGMP/lgmp" "${CMAKE_BINARY_DIR}/LGMP"     )
@@ -225,7 +272,9 @@ add_subdirectory(renderers)
 add_subdirectory(transports)
 add_subdirectory(audiodevs)
 
-configure_file("${PROJECT_TOP}/resources/looking-glass-client.desktop.in" "${CMAKE_BINARY_DIR}/resources/looking-glass-client.desktop" @ONLY)
+if(NOT WIN32)
+  configure_file("${PROJECT_TOP}/resources/looking-glass-client.desktop.in" "${CMAKE_BINARY_DIR}/resources/looking-glass-client.desktop" @ONLY)
+endif()
 add_executable(looking-glass-client ${SOURCES})
 
 target_compile_definitions(looking-glass-client PRIVATE CIMGUI_DEFINE_ENUMS_AND_STRUCTS=1)
@@ -253,8 +302,8 @@ add_custom_command(TARGET looking-glass-client POST_BUILD
 
 target_link_libraries(looking-glass-client
   ${EXE_FLAGS}
-  PkgConfig::FONTCONFIG
-  PkgConfig::FUSE3
+  $<$<NOT:$<PLATFORM_ID:Windows>>:PkgConfig::FONTCONFIG>
+  $<$<NOT:$<PLATFORM_ID:Windows>>:PkgConfig::FUSE3>
   lg_resources
   lg_common
   displayservers
@@ -264,7 +313,33 @@ target_link_libraries(looking-glass-client
   lg_gui
 )
 
-if(ENABLE_TESTS)
+if(WIN32)
+  target_link_libraries(looking-glass-client dwrite uuid)
+
+  # the resource compiler can't take the quoted definitions that lg_gui
+  # passes to its users, so the resources build in a target of their own
+  add_library(looking-glass-client-resources OBJECT
+    platform/Windows/resource.rc
+  )
+  set_source_files_properties(platform/Windows/resource.rc PROPERTIES
+    OBJECT_DEPENDS "${PROJECT_SOURCE_DIR}/platform/Windows/app.manifest;${PROJECT_TOP}/resources/icon.ico;${CMAKE_BINARY_DIR}/include/version.h"
+  )
+  # version.h must exist before the resources build, and the executable
+  # waits for it so that the version command never runs twice at once
+  add_custom_target(looking-glass-client-version DEPENDS
+    ${CMAKE_BINARY_DIR}/version.c
+    ${CMAKE_BINARY_DIR}/include/version.h
+  )
+  add_dependencies(looking-glass-client-resources looking-glass-client-version)
+  add_dependencies(looking-glass-client looking-glass-client-version)
+  target_sources(looking-glass-client PRIVATE
+    $<TARGET_OBJECTS:looking-glass-client-resources>
+  )
+endif()
+
+# the unit tests are Linux only; Windows builds use ENABLE_TESTS for the
+# framebuffer capture support of the test transport
+if(ENABLE_TESTS AND NOT WIN32)
   include(CTest)
   enable_testing()
   add_subdirectory(tests)
@@ -286,10 +361,12 @@ install(FILES "${CLIENT_DEBUG_FILE}"
   DESTINATION "${CMAKE_INSTALL_BINDIR}/.debug"
   COMPONENT binary)
 
-install(FILES "${CMAKE_BINARY_DIR}/resources/looking-glass-client.desktop"
-    DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications")
-install(FILES "${PROJECT_TOP}/resources/lg-logo.svg"
-        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps"
-        RENAME "looking-glass.svg")
+if(NOT WIN32)
+  install(FILES "${CMAKE_BINARY_DIR}/resources/looking-glass-client.desktop"
+      DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications")
+  install(FILES "${PROJECT_TOP}/resources/lg-logo.svg"
+          DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps"
+          RENAME "looking-glass.svg")
+endif()
 
 feature_summary(WHAT ENABLED_FEATURES DISABLED_FEATURES)

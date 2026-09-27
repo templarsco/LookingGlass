@@ -23,14 +23,15 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "common/util.h"
 
 // vsprintf but with buffer allocation
 int valloc_sprintf(char ** str, const char * format, va_list ap)
-  __attribute__ ((format (printf, 2, 0)));
+  __attribute__ ((format (LG_PRINTF_FORMAT, 2, 0)));
 
 // sprintf but with buffer allocation
 int alloc_sprintf(char ** str, const char * format, ...)
-  __attribute__ ((format (printf, 2, 3)));
+  __attribute__ ((format (LG_PRINTF_FORMAT, 2, 3)));
 
 // Find value in a list separated by delimiter.
 bool str_containsValue(const char * list, char delimiter, const char * value);

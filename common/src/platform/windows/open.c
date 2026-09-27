@@ -18,34 +18,42 @@
  * Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
-#ifndef _H_LG_GL_DYNPROCS_
-#define _H_LG_GL_DYNPROCS_
-#ifdef ENABLE_OPENGL
+#include "common/open.h"
+#include "common/debug.h"
 
-#include <GL/gl.h>
-#include <GL/glext.h>
+#include <windows.h>
+#include <shellapi.h>
 
-struct GLDynProcs
+#include <stdint.h>
+
+bool lgOpenURL(const char * url)
 {
-  PFNGLGENBUFFERSPROC     glGenBuffers;
-  PFNGLBINDBUFFERPROC     glBindBuffer;
-  PFNGLBUFFERDATAPROC     glBufferData;
-  PFNGLBUFFERSUBDATAPROC  glBufferSubData;
-  PFNGLDELETEBUFFERSPROC  glDeleteBuffers;
-  PFNGLISSYNCPROC         glIsSync;
-  PFNGLFENCESYNCPROC      glFenceSync;
-  PFNGLCLIENTWAITSYNCPROC glClientWaitSync;
-  PFNGLDELETESYNCPROC     glDeleteSync;
-  PFNGLGENERATEMIPMAPPROC glGenerateMipmap;
-  PFNGLBLENDEQUATIONPROC  glBlendEquation;
-};
+  const int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, url, -1,
+      NULL, 0);
+  if (len <= 0)
+  {
+    DEBUG_ERROR("Invalid URL: %s", url);
+    return false;
+  }
 
-extern struct GLDynProcs g_gl_dynProcs;
+  wchar_t * wurl = malloc(len * sizeof(*wurl));
+  if (!wurl)
+  {
+    DEBUG_ERROR("out of memory");
+    return false;
+  }
 
-void gl_dynProcsInit(void);
+  MultiByteToWideChar(CP_UTF8, 0, url, -1, wurl, len);
+  const INT_PTR result = (INT_PTR)ShellExecuteW(NULL, L"open", wurl, NULL, NULL,
+      SW_SHOWNORMAL);
+  free(wurl);
 
-#else
-  #define gl_dynProcsInit(...)
-#endif
+  // ShellExecute returns a value greater than 32 on success
+  if (result <= 32)
+  {
+    DEBUG_ERROR("Failed to open %s (error %d)", url, (int)result);
+    return false;
+  }
 
-#endif // _H_LG_GL_DYNPROCS_
+  return true;
+}
