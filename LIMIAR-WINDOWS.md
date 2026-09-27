@@ -2,8 +2,9 @@
 
 This is Limiar's development fork of Looking Glass. Its goal is a native
 Windows viewer on the physical PC, not just the Windows guest capturer.
-The Windows client is not implemented yet. Creating this fork is not a
-claim of working guest display, GPU sharing, or 240 Hz performance.
+The Windows client only shows the client's own synthetic test frames so
+far; it cannot display a guest. Creating this fork is not a claim of
+working guest display, GPU sharing, or 240 Hz performance.
 
 Upstream starting revision:
 `236efcb155f952f5d7d9fcd5891a3060ad254e68`.
@@ -26,6 +27,13 @@ in [windows-client](windows-client/README.md).
 2. Add a Win32 display/input implementation for the existing client
    abstraction: DPI, resize, focus, cursor capture/release, relative mouse,
    keyboard state and disconnect recovery.
+   Status, September 27, 2026: the client builds for Windows, cross and
+   native, with a Win32 display server that covers these items. Windows
+   only has the synthetic `test` transport. CI shows a known test frame in
+   a native window and checks every pixel, using Mesa's software OpenGL;
+   the endpoint half of the first gate below waits for step 3. The Win32
+   input layer has unit tests. Focus, capture, DPI and reconnect behavior
+   was checked by hand under Wine, not yet on a physical Windows PC.
 3. Add an explicit Windows local shared-memory endpoint with per-user ACLs
    and a negotiated protocol version. Do not reinterpret a Linux DMA-BUF
    file descriptor as a Windows handle. Never expose an unauthenticated
