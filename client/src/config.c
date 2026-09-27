@@ -29,7 +29,9 @@
 
 #include <errno.h>
 #include <limits.h>
+#ifndef _WIN32
 #include <pwd.h>
+#endif
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -94,7 +96,12 @@ static struct Option options[] =
     .name           = "transport",
     .description    = "Transport backend to use",
     .type           = OPTION_TYPE_STRING,
+#ifdef _WIN32
+    // the Windows client has no guest transport yet, see LIMIAR-WINDOWS.md
+    .value.x_string = "test",
+#else
     .value.x_string = "lgmp",
+#endif
     .validator      = optTransportValidate,
   },
 
@@ -288,7 +295,11 @@ static struct Option options[] =
     .name           = "uiFont",
     .description    = "The font to use when rendering on-screen UI",
     .type           = OPTION_TYPE_STRING,
+#ifdef _WIN32
+    .value.x_string = "Consolas",
+#else
     .value.x_string = "DejaVu Sans Mono",
+#endif
   },
   {
     .module         = "win",
@@ -567,8 +578,9 @@ void config_init(void)
 
 bool config_load(int argc, char * argv[])
 {
-  // load any global options first
   struct stat st;
+#ifndef _WIN32
+  // load any global options first
   if (stat("/etc/looking-glass-client.ini", &st) >= 0 && S_ISREG(st.st_mode))
   {
     DEBUG_INFO("Loading config from: /etc/looking-glass-client.ini");
@@ -601,8 +613,9 @@ bool config_load(int argc, char * argv[])
     }
     free(localFile);
   }
+#endif
 
-  // load config from XDG_CONFIG_HOME
+  // load config from XDG_CONFIG_HOME, or %APPDATA% on Windows
   char * xdgFile;
   alloc_sprintf(&xdgFile, "%s/client.ini", lgConfigDir());
   if (!xdgFile)

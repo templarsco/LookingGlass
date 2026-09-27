@@ -37,11 +37,11 @@ err_retry:
   if (FAILED(GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &numPath, &numMode)))
     goto err;
 
-  DISPLAYCONFIG_PATH_INFO * pathInfo = calloc(sizeof(*pathInfo), numPath);
+  DISPLAYCONFIG_PATH_INFO * pathInfo = calloc(numPath, sizeof(*pathInfo));
   if (!pathInfo)
     goto err_mem_pathInfo;
 
-  DISPLAYCONFIG_MODE_INFO * modeInfo = calloc(sizeof(*modeInfo), numMode);
+  DISPLAYCONFIG_MODE_INFO * modeInfo = calloc(numMode, sizeof(*modeInfo));
   if (!modeInfo)
     goto err_mem_modeInfo;
 

@@ -8,8 +8,6 @@ include_directories(
 # allow use of functions for Windows 7 or later
 add_compile_definitions(WINVER=0x0601 _WIN32_WINNT=0x0601)
 
-add_compile_definitions(__USE_MINGW_ANSI_STDIO=0)
-
 if (MINGW)
   # Build our own ntdll.dll import library
   # This tricks MinGW into not linking stuff like memcpy from ntdll.dll instead of mscvrt.dll
@@ -41,12 +39,16 @@ add_library(lg_common_platform_code STATIC
   cpuinfo.c
   display.c
   proctitle.c
+  paths.c
+  open.c
 )
 
 target_link_libraries(lg_common_platform_code
   lg_common
   setupapi
   ntdll
+  shell32
+  ole32
 )
 
 if (ENABLE_BACKTRACE)

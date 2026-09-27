@@ -25,6 +25,7 @@
 #include "common/option.h"
 #include "common/time.h"
 
+#include <inttypes.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -79,6 +80,8 @@ struct LG_Transport
   bool                    realtime;
   bool                    cycleFormats;
   bool                    holdLastFrame;
+  bool                    reconnect;
+  bool                    input;
   enum TestDamageMode     damageMode;
   unsigned                formatIndex;
 
@@ -162,6 +165,21 @@ static void test_setup(void)
       .name         = "holdLastFrame",
       .description  =
         "Keep the session alive after generating frameCount frames",
+      .type         = OPTION_TYPE_BOOL,
+      .value.x_bool = false,
+    },
+    {
+      .module       = "test",
+      .name         = "reconnect",
+      .description  =
+        "Disconnect after frameCount frames so that the client reconnects",
+      .type         = OPTION_TYPE_BOOL,
+      .value.x_bool = false,
+    },
+    {
+      .module       = "test",
+      .name         = "input",
+      .description  = "Accept guest input and log every event",
       .type         = OPTION_TYPE_BOOL,
       .value.x_bool = false,
     },
@@ -365,6 +383,8 @@ static bool test_create(LG_Transport ** result)
   this->realtime     = option_get_bool("test", "realtime");
   this->cycleFormats = cycleFormats;
   this->holdLastFrame = option_get_bool("test", "holdLastFrame");
+  this->reconnect     = option_get_bool("test", "reconnect");
+  this->input         = option_get_bool("test", "input");
   this->damageMode    = damageMode;
   this->formatIndex  = (unsigned)formatIndex;
   test_initPQLUT(this);
@@ -608,6 +628,13 @@ static LG_TransportStatus test_nextFrame(LG_Transport * this, bool useDMA,
     return LG_TRANSPORT_ERROR;
   if (this->frameCount && this->serial >= this->frameCount)
   {
+    if (this->reconnect)
+    {
+      DEBUG_INFO("Test transport: disconnecting after %u frames",
+          this->frameCount);
+      this->connected = false;
+      return LG_TRANSPORT_DISCONNECTED;
+    }
     if (!this->holdLastFrame)
       return LG_TRANSPORT_END;
     usleep(1000);
@@ -771,11 +798,104 @@ static LG_TransportStatus test_controlStatus(LG_Transport * this,
     LG_TRANSPORT_DISCONNECTED;
 }
 
+/* test:input accepts every input event and logs it, so that the display
+ * server input path can be checked without a guest */
+
+static bool test_inputSupports(void * opaque, LG_InputSupport support)
+{
+  return support == LG_INPUT_SUPPORT_MOUSE_ABSOLUTE;
+}
+
+static void test_inputSetStatusListener(void * opaque,
+    LG_InputStatusFn callback, void * callbackOpaque)
+{
+  if (!callback)
+    return;
+
+  const LG_InputStatus status =
+  {
+    .available  = true,
+    .generation = 1,
+  };
+  callback(callbackOpaque, &status);
+}
+
+static bool test_inputKeyDown(void * opaque, int key)
+{
+  DEBUG_INFO("Test input: key down %d", key);
+  return true;
+}
+
+static bool test_inputKeyUp(void * opaque, int key)
+{
+  DEBUG_INFO("Test input: key up %d", key);
+  return true;
+}
+
+static bool test_inputKeyboardLEDs(void * opaque, bool numLock,
+    bool capsLock, bool scrollLock)
+{
+  DEBUG_INFO("Test input: LEDs num:%d caps:%d scroll:%d",
+      numLock, capsLock, scrollLock);
+  return true;
+}
+
+static void test_inputKeyboardLEDsReset(void * opaque)
+{
+}
+
+static bool test_inputMouseMotion(void * opaque, int32_t x, int32_t y)
+{
+  DEBUG_INFO("Test input: mouse motion %" PRId32 " %" PRId32, x, y);
+  return true;
+}
+
+static bool test_inputMousePosition(void * opaque, uint32_t x, uint32_t y,
+    uint32_t width, uint32_t height)
+{
+  DEBUG_INFO("Test input: mouse position %" PRIu32 " %" PRIu32
+      " in %" PRIu32 "x%" PRIu32, x, y, width, height);
+  return true;
+}
+
+static bool test_inputMousePress(void * opaque, unsigned int button)
+{
+  DEBUG_INFO("Test input: mouse press %u", button);
+  return true;
+}
+
+static bool test_inputMouseRelease(void * opaque, unsigned int button)
+{
+  DEBUG_INFO("Test input: mouse release %u", button);
+  return true;
+}
+
+static void test_inputReset(void * opaque)
+{
+  DEBUG_INFO("Test input: reset");
+}
+
+static const LG_InputOps testInputOps =
+{
+  .name              = "test",
+  .supports          = test_inputSupports,
+  .setStatusListener = test_inputSetStatusListener,
+  .keyDown           = test_inputKeyDown,
+  .keyUp             = test_inputKeyUp,
+  .keyboardLEDs      = test_inputKeyboardLEDs,
+  .keyboardLEDsReset = test_inputKeyboardLEDsReset,
+  .mouseMotion       = test_inputMouseMotion,
+  .mousePosition     = test_inputMousePosition,
+  .mousePress        = test_inputMousePress,
+  .mouseRelease      = test_inputMouseRelease,
+  .reset             = test_inputReset,
+};
+
 static const LG_InputOps * test_getInputOps(LG_Transport * this,
     void ** opaque)
 {
   *opaque = NULL;
-  return NULL;
+  return this->input ? &testInputOps : NULL;
 }
 
 static const LG_FrameOps testFrameOps =

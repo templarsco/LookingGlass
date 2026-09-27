@@ -99,6 +99,18 @@ static inline uint64_t nanotime(void)
 #endif
 }
 
+// the current time on the clock that lgWaitEventAbs deadlines use
+static inline void tsNow(struct timespec * ts)
+{
+#if defined(_WIN32)
+  const uint64_t ns = nanotime();
+  ts->tv_sec  = ns / 1000000000ULL;
+  ts->tv_nsec = ns % 1000000000ULL;
+#else
+  clock_gettime(CLOCK_MONOTONIC, ts);
+#endif
+}
+
 static inline void tsDiff(struct timespec *diff, const struct timespec *left,
               const struct timespec *right)
 {

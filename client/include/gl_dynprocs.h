@@ -37,6 +37,7 @@ struct GLDynProcs
   PFNGLCLIENTWAITSYNCPROC glClientWaitSync;
   PFNGLDELETESYNCPROC     glDeleteSync;
   PFNGLGENERATEMIPMAPPROC glGenerateMipmap;
+  PFNGLBLENDEQUATIONPROC  glBlendEquation;
 };
 
 extern struct GLDynProcs g_gl_dynProcs;

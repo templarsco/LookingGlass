@@ -25,7 +25,6 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -731,7 +730,7 @@ static void preSwapCallback(void * udata)
   if (!written)
     DEBUG_ERROR("Failed to write test capture to: %s", l_testCapture.path);
   else
-    DEBUG_INFO("Wrote test capture for frame %lu to: %s",
+    DEBUG_INFO("Wrote test capture for frame %" PRIu64 " to: %s",
         serial, l_testCapture.path);
   app_setState(APP_STATE_SHUTDOWN);
 #endif
@@ -894,7 +893,7 @@ static int cursorRepaintThread(void * unused)
         break;
 
       struct timespec deadlineTime;
-      clock_gettime(CLOCK_MONOTONIC, &deadlineTime);
+      tsNow(&deadlineTime);
       tsAdd(&deadlineTime, waitTime);
       lgWaitEventAbs(e_cursorRepaint, &deadlineTime);
     }
@@ -942,7 +941,7 @@ static int renderThread(void * unused)
   lgSignalEvent(e_startup);
 
   struct timespec time;
-  clock_gettime(CLOCK_MONOTONIC, &time);
+  tsNow(&time);
 
   while(likely(app_getState() != APP_STATE_SHUTDOWN))
   {
@@ -1112,7 +1111,7 @@ static int renderThread(void * unused)
     if (!g_state.jitRender && g_params.fpsMin != 0)
     {
       /* A frame-driven swap also satisfies the minimum render rate. */
-      clock_gettime(CLOCK_MONOTONIC, &time);
+      tsNow(&time);
       tsAdd(&time, app_overlayNeedsRender() ?
           g_state.overlayFrameTime : g_state.frameTime);
     }
@@ -2706,9 +2705,15 @@ static void primaryLost(void)
   DEBUG_INFO("Waiting for the host to restart...");
 }
 
+// the SPICE options only exist when the SPICE transport is built
+static bool spiceEnabled(void)
+{
+  return lgTransport_isValid("spice") && option_get_bool("spice", "enable");
+}
+
 static bool fallbackStart(const uint8_t primaryUUID[16])
 {
-  if (!option_get_bool("spice", "enable") ||
+  if (!spiceEnabled() ||
       strcmp(g_params.transport, "spice") == 0)
     return true;
 
@@ -3474,7 +3479,7 @@ static void recoveryHandleMismatch(struct RecoveryPrompt * prompt,
 static MsgBoxHandle showSpiceInputHelp(void)
 {
   static bool done = false;
-  if (!option_get_bool("spice", "enable") ||
+  if (!spiceEnabled() ||
       !option_get_bool("spice", "input") || done)
     return NULL;
 
@@ -4285,6 +4290,10 @@ int main(int argc, char * argv[])
   // initialize for DEBUG_* macros
   debug_init();
 
+#ifdef _WIN32
+  // the default resolution is too coarse for frame pacing
+  windowsSetTimerResolution();
+#else
   if (getuid() == 0)
   {
     DEBUG_ERROR("Do not run looking glass as root!");
@@ -4296,6 +4305,7 @@ int main(int argc, char * argv[])
     DEBUG_ERROR("Do not run looking glass as setuid!");
     return -1;
   }
+#endif
 
   lgInitProcessTitle(argc, &argv);
   core_setTitle(NULL);
@@ -4311,7 +4321,6 @@ int main(int argc, char * argv[])
   config_init();
   lgTransport_setup();
   egl_dynProcsInit();
-  gl_dynProcsInit();
 
   if (!lgMessage_init())
     return -1;

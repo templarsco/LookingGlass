@@ -20,16 +20,40 @@
 
 #ifdef ENABLE_OPENGL
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include <stdint.h>
 #include "gl_dynprocs.h"
+
+#ifndef _WIN32
 #include <GL/glx.h>
+#endif
 
 struct GLDynProcs g_gl_dynProcs = {0};
 
 
+#ifdef _WIN32
+static void * getProcAddressGL(const char * name)
+{
+  // wglGetProcAddress needs a current context and some drivers return small
+  // values instead of NULL on failure; OpenGL 1.1 functions only come from
+  // opengl32.dll itself
+  void * func = (void *) wglGetProcAddress(name);
+  if ((uintptr_t) func <= 3 || func == (void *) -1)
+  {
+    HMODULE gl = GetModuleHandleW(L"opengl32.dll");
+    func = gl ? (void *) GetProcAddress(gl, name) : NULL;
+  }
+  return func;
+}
+#else
 static void * getProcAddressGL(const char * name)
 {
   return (void *) glXGetProcAddressARB((const GLubyte *) name);
 }
+#endif
 
 static void * getProcAddressGL2(const char * name, const char * backup)
 {
@@ -53,6 +77,8 @@ void gl_dynProcsInit(void)
   g_gl_dynProcs.glGenerateMipmap = getProcAddressGL("glGenerateMipmap");
   if (!g_gl_dynProcs.glGenerateMipmap)
     g_gl_dynProcs.glGenerateMipmap = getProcAddressGL("glGenerateMipmapEXT");
+
+  g_gl_dynProcs.glBlendEquation = getProcAddressGL2("glBlendEquation", "glBlendEquationEXT");
 };
 
 #endif

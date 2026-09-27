@@ -124,7 +124,7 @@ static LONG CALLBACK exception_filter(EXCEPTION_POINTERS * exc)
 
       if (SymFromAddr(hProcess, frame.AddrPC.Offset, &disp, symbol))
       {
-        IMAGEHLP_LINE line = { sizeof(IMAGEHLP_LINE), 0 };
+        IMAGEHLP_LINE line = { .SizeOfStruct = sizeof(IMAGEHLP_LINE) };
         DWORD lineDisp;
 
         if (SymGetLineFromAddr64(hProcess, frame.AddrPC.Offset, &lineDisp, &line))
@@ -180,3 +180,7 @@ void printAllThreadBacktraces(void)
 {
 }
 #endif
+
+void cleanupCrashHandler(void)
+{
+}

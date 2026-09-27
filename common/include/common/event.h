@@ -38,7 +38,7 @@ bool      lgResetEvent (LGEvent * handle);
 // for windows this is an event HANDLE
 LGEvent * lgWrapEvent(void * handle);
 
-// Posix specific, not implmented/possible in windows
+// ts is an absolute CLOCK_MONOTONIC time and the timeout is in nanoseconds
 bool lgWaitEventAbs(LGEvent * handle, struct timespec * ts);
 bool lgWaitEventNS (LGEvent * handle, unsigned int timeout);
 

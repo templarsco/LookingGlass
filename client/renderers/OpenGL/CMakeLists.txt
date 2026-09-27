@@ -1,10 +1,15 @@
 cmake_minimum_required(VERSION 3.10)
 project(renderer_Opengl LANGUAGES C CXX)
 
-find_package(PkgConfig)
-pkg_check_modules(RENDERER_OPENGL REQUIRED IMPORTED_TARGET
-  gl
-)
+if(WIN32)
+  set(RENDERER_OPENGL_LIBS opengl32)
+else()
+  find_package(PkgConfig)
+  pkg_check_modules(RENDERER_OPENGL REQUIRED IMPORTED_TARGET
+    gl
+  )
+  set(RENDERER_OPENGL_LIBS PkgConfig::RENDERER_OPENGL)
+endif()
 
 add_library(renderer_OpenGL STATIC
   opengl.c
@@ -13,7 +18,7 @@ add_library(renderer_OpenGL STATIC
 target_compile_definitions(renderer_OpenGL PRIVATE CIMGUI_DEFINE_ENUMS_AND_STRUCTS=1)
 
 target_link_libraries(renderer_OpenGL
-  PkgConfig::RENDERER_OPENGL
+  ${RENDERER_OPENGL_LIBS}
   lg_common
 
   lg_gui

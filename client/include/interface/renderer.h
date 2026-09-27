@@ -224,9 +224,15 @@ typedef struct LG_RendererInterop
   LG_RendererInteropType type;
   struct
   {
+#ifdef ENABLE_EGL
     EGLDisplay display;
     EGLConfig config;
     EGLContext shareContext;
+#else
+    void * display;
+    void * config;
+    void * shareContext;
+#endif
     bool dmaBufImport;
   }
   egl;

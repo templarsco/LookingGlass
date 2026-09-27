@@ -206,8 +206,9 @@ static bool syncKeyboardLEDsNL(void)
   if (!l_input.keyboardLEDsSyncEnabled ||
       !l_input.desiredKeyboardLEDsValid)
     return true;
+  // kept until an input binding becomes active, which syncs it then
   if (!l_input.active.ops)
-    return false;
+    return true;
   if (!l_input.active.ops->keyboardLEDs)
     return true;
 

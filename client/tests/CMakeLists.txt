@@ -279,10 +279,19 @@ endif()
 add_executable(displayserver-input-tests
   displayserver_input_test.c
   ../displayservers/Wayland/input_event.c
+  ../displayservers/Win32/input_event.c
+  ../displayservers/Win32/keymap.c
   ../displayservers/X11/input_event.c
+  ../src/kb.c
+)
+target_compile_definitions(displayserver-input-tests PRIVATE
+  CIMGUI_DEFINE_ENUMS_AND_STRUCTS=1
 )
 target_include_directories(displayserver-input-tests PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../displayservers"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src"
+  "${PROJECT_TOP}/repos/gui/cimgui"
+  "${PROJECT_TOP}/repos/gui/cimgui/imgui"
 )
 
 set(DISPLAYSERVER_INPUT_CASES
@@ -321,6 +330,31 @@ foreach(name IN ITEMS pointer-routing keyboard-routing held-keys)
     COMMAND displayserver-input-tests x11 ${name}
   )
   set_tests_properties(display-input-x11-${name} PROPERTIES
+    TIMEOUT 10
+  )
+endforeach()
+
+# Windows has no buttons past 7 and derives the modifiers from the held keys,
+# so it runs its own versions of pointer-buttons and keyboard-state
+foreach(name IN ITEMS
+    pointer-events
+    pointer-release
+    wheel-steps
+    relative-motion
+    keyboard-focus
+    keyboard-keys
+    side-buttons
+    pointer-leave
+    wheel-partial
+    raw-motion
+    modifier-state
+    key-filter
+    keymap
+  )
+  add_test(NAME display-input-win32-${name}
+    COMMAND displayserver-input-tests win32 ${name}
+  )
+  set_tests_properties(display-input-win32-${name} PROPERTIES
     TIMEOUT 10
   )
 endforeach()
