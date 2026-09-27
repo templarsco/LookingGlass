@@ -19,7 +19,10 @@
  */
 
 #include "Wayland/input_event.h"
+#include "Win32/input_event.h"
+#include "Win32/keymap.h"
 #include "X11/input_event.h"
+#include "kb.h"
 #include "test.h"
 
 #include <linux/input-event-codes.h>
@@ -32,6 +35,7 @@ enum Backend
 {
   BACKEND_WAYLAND,
   BACKEND_X11,
+  BACKEND_WIN32,
 };
 
 enum TraceType
@@ -173,6 +177,7 @@ struct Fixture
   {
     WaylandInput wayland;
     X11Input     x11;
+    Win32Input   win32;
   } input;
 };
 
@@ -280,6 +285,8 @@ static void initFixture(struct Fixture * fixture, enum Backend backend)
 
   if (backend == BACKEND_WAYLAND)
     wlInputInit(&fixture->input.wayland, &sink, &fixture->trace);
+  else if (backend == BACKEND_WIN32)
+    win32InputInit(&fixture->input.win32, &sink, &fixture->trace);
   else
     x11InputInit(&fixture->input.x11, &sink, &fixture->trace);
 }
@@ -449,6 +456,12 @@ static void pointerEnter(struct Fixture * fixture, bool mainSurface,
     if (wlInputPointerEnter(&fixture->input.wayland, mainSurface))
       wlInputPointerMotion(&fixture->input.wayland, x, y);
   }
+  else if (fixture->backend == BACKEND_WIN32)
+  {
+    // a Win32 window has no child surfaces
+    if (mainSurface)
+      win32InputPointerEnter(&fixture->input.win32, x, y);
+  }
   else
     x11InputPointerEnter(&fixture->input.x11, mainSurface, true, x, y);
 }
@@ -457,6 +470,11 @@ static void pointerLeave(struct Fixture * fixture, bool mainSurface)
 {
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputPointerLeave(&fixture->input.wayland, mainSurface);
+  else if (fixture->backend == BACKEND_WIN32)
+  {
+    if (mainSurface)
+      win32InputPointerLeave(&fixture->input.win32);
+  }
   else
     x11InputPointerLeave(&fixture->input.x11, mainSurface, true, false);
 }
@@ -465,6 +483,8 @@ static void pointerMotion(struct Fixture * fixture, double x, double y)
 {
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputPointerMotion(&fixture->input.wayland, x, y);
+  else if (fixture->backend == BACKEND_WIN32)
+    win32InputPointerMotion(&fixture->input.win32, x, y);
   else
     x11InputPointerMotion(&fixture->input.x11, x, y);
 }
@@ -474,6 +494,20 @@ static unsigned int nativeButton(enum Backend backend,
 {
   if (backend == BACKEND_X11)
     return button > 5 ? button + 2 : button;
+
+  if (backend == BACKEND_WIN32)
+  {
+    // Windows reports five buttons
+    switch (button)
+    {
+      case 1: return WIN32_BUTTON_LEFT;
+      case 2: return WIN32_BUTTON_MIDDLE;
+      case 3: return WIN32_BUTTON_RIGHT;
+      case 6: return WIN32_BUTTON_X1;
+      case 7: return WIN32_BUTTON_X2;
+    }
+    CHECK(!"Windows has no such button");
+  }
 
   static const unsigned int wayland[] =
   {
@@ -496,6 +530,9 @@ static void pointerButton(struct Fixture * fixture, unsigned int button,
   const unsigned int native = nativeButton(fixture->backend, button);
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputPointerButton(&fixture->input.wayland, native, pressed);
+  else if (fixture->backend == BACKEND_WIN32)
+    win32InputPointerButton(&fixture->input.win32,
+        (enum Win32InputButton)native, pressed);
   else
     x11InputPointerButton(&fixture->input.x11, native, pressed, false);
 }
@@ -504,6 +541,9 @@ static void unmappedButton(struct Fixture * fixture)
 {
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputPointerButton(&fixture->input.wayland, BTN_STYLUS, true);
+  else if (fixture->backend == BACKEND_WIN32)
+    win32InputPointerButton(&fixture->input.win32,
+        (enum Win32InputButton)(WIN32_BUTTON_X2 + 1), true);
   else
     x11InputPointerButton(&fixture->input.x11, 6, true, false);
 }
@@ -512,6 +552,9 @@ static void wheelStep(struct Fixture * fixture, bool down)
 {
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputPointerAxis(&fixture->input.wayland, true, down ? 15.0 : -15.0);
+  else if (fixture->backend == BACKEND_WIN32)
+    win32InputPointerWheel(&fixture->input.win32,
+        down ? -WIN32_INPUT_WHEEL_STEP : WIN32_INPUT_WHEEL_STEP);
   else
     x11InputPointerButton(&fixture->input.x11, down ? 5 : 4, true,
         false);
@@ -523,6 +566,12 @@ static void relativeMotion(struct Fixture * fixture, bool active,
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputRelativeMotion(&fixture->input.wayland, active,
         x, y, rawX, rawY);
+  else if (fixture->backend == BACKEND_WIN32)
+  {
+    // Windows raw input only reports the raw deltas
+    win32InputSetCaptured(&fixture->input.win32, active);
+    win32InputRelativeMotion(&fixture->input.win32, rawX, rawY);
+  }
   else
   {
     x11InputSetPointerGrabbed(&fixture->input.x11, active);
@@ -535,6 +584,15 @@ static void keyboardEnter(struct Fixture * fixture, bool mainSurface,
 {
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputKeyboardEnter(&fixture->input.wayland, mainSurface, keys, count);
+  else if (fixture->backend == BACKEND_WIN32)
+  {
+    int held[8];
+    CHECK(count <= ARRAY_LENGTH(held));
+    for (size_t i = 0; i < count; ++i)
+      held[i] = (int)keys[i];
+    if (mainSurface)
+      win32InputFocus(&fixture->input.win32, true, held, count);
+  }
   else if (mainSurface)
     x11InputFocus(&fixture->input.x11, true, keys, count);
 }
@@ -543,6 +601,11 @@ static void keyboardLeave(struct Fixture * fixture, bool mainSurface)
 {
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputKeyboardLeave(&fixture->input.wayland, mainSurface);
+  else if (fixture->backend == BACKEND_WIN32)
+  {
+    if (mainSurface)
+      win32InputFocus(&fixture->input.win32, false, NULL, 0);
+  }
   else if (mainSurface)
     x11InputFocus(&fixture->input.x11, false, NULL, 0);
 }
@@ -552,6 +615,13 @@ static void keyboardKey(struct Fixture * fixture, unsigned int key,
 {
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputKeyboardKey(&fixture->input.wayland, key, pressed, text);
+  else if (fixture->backend == BACKEND_WIN32)
+  {
+    // the text arrives in a separate WM_CHAR after the key press
+    const bool accepted = win32InputKey(&fixture->input.win32, key, pressed);
+    if (accepted && pressed)
+      win32InputText(&fixture->input.win32, text);
+  }
   else
   {
     const bool accepted = x11InputKeyboardKey(
@@ -565,6 +635,9 @@ static void keyboardState(struct Fixture * fixture,
     bool ctrl, bool shift, bool alt, bool super,
     bool numLock, bool capsLock, bool scrollLock)
 {
+  // Windows derives the modifiers from the held keys, see modifier-state
+  CHECK(fixture->backend != BACKEND_WIN32);
+
   if (fixture->backend == BACKEND_WAYLAND)
     wlInputKeyboardState(&fixture->input.wayland,
         ctrl, shift, alt, super, numLock, capsLock, scrollLock);
@@ -732,10 +805,13 @@ static void testRelativeMotion(enum Backend backend)
   relativeMotion(&fixture, true, 1.0, 2.0, 3.0, 4.0);
   relativeMotion(&fixture, true, 1.0, 2.0, 3.0, 4.0);
 
-  static const struct Trace expected[] =
+  // Windows has no accelerated deltas and reports the raw ones for both
+  const double x = backend == BACKEND_WIN32 ? 3.0 : 1.0;
+  const double y = backend == BACKEND_WIN32 ? 4.0 : 2.0;
+  const struct Trace expected[] =
   {
-    RELATIVE(1.0, 2.0, 3.0, 4.0),
-    RELATIVE(1.0, 2.0, 3.0, 4.0),
+    RELATIVE(x, y, 3.0, 4.0),
+    RELATIVE(x, y, 3.0, 4.0),
   };
   expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
 }
@@ -922,6 +998,370 @@ static void testKeyboardState(enum Backend backend)
   expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
 }
 
+static void testWin32Buttons(enum Backend backend)
+{
+  CHECK(backend == BACKEND_WIN32);
+
+  struct Fixture fixture;
+  initFixture(&fixture, backend);
+  Win32Input * input = &fixture.input.win32;
+
+  // a press needs the pointer in the window
+  pointerButton(&fixture, 1, true);
+  CHECK(fixture.trace.count == 0);
+  activatePointer(&fixture);
+
+  static const unsigned int buttons[] = { 1, 2, 3, 6, 7 };
+  for (size_t i = 0; i < ARRAY_LENGTH(buttons); ++i)
+  {
+    pointerButton(&fixture, buttons[i], true);
+    pointerButton(&fixture, buttons[i], false);
+  }
+  unmappedButton(&fixture);
+
+  // presses of held buttons and releases of released ones are dropped
+  pointerButton(&fixture, 1, true);
+  pointerButton(&fixture, 1, true);
+  pointerButton(&fixture, 6, true);
+  win32InputReleaseButtons(input);
+  win32InputReleaseButtons(input);
+  pointerButton(&fixture, 1, false);
+
+  static const struct Trace expected[] =
+  {
+    BUTTON(1, true), BUTTON(1, false),
+    BUTTON(2, true), BUTTON(2, false),
+    BUTTON(3, true), BUTTON(3, false),
+    BUTTON(6, true), BUTTON(6, false),
+    BUTTON(7, true), BUTTON(7, false),
+    BUTTON(1, true),
+    BUTTON(6, true),
+    BUTTON(1, false),
+    BUTTON(6, false),
+  };
+  expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
+}
+
+static void testWin32PointerLeave(enum Backend backend)
+{
+  CHECK(backend == BACKEND_WIN32);
+
+  struct Fixture fixture;
+  initFixture(&fixture, backend);
+  Win32Input * input = &fixture.input.win32;
+  activatePointer(&fixture);
+
+  // a drag keeps the pointer until the button is released
+  pointerButton(&fixture, 1, true);
+  CHECK(!win32InputPointerLeave(input));
+  pointerMotion(&fixture, -5.0, 12.0);
+  pointerButton(&fixture, 1, false);
+
+  // coming back before the release cancels the leave
+  CHECK(win32InputPointerEnter(input, 10.0, 20.0));
+  pointerButton(&fixture, 3, true);
+  CHECK(!win32InputPointerLeave(input));
+  CHECK(!win32InputPointerEnter(input, 11.0, 21.0));
+  pointerButton(&fixture, 3, false);
+
+  // a captured pointer does not leave
+  win32InputSetCaptured(input, true);
+  CHECK(!win32InputPointerLeave(input));
+  win32InputSetCaptured(input, false);
+  CHECK(win32InputPointerLeave(input));
+  CHECK(!win32InputPointerLeave(input));
+
+  static const struct Trace expected[] =
+  {
+    BUTTON(1, true),
+    POSITION(-5.0, 12.0),
+    BUTTON(1, false),
+    ENTER(false),
+    ENTER(true),
+    POSITION(10.0, 20.0),
+    BUTTON(3, true),
+    BUTTON(3, false),
+    ENTER(false),
+  };
+  expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
+}
+
+static void testWin32WheelPartial(enum Backend backend)
+{
+  CHECK(backend == BACKEND_WIN32);
+
+  struct Fixture fixture;
+  initFixture(&fixture, backend);
+  Win32Input * input = &fixture.input.win32;
+
+  // the wheel needs the pointer in the window
+  win32InputPointerWheel(input, -WIN32_INPUT_WHEEL_STEP);
+  CHECK(fixture.trace.count == 0);
+  activatePointer(&fixture);
+
+  // high resolution wheels report fractions of a notch
+  for (int i = 0; i < 4; ++i)
+    win32InputPointerWheel(input, -WIN32_INPUT_WHEEL_STEP / 4);
+  win32InputPointerWheel(input, 0);
+  win32InputPointerWheel(input, WIN32_INPUT_WHEEL_STEP * 3);
+
+  static const struct Trace expected[] =
+  {
+    WHEEL(0.25),
+    WHEEL(0.25),
+    BUTTON(5, true), BUTTON(5, false),
+    WHEEL(0.25),
+    WHEEL(0.25),
+    BUTTON(4, true), BUTTON(4, false),
+    BUTTON(4, true), BUTTON(4, false),
+    BUTTON(4, true), BUTTON(4, false),
+    WHEEL(-3.0),
+  };
+  expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
+}
+
+static void testWin32RawMotion(enum Backend backend)
+{
+  CHECK(backend == BACKEND_WIN32);
+
+  struct Fixture fixture;
+  initFixture(&fixture, backend);
+  Win32Input * input = &fixture.input.win32;
+
+  // raw input also reports the mouse when the pointer is elsewhere
+  win32InputSetCaptured(input, true);
+  CHECK(win32InputIsCaptured(input));
+  win32InputRelativeMotion(input, 1.0, 2.0);
+  CHECK(fixture.trace.count == 0);
+
+  activatePointer(&fixture);
+  win32InputRelativeMotion(input, 3.0, -4.0);
+  win32InputSetCaptured(input, false);
+  CHECK(!win32InputIsCaptured(input));
+  win32InputRelativeMotion(input, 5.0, 6.0);
+
+  static const struct Trace expected[] =
+  {
+    RELATIVE(3.0, -4.0, 3.0, -4.0),
+  };
+  expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
+}
+
+static void testWin32KeyboardState(enum Backend backend)
+{
+  CHECK(backend == BACKEND_WIN32);
+
+  struct Fixture fixture;
+  initFixture(&fixture, backend);
+  Win32Input * input = &fixture.input.win32;
+  keyboardEnter(&fixture, true, NULL, 0);
+  clearTrace(&fixture);
+
+  static const struct
+  {
+    unsigned int key;
+    bool         ctrl;
+    bool         shift;
+    bool         alt;
+    bool         super;
+  }
+  modifiers[] =
+  {
+    { KEY_LEFTCTRL  , true , false, false, false },
+    { KEY_RIGHTCTRL , true , false, false, false },
+    { KEY_LEFTSHIFT , false, true , false, false },
+    { KEY_RIGHTSHIFT, false, true , false, false },
+    { KEY_LEFTALT   , false, false, true , false },
+    { KEY_RIGHTALT  , false, false, true , false },
+    { KEY_LEFTMETA  , false, false, false, true  },
+    { KEY_RIGHTMETA , false, false, false, true  },
+  };
+
+  // the modifiers come from the held keys and the LEDs from the caller
+  for (size_t i = 0; i < ARRAY_LENGTH(modifiers); ++i)
+  {
+    const bool num    = (i & 1) != 0;
+    const bool caps   = (i & 2) != 0;
+    const bool scroll = (i & 4) != 0;
+
+    keyboardKey(&fixture, modifiers[i].key, true, NULL);
+    win32InputKeyboardState(input, num, caps, scroll);
+    keyboardKey(&fixture, modifiers[i].key, false, NULL);
+
+    const struct Trace expected[] =
+    {
+      KEY(modifiers[i].key, true),
+      MODIFIERS(modifiers[i].ctrl, modifiers[i].shift, modifiers[i].alt,
+          modifiers[i].super),
+      LEDS(num, caps, scroll),
+      KEY(modifiers[i].key, false),
+    };
+    expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
+    clearTrace(&fixture);
+  }
+
+  // losing focus forgets the held modifiers
+  keyboardKey(&fixture, KEY_RIGHTCTRL, true, NULL);
+  keyboardKey(&fixture, KEY_LEFTSHIFT, true, NULL);
+  win32InputKeyboardState(input, true, true, true);
+  keyboardLeave(&fixture, true);
+  win32InputKeyboardState(input, false, false, false);
+
+  static const struct Trace expected[] =
+  {
+    KEY(KEY_RIGHTCTRL, true),
+    KEY(KEY_LEFTSHIFT, true),
+    MODIFIERS(true, true, false, false),
+    LEDS(true, true, true),
+    FOCUS(false),
+    MODIFIERS(false, false, false, false),
+    LEDS(false, false, false),
+  };
+  expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
+}
+
+static void testWin32KeyFilter(enum Backend backend)
+{
+  CHECK(backend == BACKEND_WIN32);
+
+  struct Fixture fixture;
+  initFixture(&fixture, backend);
+  Win32Input * input = &fixture.input.win32;
+
+  static const int held[] = { KEY_LEFTSHIFT, KEY_A };
+  CHECK(win32InputFocus(input, true, held, ARRAY_LENGTH(held)));
+  CHECK(!win32InputFocus(input, true, NULL, 0));
+  CHECK(win32InputKeyHeld(input, KEY_LEFTSHIFT));
+  CHECK(win32InputKeyHeld(input, KEY_A));
+
+  // Windows repeats the press of a held key
+  CHECK(!win32InputKey(input, KEY_A, true));
+  CHECK(win32InputKey(input, KEY_A, false));
+  CHECK(!win32InputKey(input, KEY_A, false));
+
+  CHECK(!win32InputKey(input, 0, true));
+  CHECK(!win32InputKey(input, -1, true));
+  CHECK(!win32InputKey(input, KEY_MAX, true));
+  CHECK(!win32InputKeyHeld(input, 0));
+  CHECK(!win32InputKeyHeld(input, KEY_MAX));
+
+  // the last key code still fits in the bitmap
+  CHECK(win32InputKey(input, KEY_MAX - 1, true));
+  CHECK(win32InputKeyHeld(input, KEY_MAX - 1));
+
+  // the core releases the held keys in the guest when focus is lost
+  CHECK(win32InputFocus(input, false, NULL, 0));
+  CHECK(!win32InputFocus(input, false, NULL, 0));
+  CHECK(!win32InputKeyHeld(input, KEY_LEFTSHIFT));
+  CHECK(!win32InputKey(input, KEY_LEFTSHIFT, false));
+
+  CHECK(win32InputFocus(input, true, NULL, 0));
+  CHECK(!win32InputKey(input, KEY_LEFTSHIFT, false));
+
+  static const struct Trace expected[] =
+  {
+    FOCUS(true),
+    KEY(KEY_LEFTSHIFT, true),
+    KEY(KEY_A, true),
+    KEY(KEY_A, false),
+    KEY(KEY_MAX - 1, true),
+    FOCUS(false),
+    FOCUS(true),
+  };
+  expectTrace(&fixture, expected, ARRAY_LENGTH(expected));
+}
+
+static void testWin32Keymap(enum Backend backend)
+{
+  CHECK(backend == BACKEND_WIN32);
+  win32KeymapInit();
+
+  // a virtual key of 0 stands for any key without special handling
+  static const struct
+  {
+    unsigned int vk;
+    unsigned int scanCode;
+    bool         extended;
+    int          key;
+  }
+  events[] =
+  {
+    { 0, 0x1E, false, KEY_A          },
+    { 0, 0x1C, false, KEY_ENTER      },
+    { 0, 0x1C, true , KEY_KPENTER    },
+    { 0, 0x4B, true , KEY_LEFT       },
+    { 0, 0x4B, false, KEY_KP4        },
+    { 0, 0x1D, false, KEY_LEFTCTRL   },
+    { 0, 0x1D, true , KEY_RIGHTCTRL  },
+    { 0, 0x38, true , KEY_RIGHTALT   },
+    { 0, 0x5B, true , KEY_LEFTMETA   },
+    { 0, 0x5C, true , KEY_RIGHTMETA  },
+    { 0, 0x5D, true , KEY_COMPOSE    },
+    { 0, 0x56, false, KEY_102ND      },
+    { 0, 0x73, false, KEY_RO         },
+    { 0, 0x7E, false, KEY_KPCOMMA    },
+    { 0, 0x46, false, KEY_SCROLLLOCK },
+
+    // Pause arrives as the plain 0x45 of Num Lock, Num Lock as E0 45
+    { WIN32_KEYMAP_VK_PAUSE  , 0x45, false, KEY_PAUSE   },
+    { WIN32_KEYMAP_VK_NUMLOCK, 0x45, true , KEY_NUMLOCK },
+
+    // Ctrl+Break
+    { 0, 0x46, true , KEY_PAUSE },
+
+    // Print Screen, and Alt+Print Screen
+    { 0, 0x37, true , KEY_SYSRQ },
+    { 0, 0x54, false, KEY_SYSRQ },
+
+    { 0, 0x00 , false, 0 },
+    { 0, 0x100, false, 0 },
+    { 0, 0x01 , true , 0 },
+  };
+
+  for (size_t i = 0; i < ARRAY_LENGTH(events); ++i)
+  {
+    const int key = win32KeymapToLinux(events[i].vk, events[i].scanCode,
+        events[i].extended);
+    if (key != events[i].key)
+    {
+      fprintf(stderr, "vk 0x%02x scan code %s%02x is key %d, expected %d\n",
+          events[i].vk, events[i].extended ? "E0 " : "",
+          events[i].scanCode, key, events[i].key);
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  unsigned int scanCode;
+  bool extended;
+  CHECK(!win32KeymapFromLinux(0, &scanCode, &extended));
+  CHECK(!win32KeymapFromLinux(-1, &scanCode, &extended));
+  CHECK(!win32KeymapFromLinux(KEY_MAX, &scanCode, &extended));
+  CHECK(!win32KeymapFromLinux(KEY_MACRO1, &scanCode, &extended));
+
+  CHECK(win32KeymapFromLinux(KEY_RIGHTCTRL, &scanCode, &extended));
+  CHECK(scanCode == 0x1D && extended);
+
+  /* every key with a scan code maps back to itself, except Print Screen,
+   * which comes back as the KEY_SYSRQ that evdev reports for it */
+  int mapped = 0;
+  for (int key = 1; key < KEY_MAX; ++key)
+  {
+    if (!win32KeymapFromLinux(key, &scanCode, &extended))
+      continue;
+
+    ++mapped;
+    const int expected = key == KEY_PRINT ? KEY_SYSRQ : key;
+    const int actual   = win32KeymapToLinux(0, scanCode, extended);
+    if (actual != expected)
+    {
+      fprintf(stderr, "key %d has scan code %s%02x, which maps to %d\n",
+          key, extended ? "E0 " : "", scanCode, actual);
+      exit(EXIT_FAILURE);
+    }
+  }
+  CHECK(mapped > 100);
+}
+
 struct Test
 {
   const char * name;
@@ -943,6 +1383,13 @@ static const struct Test tests[] =
   { "pointer-routing" , testX11PointerRouting  },
   { "keyboard-routing", testX11KeyboardRouting },
   { "held-keys"       , testX11HeldKeys        },
+  { "side-buttons"    , testWin32Buttons       },
+  { "pointer-leave"   , testWin32PointerLeave  },
+  { "wheel-partial"   , testWin32WheelPartial  },
+  { "raw-motion"      , testWin32RawMotion     },
+  { "modifier-state"  , testWin32KeyboardState },
+  { "key-filter"      , testWin32KeyFilter     },
+  { "keymap"          , testWin32Keymap        },
 };
 
 static bool parseBackend(const char * name, enum Backend * backend)
@@ -959,6 +1406,12 @@ static bool parseBackend(const char * name, enum Backend * backend)
     return true;
   }
 
+  if (strcmp(name, "win32") == 0)
+  {
+    *backend = BACKEND_WIN32;
+    return true;
+  }
+
   return false;
 }
 
@@ -966,7 +1419,7 @@ int main(int argc, char ** argv)
 {
   if (argc != 3)
   {
-    fprintf(stderr, "usage: %s <wayland|x11> <case>\n", argv[0]);
+    fprintf(stderr, "usage: %s <wayland|x11|win32> <case>\n", argv[0]);
     return EXIT_FAILURE;
   }
 
