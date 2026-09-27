@@ -48,4 +48,13 @@
 #define _STR(x) #x
 #define STR(x) _STR(x)
 
+// MinGW format checks must match the printf implementation that stdio.h
+// selected (MSVCRT, UCRT or the MinGW ANSI one)
+#if defined(__MINGW32__)
+#include <stdio.h>
+#define LG_PRINTF_FORMAT __MINGW_PRINTF_FORMAT
+#else
+#define LG_PRINTF_FORMAT printf
+#endif
+
 #endif

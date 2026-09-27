@@ -29,8 +29,20 @@ struct LGTimer
   LGTimerFn   fn;
   void      * udata;
   UINT_PTR    handle;
+  HANDLE      queueTimer;
   bool        running;
 };
+
+// used when there is no MessageHWND, the callback runs on the thread pool
+static VOID CALLBACK QueueTimerProc(PVOID param, BOOLEAN fired)
+{
+  LGTimer * timer = (LGTimer *)param;
+  if (!__atomic_load_n(&timer->running, __ATOMIC_ACQUIRE))
+    return;
+
+  if (!timer->fn(timer->udata))
+    __atomic_store_n(&timer->running, false, __ATOMIC_RELEASE);
+}
 
 static void TimerProc(HWND Arg1, UINT Arg2, UINT_PTR Arg3, DWORD Arg4)
 {
@@ -52,10 +64,26 @@ bool lgCreateTimer(const unsigned int intervalMS, LGTimerFn fn,
     return false;
   }
 
-  ret->fn      = fn;
-  ret->udata   = udata;
-  ret->running = true;
-  ret->handle  = SetTimer(MessageHWND, (UINT_PTR)ret, intervalMS, TimerProc);
+  ret->fn         = fn;
+  ret->udata      = udata;
+  ret->running    = true;
+  ret->handle     = 0;
+  ret->queueTimer = NULL;
+
+  /* SetTimer needs a window owned by the calling thread and a message loop,
+   * applications without MessageHWND get a thread pool timer instead */
+  if (!MessageHWND)
+  {
+    if (!CreateTimerQueueTimer(&ret->queueTimer, NULL, QueueTimerProc, ret,
+          intervalMS, intervalMS, WT_EXECUTEDEFAULT))
+    {
+      DEBUG_ERROR("failed to create the timer");
+      free(ret);
+      return false;
+    }
+  }
+  else
+    ret->handle = SetTimer(MessageHWND, (UINT_PTR)ret, intervalMS, TimerProc);
 
   *result = ret;
   return true;
@@ -63,7 +91,13 @@ bool lgCreateTimer(const unsigned int intervalMS, LGTimerFn fn,
 
 void lgTimerDestroy(LGTimer * timer)
 {
-  if (timer->running)
+  if (timer->queueTimer)
+  {
+    // waits for a running callback to finish
+    if (!DeleteTimerQueueTimer(NULL, timer->queueTimer, INVALID_HANDLE_VALUE))
+      DEBUG_ERROR("failed to destroy the timer");
+  }
+  else if (timer->running)
   {
     if (MessageHWND && !KillTimer(MessageHWND, timer->handle))
       DEBUG_ERROR("failed to destroy the timer");

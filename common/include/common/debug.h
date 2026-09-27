@@ -72,23 +72,23 @@ void printBacktrace(void);
 
 void debug_level(enum DebugLevel level, const char * file, unsigned int line,
     const char * function, const char * format, ...)
-  __attribute__((format (printf, 5, 6)));
+  __attribute__((format (LG_PRINTF_FORMAT, 5, 6)));
 
 void debug_levelML(enum DebugLevel level, const char * file, unsigned int line,
     const char * function, const char * format, ...)
-  __attribute__((format (printf, 5, 6)));
+  __attribute__((format (LG_PRINTF_FORMAT, 5, 6)));
 
 void debug_info(const char * file, unsigned int line, const char * function,
-    const char * format, ...) __attribute__((format (printf, 4, 5)));
+    const char * format, ...) __attribute__((format (LG_PRINTF_FORMAT, 4, 5)));
 
 void debug_warn(const char * file, unsigned int line, const char * function,
-    const char * format, ...) __attribute__((format (printf, 4, 5)));
+    const char * format, ...) __attribute__((format (LG_PRINTF_FORMAT, 4, 5)));
 
 void debug_error(const char * file, unsigned int line, const char * function,
-    const char * format, ...) __attribute__((format (printf, 4, 5)));
+    const char * format, ...) __attribute__((format (LG_PRINTF_FORMAT, 4, 5)));
 
 void debug_trace(const char * file, unsigned int line, const char * function,
-    const char * format, ...) __attribute__((format (printf, 4, 5)));
+    const char * format, ...) __attribute__((format (LG_PRINTF_FORMAT, 4, 5)));
 
 #define STRIPPATH(s) ( \
   sizeof(s) >  2 && (s)[sizeof(s)- 3] == DIRECTORY_SEPARATOR ? (s) + sizeof(s) -  2 : \
