@@ -678,6 +678,50 @@ bool opengl_render(LG_Renderer * renderer, LG_RendererRotate rotate,
   return true;
 }
 
+static bool opengl_capture(LG_Renderer * renderer,
+    LG_RendererCapture * capture)
+{
+  struct Inst * this = UPCAST(struct Inst, renderer);
+  if (!capture || this->window.x <= 0 || this->window.y <= 0)
+    return false;
+
+  const size_t width  = this->window.x;
+  const size_t height = this->window.y;
+  if (width > SIZE_MAX / 4 / height)
+    return false;
+
+  const size_t stride   = width * 4;
+  const size_t dataSize = stride * height;
+  void * data = malloc(dataSize);
+  if (!data)
+    return false;
+
+  while (glGetError() != GL_NO_ERROR)
+    ;
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+  glReadBuffer(GL_BACK);
+  glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, data);
+  if (glGetError() != GL_NO_ERROR)
+  {
+    free(data);
+    DEBUG_ERROR("Failed to read the composed OpenGL framebuffer");
+    return false;
+  }
+
+  *capture = (LG_RendererCapture) {
+    .width    = width,
+    .height   = height,
+    .stride   = stride,
+    .dataSize = dataSize,
+    .format   = LG_CAPTURE_RGBA8,
+    .hdr      = this->format.hdr,
+    .hdrPQ    = this->format.hdrPQ,
+    .data     = data,
+  };
+  return true;
+}
+
 static void * opengl_createTexture(LG_Renderer * renderer,
   int width, int height, uint8_t * data)
 {
@@ -900,6 +944,7 @@ const LG_RendererOps LGR_OpenGL =
   .onFrame             = opengl_onFrame,
   .renderStartup       = opengl_renderStartup,
   .render              = opengl_render,
+  .capture             = opengl_capture,
   .createTexture       = opengl_createTexture,
   .freeTexture         = opengl_freeTexture,
 
