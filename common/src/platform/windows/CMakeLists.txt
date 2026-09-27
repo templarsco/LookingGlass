@@ -41,12 +41,15 @@ add_library(lg_common_platform_code STATIC
   cpuinfo.c
   display.c
   proctitle.c
+  paths.c
 )
 
 target_link_libraries(lg_common_platform_code
   lg_common
   setupapi
   ntdll
+  shell32
+  ole32
 )
 
 if (ENABLE_BACKTRACE)
