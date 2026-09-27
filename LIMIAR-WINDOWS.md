@@ -11,13 +11,18 @@ Upstream starting revision:
 The `master` branch preserves the upstream baseline. Limiar development is
 on `limiar/windows-client`. Upstream licenses, copyright notices and
 submodule origins remain intact. This component is separate from Limiar's
-MIT/Apache-licensed launcher.
+MIT/Apache-licensed launcher. The Windows client build and its tests live
+in [windows-client](windows-client/README.md).
 
 ## Implementation Sequence
 
 1. Build the shared protocol and applicable common Windows code with pinned
    dependencies. Preserve Linux builds. Do not assume that B7 and current
    IDD/LGProtocol components are wire-compatible.
+   Status, September 27, 2026: LGProtocol, LGMP and `common` build for the
+   Windows client with MinGW-w64, cross and native. A bounded KVMFR frame
+   loopback test runs in CI on Windows and Linux. No window, local endpoint
+   or guest is involved yet.
 2. Add a Win32 display/input implementation for the existing client
    abstraction: DPI, resize, focus, cursor capture/release, relative mouse,
    keyboard state and disconnect recovery.
@@ -31,6 +36,9 @@ MIT/Apache-licensed launcher.
 5. Integrate the QEMU transport/guest device and the compatible Windows
    capture component. GPU delivery is a separate prerequisite owned by
    Limiar's VM backend, not something the viewer creates.
+   Limiar selected native Hyper-V with OpenHCL on September 25, 2026, after
+   this sequence was written. IVSHMEM is a QEMU device, so the guest-to-host
+   transport for that runtime is still an open design decision.
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.
