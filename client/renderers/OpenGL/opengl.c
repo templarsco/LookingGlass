@@ -21,11 +21,14 @@
 #include "interface/renderer.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 #include <malloc.h>
 #include <math.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <GL/gl.h>
 
 #include "cimgui.h"
@@ -35,6 +38,7 @@
 #include "common/option.h"
 #include "common/framebuffer.h"
 #include "common/locking.h"
+#include "common/sysinfo.h"
 #include "gl_dynprocs.h"
 #include "util.h"
 
@@ -195,6 +199,25 @@ static bool drawFrame(struct Inst * this,
     LG_RendererFrameToken * consumedFrameToken);
 static void drawMouse(struct Inst * this);
 
+// GL_AMD_pinned_memory needs page aligned buffers
+static void * pinnedAlloc(size_t align, size_t size)
+{
+#ifdef _WIN32
+  return _aligned_malloc(size, align);
+#else
+  return aligned_alloc(align, size);
+#endif
+}
+
+static void pinnedFree(void * ptr)
+{
+#ifdef _WIN32
+  _aligned_free(ptr);
+#else
+  free(ptr);
+#endif
+}
+
 static bool swSurfaceEnsureBuffer(struct Inst * this, size_t size)
 {
   if (size <= this->swSurfaceBufferSize)
@@ -257,7 +280,7 @@ bool opengl_create(LG_Renderer ** renderer, const LG_RendererParams params,
   struct Inst * this = calloc(1, sizeof(*this));
   if (!this)
   {
-    DEBUG_INFO("Failed to allocate %lu bytes", sizeof(*this));
+    DEBUG_INFO("Failed to allocate %zu bytes", sizeof(*this));
     return false;
   }
   *renderer = &this->base;
@@ -521,6 +544,9 @@ bool opengl_renderStartup(LG_Renderer * renderer, bool useDMA)
 
   app_glMakeCurrent(this->glContext);
 
+  // WGL only resolves entry points once a context is current
+  gl_dynProcsInit();
+
   DEBUG_INFO("Vendor  : %s", glGetString(GL_VENDOR  ));
   DEBUG_INFO("Renderer: %s", glGetString(GL_RENDERER));
   DEBUG_INFO("Version : %s", glGetString(GL_VERSION ));
@@ -537,9 +563,15 @@ bool opengl_renderStartup(LG_Renderer * renderer, bool useDMA)
       DEBUG_INFO("GL_AMD_pinned_memory is available but not in use");
   }
 
+  // GL_MAJOR_VERSION needs OpenGL 3.0, so read the version string instead,
+  // which also works on the OpenGL 1.1 software renderer Windows falls back to
   GLint maj, min;
-  glGetIntegerv(GL_MAJOR_VERSION, &maj);
-  glGetIntegerv(GL_MINOR_VERSION, &min);
+  const char * version = (const char *)glGetString(GL_VERSION);
+  if (!version || sscanf(version, "%d.%d", &maj, &min) != 2)
+  {
+    DEBUG_ERROR("Unable to parse the OpenGL version");
+    return false;
+  }
 
   if ((maj < 3 || (maj == 3 && min < 2)) && !util_hasGLExt(exts, "GL_ARB_sync"))
   {
@@ -565,7 +597,8 @@ bool opengl_renderStartup(LG_Renderer * renderer, bool useDMA)
   glEnable(GL_TEXTURE_2D);
   glEnable(GL_COLOR_MATERIAL);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glBlendEquation(GL_FUNC_ADD);
+  if (g_gl_dynProcs.glBlendEquation)
+    g_gl_dynProcs.glBlendEquation(GL_FUNC_ADD);
   glEnable(GL_MULTISAMPLE);
 
   // generate lists for drawing
@@ -993,10 +1026,10 @@ static enum ConfigStatus configure(struct Inst * this)
 
   if (this->amdPinnedMemSupport)
   {
-    const int pagesize = getpagesize();
+    const long pagesize = sysinfo_getPageSize();
     for(int i = 0; i < BUFFER_COUNT; ++i)
     {
-      this->texPixels[i] = aligned_alloc(pagesize,
+      this->texPixels[i] = pinnedAlloc(pagesize,
           ALIGN_TO(this->texSize, pagesize));
       if (!this->texPixels[i])
       {
@@ -1134,7 +1167,7 @@ static void deconfigure(struct Inst * this)
     {
       if (this->texPixels[i])
       {
-        free(this->texPixels[i]);
+        pinnedFree(this->texPixels[i]);
         this->texPixels[i] = NULL;
       }
     }
@@ -1455,7 +1488,7 @@ static bool drawFrame(struct Inst * this,
       "width: %u, "
       "height: %u, "
       "vboFormat: %x, "
-      "texSize: %lu",
+      "texSize: %zu",
       this->texWIndex,
       this->format.frameWidth,
       this->format.frameHeight,

@@ -19,10 +19,16 @@ function(add_transport name)
 endfunction()
 
 # Add/remove transports here!
-add_transport(LGMP)
-add_transport(SPICE)
-if(ENABLE_TESTS)
+if(WIN32)
+  # LGMP needs a Windows shared memory endpoint and SPICE a Winsock port of
+  # PureSpice, so Windows only has the synthetic test source for now
   add_transport(Test)
+else()
+  add_transport(LGMP)
+  add_transport(SPICE)
+  if(ENABLE_TESTS)
+    add_transport(Test)
+  endif()
 endif()
 
 list(REMOVE_AT TRANSPORTS      0)

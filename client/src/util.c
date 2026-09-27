@@ -29,6 +29,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+
+// Windows resolves UI fonts with DirectWrite (platform/Windows/uifont.c)
+#ifndef _WIN32
 #include <fontconfig/fontconfig.h>
 
 struct UIFontFace
@@ -276,6 +279,7 @@ static ImFont * uiFontAddSize(ImFontAtlas * atlas, float size)
 
   return result;
 }
+#endif
 
 bool util_fileGetContents(const char * filename, char ** buffer, size_t * length)
 {
@@ -470,6 +474,7 @@ bool util_hasGLExt(const char * exts, const char * ext)
   return str_containsValue(exts, ' ', ext);
 }
 
+#ifndef _WIN32
 bool util_initUIFonts(void)
 {
   if (FontConfig)
@@ -646,3 +651,4 @@ void util_freeUIFonts(void)
   FontConfig = NULL;
   FcFini();
 }
+#endif

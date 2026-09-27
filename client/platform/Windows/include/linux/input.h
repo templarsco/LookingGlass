@@ -18,34 +18,17 @@
  * Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
-#ifndef _H_LG_GL_DYNPROCS_
-#define _H_LG_GL_DYNPROCS_
-#ifdef ENABLE_OPENGL
+#ifndef _H_LG_WINDOWS_LINUX_INPUT_
+#define _H_LG_WINDOWS_LINUX_INPUT_
 
-#include <GL/gl.h>
-#include <GL/glext.h>
+// The client uses the Linux evdev key and button codes as its key space.
+// Windows only needs their definitions, not the evdev structures.
 
-struct GLDynProcs
-{
-  PFNGLGENBUFFERSPROC     glGenBuffers;
-  PFNGLBINDBUFFERPROC     glBindBuffer;
-  PFNGLBUFFERDATAPROC     glBufferData;
-  PFNGLBUFFERSUBDATAPROC  glBufferSubData;
-  PFNGLDELETEBUFFERSPROC  glDeleteBuffers;
-  PFNGLISSYNCPROC         glIsSync;
-  PFNGLFENCESYNCPROC      glFenceSync;
-  PFNGLCLIENTWAITSYNCPROC glClientWaitSync;
-  PFNGLDELETESYNCPROC     glDeleteSync;
-  PFNGLGENERATEMIPMAPPROC glGenerateMipmap;
-  PFNGLBLENDEQUATIONPROC  glBlendEquation;
-};
+// winuser.h defines SW_MAX for ShowWindow, keep that one in either order
+#pragma push_macro("SW_MAX")
+#undef SW_MAX
+#include "linux/input-event-codes.h"
+#undef SW_MAX
+#pragma pop_macro("SW_MAX")
 
-extern struct GLDynProcs g_gl_dynProcs;
-
-void gl_dynProcsInit(void);
-
-#else
-  #define gl_dynProcsInit(...)
 #endif
-
-#endif // _H_LG_GL_DYNPROCS_
