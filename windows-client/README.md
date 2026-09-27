@@ -88,6 +88,25 @@ and reconnects were checked by hand under Wine with Xvfb, not by an
 automated test. Wine on Xvfb injects Scroll Lock state changes, so pick
 another escape key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
 
+### Releases
+
+[windows-client-release](../.github/workflows/windows-client-release.yml)
+publishes the client as a GitHub pre-release. Run it from the Actions tab
+with a new tag such as `limiar-windows-v0.1.0`, or push a tag with that
+prefix. It cross-compiles the client, packages it with
+[package.py](package.py), runs the smoke test on the packaged executable on
+a Windows runner, and only then publishes:
+
+- `looking-glass-client-<version>-windows-x64.zip`: the executable, the
+  README from [release/README.md](release/README.md), the GPL and the
+  licenses of the code built into the executable.
+- `looking-glass-<version>-source.tar.gz`: the complete source of the
+  build, including every submodule.
+- `SHA256SUMS`.
+
+[release/README.md](release/README.md) is also the release notes, so update
+it when what works on Windows changes.
+
 ## Loopback Test
 
 `lg-windows-client-loopback` runs both sides of the frame transport in one

@@ -9,8 +9,9 @@ working guest display, GPU sharing, or 240 Hz performance.
 Upstream starting revision:
 `236efcb155f952f5d7d9fcd5891a3060ad254e68`.
 
-The `master` branch preserves the upstream baseline. Limiar development is
-on `limiar/windows-client`. Upstream licenses, copyright notices and
+Limiar development is on `limiar/windows-client` and is merged into
+`master`, so `master` no longer matches upstream; the upstream starting
+revision above is the baseline. Upstream licenses, copyright notices and
 submodule origins remain intact. This component is separate from Limiar's
 MIT/Apache-licensed launcher. The Windows client build and its tests live
 in [windows-client](windows-client/README.md).
