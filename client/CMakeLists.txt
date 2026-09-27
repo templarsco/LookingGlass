@@ -119,8 +119,6 @@ add_compile_options(
   "-Wno-unused-parameter"
   "$<$<COMPILE_LANGUAGE:C>:-Wstrict-prototypes>"
   "$<$<C_COMPILER_ID:GNU>:-Wimplicit-fallthrough=2>"
-  "-Werror"
-  "-Wfatal-errors"
   "-g"
   "-ffast-math"
   "-fdata-sections"
