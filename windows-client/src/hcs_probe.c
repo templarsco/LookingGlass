@@ -1412,11 +1412,11 @@ static bool guestChecks(struct Vm * vm, struct Section * section,
   return guestWrite && hostWrite;
 }
 
-static bool guestReady(struct Vm * vm, struct Json * report)
+static bool guestReadyWithin(struct Vm * vm, struct Json * report,
+    DWORD timeoutMs)
 {
   char reply[512];
-  const bool ready = vmWait(vm, "ready", vm->options->bootTimeoutMs, reply,
-      sizeof(reply));
+  const bool ready = vmWait(vm, "ready", timeoutMs, reply, sizeof(reply));
   jsonBool(report, "guest_ready", ready);
   if (!ready)
   {
@@ -1427,6 +1427,11 @@ static bool guestReady(struct Vm * vm, struct Json * report)
   vm->ready = true;
   vmCommand(vm, "info", "info end", 20000, reply, sizeof(reply));
   return true;
+}
+
+static bool guestReady(struct Vm * vm, struct Json * report)
+{
+  return guestReadyWithin(vm, report, vm->options->bootTimeoutMs);
 }
 
 // the emulated IVSHMEM device, as QEMU's ivshmem-plain: BAR0 holds the
@@ -2425,41 +2430,24 @@ done:
   return added && removed;
 }
 
-// a disposable Windows guest from --windows-disk, whose lg-hyperv-ivshmem
-// answers on the serial port: it gives the IVSHMEM driver a device over a
-// SharedMemory region, and the checks read and write through the driver's
-// mapping, as the Looking Glass host does
-static bool runWindows(const struct Options * options, struct Json * report)
+// how often the probe starts the Windows guest's VM: Windows restarts
+// while it sets itself up, and when the VM stops instead, the probe starts
+// it again, as Limiar would
+#define WINDOWS_STARTS 4
+
+enum WindowsStart
 {
-  jsonOpen(report, NULL, '{');
-  jsonString(report, "case", "windows");
-  jsonString(report, "disk", options->windowsDisk);
+  WINDOWS_PASSED,
+  WINDOWS_FAILED,
+  WINDOWS_STOPPED // before the guest answered
+};
 
-  GUID guid;
-  char name[48], sectionName[96], configName[96];
-  newGuid(&guid, name, sizeof(name));
-  snprintf(sectionName, sizeof(sectionName), "Global\\lg-hcs-probe-%s",
-      name);
-  snprintf(configName, sizeof(configName),
-      "\\BaseNamedObjects\\lg-hcs-probe-%s", name);
-
-  // the shared memory, then a page for the device's registers that stays
-  // zeroed, which reads as an ivshmem-plain without interrupts that is peer
-  // 0; the region keeps the size that the shm case checks
-  const uint64_t shared = options->size - PAGE;
-  struct Section section;
-  if (!sectionCreate(&section, sectionName, options->size))
-  {
-    jsonBool(report, "passed", false);
-    jsonClose(report, '}');
-    return false;
-  }
-
-  // the pattern and the checks cover the shared memory alone
-  section.size = shared;
-  const uint64_t nonce = random64();
-  sectionFill(&section, nonce);
-
+// one start of the Windows guest's VM, which ends when the checks ran or
+// the VM stopped before the guest answered
+static enum WindowsStart windowsStart(const struct Options * options,
+    int start, DWORD timeoutMs, const char * configName,
+    struct Section * section, uint64_t nonce, struct Json * report)
+{
   struct Vm vm;
   vmInit(&vm, options);
   vm.reopenSerial = true;
@@ -2474,12 +2462,18 @@ static bool runWindows(const struct Options * options, struct Json * report)
   vmConfig(&vm, &config, SCHEMA_MINOR, devices.data);
   free(devices.data);
 
-  char logPath[MAX_PATH * 3];
-  outPath(options, "windows.serial.log", logPath, sizeof(logPath));
+  char logName[40], logPath[MAX_PATH * 3];
+  if (start == 1)
+    snprintf(logName, sizeof(logName), "windows.serial.log");
+  else
+    snprintf(logName, sizeof(logName), "windows-%d.serial.log", start);
+  outPath(options, logName, logPath, sizeof(logPath));
 
-  bool     passed   = false;
-  bool     located  = false;
-  bool     mapped   = false;
+  // the register page follows the shared memory
+  const uint64_t shared = section->size;
+  enum WindowsStart result = WINDOWS_FAILED;
+  bool     located = false;
+  bool     mapped  = false;
   uint64_t reported = 0, gpa = 0;
   char     reply[512], command[160];
   char   * doc = NULL;
@@ -2510,8 +2504,12 @@ static bool runWindows(const struct Options * options, struct Json * report)
   printf("  The HCS reports the region at guest physical 0x%" PRIx64 "\n"
       "  Waiting for Windows to set itself up and answer\n", gpa);
 
-  if (!guestReady(&vm, report))
+  if (!guestReadyWithin(&vm, report, timeoutMs))
+  {
+    if (vm.stopped && !aborted)
+      result = WINDOWS_STOPPED;
     goto done;
+  }
 
   snprintf(command, sizeof(command), "map ivshmem 0x%" PRIx64 " 0x%" PRIx64
       " 0x%" PRIx64, gpa + shared, gpa, shared);
@@ -2521,8 +2519,8 @@ static bool runWindows(const struct Options * options, struct Json * report)
       "The IVSHMEM driver mapped the region" :
       "The IVSHMEM driver did not map the region", reply);
 
-  if (mapped)
-    passed = guestChecks(&vm, &section, nonce, report);
+  if (mapped && guestChecks(&vm, section, nonce, report))
+    result = WINDOWS_PASSED;
 
 done:
   jsonNumber(report, "serial_reopened", vm.serialReopened);
@@ -2530,8 +2528,66 @@ done:
     vmStop(&vm, report);
   vmDestroy(&vm, report);
   free(config.data);
+  return result;
+}
+
+// a disposable Windows guest from --windows-disk, whose lg-hyperv-ivshmem
+// answers on the serial port: it gives the IVSHMEM driver a device over a
+// SharedMemory region, and the checks read and write through the driver's
+// mapping, as the Looking Glass host does
+static bool runWindows(const struct Options * options, struct Json * report)
+{
+  jsonOpen(report, NULL, '{');
+  jsonString(report, "case", "windows");
+  jsonString(report, "disk", options->windowsDisk);
+
+  GUID guid;
+  char name[48], sectionName[96], configName[96];
+  newGuid(&guid, name, sizeof(name));
+  snprintf(sectionName, sizeof(sectionName), "Global\\lg-hcs-probe-%s",
+      name);
+  snprintf(configName, sizeof(configName),
+      "\\BaseNamedObjects\\lg-hcs-probe-%s", name);
+
+  // the shared memory, then a page for the device's registers that stays
+  // zeroed, which reads as an ivshmem-plain without interrupts that is peer
+  // 0; the region keeps the size that the shm case checks
+  struct Section section;
+  if (!sectionCreate(&section, sectionName, options->size))
+  {
+    jsonBool(report, "passed", false);
+    jsonClose(report, '}');
+    return false;
+  }
+
+  // the pattern and the checks cover the shared memory alone
+  section.size = options->size - PAGE;
+  const uint64_t nonce = random64();
+  sectionFill(&section, nonce);
+
+  // every start shares the boot timeout
+  const DWORD begin = GetTickCount();
+  enum WindowsStart result = WINDOWS_FAILED;
+  jsonOpen(report, "starts", '[');
+  for(int start = 1; start <= WINDOWS_STARTS; ++start)
+  {
+    const DWORD spent = GetTickCount() - begin;
+    const DWORD left  = spent < options->bootTimeoutMs ?
+      options->bootTimeoutMs - spent : 0;
+
+    jsonOpen(report, NULL, '{');
+    result = windowsStart(options, start, left, configName, &section, nonce,
+        report);
+    jsonClose(report, '}');
+    if (result != WINDOWS_STOPPED)
+      break;
+    if (start < WINDOWS_STARTS)
+      printf("  The VM stopped before Windows answered, starting it again\n");
+  }
+  jsonClose(report, ']');
   sectionClose(&section);
 
+  const bool passed = result == WINDOWS_PASSED;
   jsonBool(report, "passed", passed);
   jsonClose(report, '}');
   return passed;

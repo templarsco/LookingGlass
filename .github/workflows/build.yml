@@ -468,6 +468,24 @@ jobs:
           windows-client\build\lg-windows-client-hcs-probe.exe `
           --windows-disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
           --output hcs-probe-windows
+    - name: Show the Hyper-V events from the Windows guest's VMs
+      if: always()
+      run: |
+        # what the VM workers say, such as why a VM could not reset
+        $since = (Get-Date).AddMinutes(-90)
+        Get-WinEvent -ListLog *Hyper-V*, *Hcs* -ErrorAction SilentlyContinue |
+          Where-Object RecordCount -gt 0 | ForEach-Object {
+            $log = $_.LogName
+            Get-WinEvent -LogName $log -MaxEvents 100 `
+                -ErrorAction SilentlyContinue |
+              Where-Object TimeCreated -ge $since |
+              Sort-Object TimeCreated | ForEach-Object {
+                $text = "$($_.Message)" -replace '\s+', ' '
+                $text = $text.Substring(0, [Math]::Min(600, $text.Length))
+                "$($_.TimeCreated.ToString('HH:mm:ss.fff')) $log $($_.Id) " +
+                  "$($_.LevelDisplayName): $text"
+              }
+          }
     - name: Show what the Windows guest logged
       if: always()
       shell: powershell

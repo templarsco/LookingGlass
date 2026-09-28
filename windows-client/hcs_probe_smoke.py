@@ -137,20 +137,27 @@ def check_windows(args):
   if set(cases) != {'windows'}:
     sys.exit(f'unexpected cases: {sorted(cases)}')
 
+  # the probe starts the VM again when it stops before Windows answers
   case = cases['windows']
-  if case.get('still_listed'):
-    sys.exit(f'the HCS still lists VM {case["vm_id"]}')
+  starts = case.get('starts') or []
+  if not starts:
+    sys.exit('the report has no start of the Windows guest')
+  for start in starts:
+    if start.get('still_listed'):
+      sys.exit(f'the HCS still lists VM {start["vm_id"]}')
 
   print(f'Windows {report["windows"]}')
-  print('windows:')
-  for key, value in case.items():
-    if key in ('config', 'guest'):
-      continue
-    if key.endswith('_gpa') and isinstance(value, int):
-      value = hex(value)
-    print_value(key, value, '  ')
-  for line in (case.get('guest') or '').splitlines()[:200]:
-    print(f'  guest: {line}')
+  print(f'windows: passed={case["passed"]}')
+  for number, start in enumerate(starts, 1):
+    print(f'  start {number}:')
+    for key, value in start.items():
+      if key in ('config', 'guest'):
+        continue
+      if key.endswith('_gpa') and isinstance(value, int):
+        value = hex(value)
+      print_value(key, value, '    ')
+    for line in (start.get('guest') or '').splitlines()[:200]:
+      print(f'    guest: {line}')
   print('The probe ended cleanly and wrote a well-formed report')
   return 0
 
