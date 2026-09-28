@@ -2,9 +2,10 @@
 
 This is Limiar's development fork of Looking Glass. Its goal is a native
 Windows viewer on the physical PC, not just the Windows guest capturer.
-The Windows client only shows the client's own synthetic test frames so
-far; it cannot display a guest. Creating this fork is not a claim of
-working guest display, GPU sharing, or 240 Hz performance.
+The Windows client shows its own synthetic test frames, or frames that a
+test producer serves on a shared memory section of the PC. Nothing maps that
+section into a VM yet, so it cannot display a guest. Creating this fork is
+not a claim of working guest display, GPU sharing, or 240 Hz performance.
 
 Upstream starting revision:
 `236efcb155f952f5d7d9fcd5891a3060ad254e68`.
@@ -39,6 +40,18 @@ in [windows-client](windows-client/README.md).
    and a negotiated protocol version. Do not reinterpret a Linux DMA-BUF
    file descriptor as a Windows handle. Never expose an unauthenticated
    capture/input endpoint.
+   Status, September 28, 2026: the endpoint is a named section, the Windows
+   counterpart of `/dev/kvmfr0`. The client's LGMP transport builds for
+   Windows and opens it by name (`lgmp:shmDevice`, `Global\looking-glass` by
+   default); the existing LGMP and KVMFR session checks negotiate the
+   protocol versions. Before mapping it, the client refuses a section whose
+   owner or DACL lets any account but the user, the user's logon session,
+   SYSTEM, Administrators or a Hyper-V VM account map or modify it. CI serves
+   a known frame from a test producer on such a section, with a padded
+   stride, and checks every pixel in the client's window; it also checks
+   that a section every account can open is refused. This meets the first
+   acceptance gate. Frames are copied through the CPU; DMA-BUF import stays
+   Linux only.
 4. Present actual guest frames using a native Windows graphics path; verify
    nonblank content, correct stride/format and synchronization. A CPU-copy
    bring-up path must be reported as such, not advertised as zero-copy.
@@ -46,8 +59,24 @@ in [windows-client](windows-client/README.md).
    capture component. GPU delivery is a separate prerequisite owned by
    Limiar's VM backend, not something the viewer creates.
    Limiar selected native Hyper-V with OpenHCL on September 25, 2026, after
-   this sequence was written. IVSHMEM is a QEMU device, so the guest-to-host
-   transport for that runtime is still an open design decision.
+   this sequence was written. IVSHMEM is a QEMU device, so on September 28,
+   2026 the plan became porting it to Hyper-V rather than replacing it:
+   - The PC side is the section from step 3.
+   - The Host Compute Service's `SharedMemory` device maps a named section
+     into guest memory (schema 2.1: `SharedMemoryRegion` with `SectionName`,
+     `StartOffset`, `Length` and `AllowGuestWrite`), and the guest physical
+     address can be queried as `SharedMemoryRegionInfo`. It exists only for
+     VMs created through HCS, and it is untested with GPU-PV and OpenHCL.
+   - In the VM, Limiar's OpenHCL presents a PCI device like QEMU's
+     ivshmem-plain (1af4:1110) with BAR2 at that address. The guest's IVSHMEM
+     driver and the Looking Glass host then run unchanged, without a custom
+     guest driver or test signing.
+   - The host in the guest must be built from the same source as the client.
+     This client speaks KVMFR 34 and LGMP 12, and the B7 release is older, so
+     the client refuses a B7 host at the version check.
+   None of this is verified yet. The first check is a probe on a Hyper-V
+   host: an HCS VM with a `SharedMemory` region, where the PC and the guest
+   must see each other's writes.
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.
