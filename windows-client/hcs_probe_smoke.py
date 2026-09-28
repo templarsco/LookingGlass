@@ -18,10 +18,13 @@
 # with this program; if not, write to the Free Software Foundation, Inc., 59
 # Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
-"""Runs the HCS shared memory probe on a Windows machine that cannot boot its
-VMs, such as a CI runner without Hyper-V, and checks that it fails cleanly:
-every attempt leaves no VM behind, as far as the Host Compute Service can
-tell, and ends up in a well-formed report."""
+"""Runs the HCS shared memory probe on a Windows CI runner and checks that it
+ends cleanly: every attempt leaves no VM behind, as far as the Host Compute
+Service can tell, and ends up in a well-formed report. By default the probe
+stands in for the kernel, so no VM can boot. With --kernel, the VMs boot a
+real kernel where the runner can run them, and the report's findings, the
+guests' replies and the ends of their serial logs are printed; what works
+there is reported, not required."""
 
 import argparse
 import json
@@ -69,25 +72,63 @@ def check_initrd(path):
   print(f'{path.name}: {len(entries) - 1} entries, a {len(init)} byte init')
 
 
+# what each attempt found, in the order the probe gets there
+FINDINGS = ('variant', 'section_name', 'hidden_from_guest', 'create',
+    'device_host', 'device', 'bar2_mapping', 'start', 'region_query',
+    'guest_ready', 'bar2_mapping_retry', 'map', 'verify',
+    'guest_write_seen_by_host', 'host_write_seen_by_guest', 'bar2_direct',
+    'stopped_by_guest', 'exit_type', 'terminate', 'passed')
+
+
+def print_findings(report, output):
+  print(f'Windows {report["windows"]}, newest configuration schema '
+      f'2.{report["newest_schema_minor"]}')
+  for case in report['cases']:
+    print(f'\n{case["case"]}: passed {case["passed"]}')
+    for attempt in case['attempts']:
+      print('  attempt')
+      for key in FINDINGS:
+        if key in attempt:
+          print(f'    {key}: {attempt[key]}')
+      for key in ('device_calls', 'region_info', 'create_result',
+          'start_result'):
+        if attempt.get(key):
+          print(f'    {key}: {json.dumps(attempt[key])[:2000]}')
+      for line in (attempt.get('guest') or '').splitlines()[:80]:
+        print(f'    guest: {line}')
+
+  # the kernel's own messages, such as how it found the PCI devices
+  for log in sorted(output.glob('*.serial.log')):
+    lines = log.read_bytes().decode(errors='replace').splitlines()
+    print(f'\n{log.name}, the last {min(len(lines), 60)} of {len(lines)} '
+        f'lines:')
+    for line in lines[-60:]:
+      print(f'  {line}')
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('probe', type=Path,
       help='path to lg-windows-client-hcs-probe.exe')
   parser.add_argument('--output', required=True, type=Path,
       help='where the probe writes its report')
+  parser.add_argument('--kernel', type=Path,
+      help='an x86_64 Linux kernel with Hyper-V support for the VMs to boot')
   args = parser.parse_args()
   args.probe  = args.probe.resolve()
   args.output = args.output.resolve()
+  kernel = args.kernel.resolve() if args.kernel else args.probe
 
   if run([args.probe, '--help'], 60).returncode != 0:
     sys.exit('--help failed')
   if run([args.probe, '--only', 'nothing'], 60).returncode != 2:
     sys.exit('an invalid option was accepted')
 
-  # any existing file stands in for the kernel, the VMs cannot boot here
+  # without a kernel, any existing file stands in for one and no guest can
+  # answer, so a short wait does; with one, the probe waits as it does on a PC
   args.output.parent.mkdir(parents=True, exist_ok=True)
-  result = run([args.probe, '--kernel', args.probe, '--out', args.output,
-      '--timeout', '30'], 900)
+  result = run([args.probe, '--kernel', kernel, '--out', args.output] +
+      ([] if args.kernel else ['--timeout', '30']), 3000)
   out = result.stdout + result.stderr
 
   if result.returncode == 2 and 'computecore.dll is missing' in out:
@@ -97,7 +138,7 @@ def main():
     sys.exit(f'the probe exited with {result.returncode}')
 
   check_initrd(args.output / 'initrd.cpio')
-  if (args.output / 'kernel').read_bytes() != args.probe.read_bytes():
+  if (args.output / 'kernel').read_bytes() != kernel.read_bytes():
     sys.exit('the VMs do not boot a copy of the given kernel')
   report = json.loads((args.output / 'report.json').read_text('utf-8'))
   if report['aborted']:
@@ -127,7 +168,11 @@ def main():
       if reachable and not attempt['cleanup_verified']:
         sys.exit(f'{name}: no check that VM {attempt["vm_id"]} is gone')
 
-  print('The probe failed cleanly and wrote a well-formed report')
+  if args.kernel:
+    print_findings(report, args.output)
+    print('The probe ended cleanly and wrote a well-formed report')
+  else:
+    print('The probe failed cleanly and wrote a well-formed report')
   return 0
 
 

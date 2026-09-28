@@ -247,6 +247,46 @@ jobs:
       run: |
         cd windows-client\build
         ctest --output-on-failure
+    - name: Get WSL's kernel for the HCS probe's VMs
+      id: wsl-kernel
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $kernel = "$env:ProgramFiles\WSL\tools\kernel"
+        if (-not (Test-Path $kernel)) {
+          gh release download --repo microsoft/WSL --pattern "wsl.*.x64.msi" `
+            --dir wsl
+          $msi = (Get-ChildItem wsl\*.msi | Select-Object -First 1).FullName
+          $unpack = Start-Process msiexec.exe -Wait -PassThru -ArgumentList `
+            "/a `"$msi`" /qn TARGETDIR=`"$PWD\wsl\files`" /lv `"$PWD\wsl\msi.log`""
+          if ($unpack.ExitCode -ne 0) {
+            Get-Content wsl\msi.log -Tail 40
+            exit 1
+          }
+          $kernel = (Get-ChildItem -Recurse wsl\files -File -Filter kernel |
+            Select-Object -First 1).FullName
+          if (-not $kernel) {
+            Get-ChildItem -Recurse wsl\files -File | Select-Object FullName
+            exit 1
+          }
+          Write-Output "From $msi"
+        }
+        Get-Item $kernel | Format-List FullName, Length, LastWriteTime
+        "kernel=$kernel" >> $env:GITHUB_OUTPUT
+    - name: Check shared memory with Hyper-V VMs that boot WSL's kernel
+      run: |
+        python windows-client\hcs_probe_smoke.py `
+          windows-client\build\lg-windows-client-hcs-probe.exe `
+          --kernel "${{ steps.wsl-kernel.outputs.kernel }}" --output hcs-probe
+    - name: Upload the HCS probe's report and serial logs
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-hcs-probe
+        path: |
+          hcs-probe/report.json
+          hcs-probe/*.serial.log
+        if-no-files-found: ignore
 
   windows-client-display:
     runs-on: windows-2025
