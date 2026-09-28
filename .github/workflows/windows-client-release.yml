@@ -65,13 +65,13 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON \
           -DOPTIMIZE_FOR_NATIVE=OFF ..
         make -j$(nproc)
-    - name: Cross-compile the test frame producer
+    - name: Cross-compile the test frame producer and the HCS probe
       run: |
         mkdir windows-client/build
         cd windows-client/build
         cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake \
           -DCMAKE_BUILD_TYPE=Release -DOPTIMIZE_FOR_NATIVE=OFF ..
-        make -j$(nproc) lg-windows-client-producer
+        make -j$(nproc) lg-windows-client-producer lg-windows-client-hcs-probe
     - name: Package the Windows client and its source
       env:
         VERSION: ${{ steps.version.outputs.version }}
@@ -80,6 +80,7 @@ jobs:
         python3 windows-client/package.py \
           client/build-windows/looking-glass-client.exe \
           --producer windows-client/build/lg-windows-client-producer.exe \
+          --hcs-probe windows-client/build/lg-windows-client-hcs-probe.exe \
           --version "$VERSION" --commit "$GITHUB_SHA" --output dist \
           --notice mingw-w64-runtime=/usr/share/doc/mingw-w64-x86-64-dev/copyright \
           --notice gcc-runtime=/usr/share/doc/gcc-mingw-w64-x86-64-win32/copyright
@@ -133,6 +134,12 @@ jobs:
         GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
           --producer "$(cygpath -w "$dir/lg-windows-client-producer.exe")" \
           --output smoke/lgmp "$(cygpath -w "$dir/looking-glass-client.exe")"
+    - name: Check the packaged HCS probe on a runner without Hyper-V
+      run: |
+        dir=$(echo unpacked/*)
+        python windows-client/hcs_probe_smoke.py \
+          "$(cygpath -w "$dir/lg-windows-client-hcs-probe.exe")" \
+          --output "$(cygpath -w smoke/hcs-probe)"
     - name: Upload the smoke test output
       if: failure()
       uses: actions/upload-artifact@v6

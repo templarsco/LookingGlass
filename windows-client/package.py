@@ -19,8 +19,9 @@
 # Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
 """Packages the Windows client for a release: a zip with the client, the test
-frame producer, the README, the GPL and the licenses of the code built into
-the executables, and the release notes rendered from the same README."""
+frame producer, the HCS shared memory probe, the README, the GPL and the
+licenses of the code built into the executables, and the release notes
+rendered from the same README."""
 
 import argparse
 import os
@@ -64,6 +65,8 @@ def main():
   parser.add_argument('client', help='path to looking-glass-client.exe')
   parser.add_argument('--producer', required=True,
       help='path to lg-windows-client-producer.exe')
+  parser.add_argument('--hcs-probe', required=True,
+      help='path to lg-windows-client-hcs-probe.exe')
   parser.add_argument('--version', required=True)
   parser.add_argument('--commit', required=True)
   parser.add_argument('--output', required=True, type=Path)
@@ -81,6 +84,7 @@ def main():
   files = {
     'looking-glass-client.exe'      : Path(args.client).read_bytes(),
     'lg-windows-client-producer.exe': Path(args.producer).read_bytes(),
+    'lg-windows-client-hcs-probe.exe': Path(args.hcs_probe).read_bytes(),
     'README.txt'                    : text_file(readme),
     'LICENSE.txt'                   : text_file(read(TOP / 'LICENSE')),
   }

@@ -57,6 +57,24 @@ lg-windows-client-producer.exe Local\looking-glass
 looking-glass-client.exe app:transport=lgmp lgmp:shmDevice=Local\looking-glass
 ```
 
+`lg-windows-client-hcs-probe.exe` checks whether this PC can give a
+Hyper-V virtual machine shared memory the way IVSHMEM does under QEMU,
+either as an emulated IVSHMEM PCI device or as a Host Compute Service
+shared memory region. It boots small disposable Linux VMs with WSL's kernel,
+checks from inside them that the PC and the VM see each other's writes, and
+leaves nothing on the PC but its output folder. It needs Hyper-V, WSL and an
+elevated Command Prompt:
+
+```
+lg-windows-client-hcs-probe.exe
+```
+
+It prints what works and writes `report.json` and the VMs' serial logs to
+a new folder next to it. The report also lists the virtual machines and
+containers the Host Compute Service already runs. The probe has not run
+on a Hyper-V PC before this build; on a Windows runner without Hyper-V it
+only showed that it fails cleanly.
+
 Before this build was published, the same `looking-glass-client.exe` drew a
 known test frame in a window on a Windows runner, once from its test
 transport and once from `lg-windows-client-producer.exe` over shared

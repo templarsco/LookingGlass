@@ -20,7 +20,8 @@ The client cannot show a guest yet, because nothing maps the section into a
 virtual machine yet. That is step 5, IVSHMEM on Hyper-V. Until then the
 client starts on the `test` transport, which generates frames inside the
 client, and the LGMP path is exercised with the test producer in this
-directory.
+directory. The [HCS probe](#hcs-shared-memory-probe) checks on a Hyper-V PC
+whether a VM can get the section at all.
 
 ## Win32 Client
 
@@ -133,19 +134,61 @@ and reconnects were checked by hand under Wine with Xvfb, not by an
 automated test. Wine on Xvfb injects Scroll Lock state changes, so pick
 another escape key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
 
+### HCS Shared Memory Probe
+
+`lg-windows-client-hcs-probe` checks, on a PC with Hyper-V, the two ways
+step 5 could give a VM the shared memory. It leaves nothing on the PC but
+its output folder. Each case boots a disposable Linux VM through the Host
+Compute Service, as WSL does, with WSL's kernel and the probe's own init,
+[hcs_probe_guest.c](src/hcs_probe_guest.c). The init maps the memory,
+checks a pattern the PC wrote at the start of every page, and exchanges one
+write in each direction, all over the VM's serial port:
+
+- `hdv`: the probe emulates an IVSHMEM PCI device (1af4:1110, like QEMU's
+  ivshmem-plain) through the HCS device emulation API, with BAR2 backed by
+  a section. It passes only if no guest access to BAR2 reaches the
+  emulator, which means the guest reads and writes the section itself.
+  This is the route where the guest's IVSHMEM driver works unchanged.
+- `shm`: a HCS `SharedMemory` region maps a named section into guest
+  memory, and the guest maps it at the address the HCS reports.
+
+Run it from an elevated prompt:
+
+```bat
+lg-windows-client-hcs-probe.exe
+```
+
+It writes `report.json`, the VMs' serial logs, and the copies of the kernel
+and the initrd that the VMs boot to a new folder next to itself.
+`--only hdv` or `--only shm` runs one case, `--kernel` boots another x86_64
+kernel with Hyper-V PCI support, and `--size-mib` sets the size of the
+memory, 32 MiB by default. The report also lists the compute systems the
+HCS already knows, such as WSL.
+
+The init is built for x86_64 Linux, with the host's GCC when
+cross-compiling from Linux or with Clang and LLD on Windows; CMake skips the
+probe when it finds neither. CI boots the init under QEMU with QEMU's own
+ivshmem-plain device, reached the same way as the emulated one, and plays
+the probe's side of the protocol
+([hcs_probe_guest_test.py](hcs_probe_guest_test.py)). The release workflow
+runs the packaged probe on a Windows runner without Hyper-V, where every
+case must fail cleanly into a well-formed report
+([hcs_probe_smoke.py](hcs_probe_smoke.py)). Neither shows that the
+Hyper-V side works; only a run on a Hyper-V PC does.
+
 ### Releases
 
 [windows-client-release](../.github/workflows/windows-client-release.yml)
 publishes the client as a GitHub pre-release. Run it from the Actions tab
 with a new tag such as `limiar-windows-v0.1.0`, or push a tag with that
-prefix. It cross-compiles the client and the test frame producer, packages
-them with [package.py](package.py), runs the smoke test on the packaged
-executables on a Windows runner, with the test transport and over LGMP,
-and only then publishes:
+prefix. It cross-compiles the client, the test frame producer and the HCS
+probe, packages them with [package.py](package.py), runs the smoke tests on
+the packaged executables on a Windows runner, with the test transport, over
+LGMP and for the probe, and only then publishes:
 
 - `looking-glass-client-<version>-windows-x64.zip`: the client, the
-  producer, the README from [release/README.md](release/README.md), the GPL
-  and the licenses of the code built into the executables.
+  producer, the probe, the README from [release/README.md](release/README.md),
+  the GPL and the licenses of the code built into the executables.
 - `looking-glass-<version>-source.tar.gz`: the complete source of the
   build, including every submodule.
 - `SHA256SUMS`.
@@ -208,7 +251,8 @@ keeps the shared code covered there.
 ## Not Covered Yet
 
 - No guest frame reaches the window. Nothing maps the shared memory section
-  into a VM yet; that is step 5.
+  into a VM yet; that is step 5. The HCS probe has not run on a Hyper-V PC
+  yet.
 - The LGMP path copies each frame through the CPU into an OpenGL texture.
   There is no zero-copy import on Windows; DMA-BUF is Linux only.
 - Resizing by dragging the window border has no automated test. The
