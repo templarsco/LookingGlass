@@ -20,18 +20,19 @@
 
 <#
 .SYNOPSIS
-Makes a disk with Windows Server for the HCS probe's Windows guest, or shows
-what the guest logged on it.
+Makes a disk with Windows for the HCS probe's Windows guest, or shows what
+the guest logged on it.
 
 .DESCRIPTION
-Applies the Server Core image of a Windows Server ISO, such as Microsoft's
-evaluation ISO, to a new dynamic VHDX that boots with UEFI. Windows sets
-itself up on its first boot without asking anything, and then runs
-lg-hyperv-ivshmem on COM1 as SYSTEM, then and at every start, with the
-IVSHMEM driver next to it. lg-windows-client-hcs-probe --windows-disk boots
-it. With -Logs, shows the tool's log, the driver's installation and Windows'
-device events from the disk once the guest is off. Run this elevated on
-Windows with Hyper-V's PowerShell module.
+Applies Windows from an ISO, such as Microsoft's evaluation ISOs of Windows
+Server, whose Server Core it takes, or Windows 11, to a new dynamic VHDX
+that boots with UEFI. Windows sets itself up on its first boot without
+asking anything, and then runs lg-hyperv-ivshmem on COM1 as SYSTEM, then
+and at every start, with the IVSHMEM driver next to it.
+lg-windows-client-hcs-probe --windows-disk boots it. With -Logs, shows the
+tool's log, the driver's installation and Windows' device events from the
+disk once the guest is off. Run this elevated on Windows with Hyper-V's
+PowerShell module.
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Make')]
@@ -119,7 +120,8 @@ try {
     $wim = "$source\sources\install.esd"
   }
 
-  # Server Core, the smallest: the first image without the Desktop Experience
+  # the first image without a desktop, which is Server Core in Windows
+  # Server's ISO, or the first edition in a Windows 11 one
   $info = & dism.exe /English /Get-WimInfo "/WimFile:$wim"
   if ($LASTEXITCODE) {
     throw "dism /Get-WimInfo failed with $LASTEXITCODE"
@@ -200,17 +202,33 @@ try {
       }
     }
 
-    # Windows sets itself up without asking anything, with an administrator
-    # password that nobody needs
+    # Windows sets itself up without asking anything, with passwords that
+    # nobody needs; Windows 11 also wants an account of its own, and its
+    # online and privacy pages hidden
     $bytes = New-Object byte[] 18
     [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $password = [Convert]::ToBase64String($bytes) + 'a1!'
     $component = 'processorArchitecture="amd64" ' +
       'publicKeyToken="31bf3856ad364e35" language="neutral" ' +
       'versionScope="nonSxS"'
+    $oobe = '<HideEULAPage>true</HideEULAPage>'
+    $account = ''
+    if ($chosen.Name -notmatch 'Server') {
+      $oobe += '<HideLocalAccountScreen>true</HideLocalAccountScreen>' +
+        '<HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>' +
+        '<HideOnlineAccountScreens>true</HideOnlineAccountScreens>' +
+        '<HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>' +
+        '<ProtectYourPC>3</ProtectYourPC>'
+      $account = '<LocalAccounts><LocalAccount wcm:action="add">' +
+        '<Name>lgprobe</Name><Group>Administrators</Group>' +
+        "<Password><Value>$password</Value><PlainText>true</PlainText>" +
+        '</Password></LocalAccount></LocalAccounts>'
+    }
+    New-Item -ItemType Directory -Force "$w\Windows\Panther" | Out-Null
     @"
 <?xml version="1.0" encoding="utf-8"?>
-<unattend xmlns="urn:schemas-microsoft-com:unattend">
+<unattend xmlns="urn:schemas-microsoft-com:unattend"
+    xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <settings pass="oobeSystem">
     <component name="Microsoft-Windows-International-Core" $component>
       <InputLocale>en-US</InputLocale>
@@ -219,14 +237,13 @@ try {
       <UserLocale>en-US</UserLocale>
     </component>
     <component name="Microsoft-Windows-Shell-Setup" $component>
-      <OOBE>
-        <HideEULAPage>true</HideEULAPage>
-      </OOBE>
+      <OOBE>$oobe</OOBE>
       <UserAccounts>
         <AdministratorPassword>
           <Value>$password</Value>
           <PlainText>true</PlainText>
         </AdministratorPassword>
+        $account
       </UserAccounts>
     </component>
   </settings>

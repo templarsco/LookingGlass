@@ -383,7 +383,18 @@ jobs:
         if-no-files-found: ignore
 
   windows-client-guest:
+    name: windows-client-guest (${{ matrix.windows }})
     runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Microsoft's evaluation ISOs, 64-bit, en-US: Windows Server 2025,
+          # and Windows 11 Enterprise LTSC, which is 24H2
+          - windows: server
+            iso: https://go.microsoft.com/fwlink/?linkid=2345730&clcid=0x409&culture=en-us&country=us
+          - windows: client
+            iso: https://go.microsoft.com/fwlink/?linkid=2289029&clcid=0x409&culture=en-us&country=us
     steps:
     - uses: actions/checkout@v5
       with:
@@ -414,7 +425,11 @@ jobs:
         Get-ChildItem -Recurse $dir -File -Include *.cat, *.sys |
           Get-AuthenticodeSignature | Format-List Path, Status,
             @{ n = 'Signer'; e = { $_.SignerCertificate.Subject } },
-            @{ n = 'Issuer'; e = { $_.SignerCertificate.Issuer } }
+            @{ n = 'Issuer'; e = { $_.SignerCertificate.Issuer } },
+            @{ n = 'Usages'; e = {
+              ($_.SignerCertificate.Extensions.EnhancedKeyUsages |
+                ForEach-Object { "$($_.FriendlyName) ($($_.Value))" }) -join
+                ', ' } }
         # the 64-bit INF for the newest Windows in the archive
         $infs = @(Get-ChildItem -Recurse $dir -Filter *.inf)
         $inf = $null
@@ -431,22 +446,22 @@ jobs:
         "Using $($inf.FullName)"
         Get-Content $inf.FullName | Select-Object -First 80
         "inf=$($inf.FullName)" >> $env:GITHUB_OUTPUT
-    - name: Get Windows Server's evaluation ISO
+    - name: Get Windows' evaluation ISO
+      env:
+        ISO: ${{ matrix.iso }}
       run: |
-        # Microsoft's evaluation center: Windows Server 2025, 64-bit, en-US
         curl.exe -L --fail --retry 3 --silent --show-error `
-          -o "$env:RUNNER_TEMP\server.iso" `
-          "https://go.microsoft.com/fwlink/?linkid=2345730&clcid=0x409&culture=en-us&country=us"
-        Get-Item "$env:RUNNER_TEMP\server.iso" | Format-List FullName, Length
+          -o "$env:RUNNER_TEMP\windows.iso" $env:ISO
+        Get-Item "$env:RUNNER_TEMP\windows.iso" | Format-List FullName, Length
     - name: Make a Windows disk that runs lg-hyperv-ivshmem on COM1
       shell: powershell
       run: |
         windows-client\hcs_probe_windows_disk.ps1 `
-          -Iso "$env:RUNNER_TEMP\server.iso" `
+          -Iso "$env:RUNNER_TEMP\windows.iso" `
           -Disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
           -Tool windows-client\build\lg-hyperv-ivshmem.exe `
           -Inf "${{ steps.driver.outputs.inf }}"
-        Remove-Item "$env:RUNNER_TEMP\server.iso"
+        Remove-Item "$env:RUNNER_TEMP\windows.iso"
     - name: Check the IVSHMEM driver over shared memory in a Windows guest
       run: |
         python windows-client\hcs_probe_smoke.py `
@@ -463,7 +478,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v6
       with:
-        name: windows-client-hcs-probe-windows
+        name: windows-client-hcs-probe-windows-${{ matrix.windows }}
         path: |
           hcs-probe-windows/report.json
           hcs-probe-windows/*.serial.log

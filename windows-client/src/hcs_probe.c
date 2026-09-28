@@ -842,9 +842,10 @@ struct Options
 // the configuration schema of Limiar's HCS probe VMs, 2.2
 #define SCHEMA_MINOR 2
 
-// the memory of the probe's VMs, and of its Windows guest
+// the memory of the probe's VMs, and of its Windows guest, which is what
+// Windows 11 asks for
 #define VM_MEMORY_MB      512
-#define WINDOWS_MEMORY_MB 2048
+#define WINDOWS_MEMORY_MB 4096
 
 // the Microsoft Windows template of Hyper-V Manager's generation 2 VMs
 #define WINDOWS_SECURE_BOOT "1734c6e8-3154-4dda-ba5f-a874cc483422"
