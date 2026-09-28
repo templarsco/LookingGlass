@@ -181,6 +181,7 @@ static struct
   HRESULT (WINAPI * enumerateComputeSystems)(PCWSTR, HCS_OPERATION);
   HRESULT (WINAPI * grantVmAccess)(PCWSTR, PCWSTR);
   HRESULT (WINAPI * revokeVmAccess)(PCWSTR, PCWSTR);
+  HRESULT (WINAPI * getServiceProperties)(PCWSTR, PWSTR *);
 
   // device emulation, only needed by the hdv case
   HRESULT (WINAPI * initializeDeviceHost)(HCS_SYSTEM, HDV_HOST *);
@@ -555,6 +556,7 @@ static bool loadHcs(void)
     printf("computecore.dll lacks a function this probe needs\n");
     return false;
   }
+  RESOLVE(core, getServiceProperties, "HcsGetServiceProperties");
 
   HMODULE hdv = LoadLibraryExW(L"vmdevicehost.dll", NULL,
       LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -779,7 +781,25 @@ struct Options
   uint64_t size;
   DWORD    bootTimeoutMs;
   bool     hdv, shm;
+
+  // the newest 2.x configuration schema the HCS supports
+  unsigned schemaMinor;
 };
+
+// the configuration schema of Limiar's HCS probe VMs, 2.2
+#define SCHEMA_MINOR 2
+
+// room that prepare() leaves after the output folder's path for file names
+#define OUT_NAME_MAX 64
+
+// the path of a file in the output folder
+static void outPath(const struct Options * options, const char * name,
+    char * path, size_t size)
+{
+  const int len = snprintf(path, size, "%s\\%s", options->out, name);
+  if (len < 0 || (size_t)len >= size)
+    fail("The output folder's path is too long");
+}
 
 // one disposable VM and the guest on its serial port
 struct Vm
@@ -953,11 +973,11 @@ static bool vmCommand(struct Vm * vm, const char * command,
   return !*rest || strncmp(rest, " ok", 3) == 0;
 }
 
-static void vmConfig(struct Vm * vm, struct Str * config,
+static void vmConfig(struct Vm * vm, struct Str * config, unsigned minor,
     const char * devices)
 {
   struct Str s = { 0 };
-  strLiteral(&s, "{\"SchemaVersion\":{\"Major\":2,\"Minor\":2},");
+  strPrintf(&s, "{\"SchemaVersion\":{\"Major\":2,\"Minor\":%u},", minor);
   strLiteral(&s, "\"Owner\":\"LookingGlass.HcsProbe\",");
   strLiteral(&s, "\"ShouldTerminateOnLastHandleClosed\":true,");
   strLiteral(&s, "\"VirtualMachine\":{\"StopOnReset\":true,");
@@ -1449,7 +1469,7 @@ static void ivshmemReport(struct Ivshmem * d, struct Json * report)
 }
 
 static bool hdvAttempt(const struct Options * options, bool flexibleIov,
-    struct Section * section, struct Json * report)
+    unsigned schemaMinor, struct Section * section, struct Json * report)
 {
   static bool comSecurity = false;
 
@@ -1466,11 +1486,16 @@ static bool hdvAttempt(const struct Options * options, bool flexibleIov,
     strPrintf(&devices, "\"FlexibleIov\":{\"%s\":{\"EmulatorId\":\"%s\","
         "\"HostingModel\":\"External\"}}", instanceText, classText);
 
+  char variant[32];
+  snprintf(variant, sizeof(variant), "%s-2.%u",
+      flexibleIov ? "flexible-iov" : "plain", schemaMinor);
+
   jsonOpen(report, NULL, '{');
-  jsonString(report, "variant", flexibleIov ? "flexible-iov" : "plain");
+  jsonString(report, "variant", variant);
   jsonString(report, "device_instance", instanceText);
-  printf("[hdv] VM %s with the emulated IVSHMEM device%s\n", vm.id,
-      flexibleIov ? ", declared as a FlexibleIov device" : "");
+  printf("[hdv] VM %s with the emulated IVSHMEM device%s, schema 2.%u\n",
+      vm.id, flexibleIov ? " declared as a FlexibleIov device" : "",
+      schemaMinor);
 
   const uint64_t nonce = random64();
   sectionFill(section, nonce);
@@ -1479,12 +1504,12 @@ static bool hdvAttempt(const struct Options * options, bool flexibleIov,
   ivshmemInit(&device, section);
 
   struct Str config = { 0 };
-  vmConfig(&vm, &config, devices.len ? devices.data : NULL);
+  vmConfig(&vm, &config, schemaMinor, devices.len ? devices.data : NULL);
   free(devices.data);
 
-  char logPath[MAX_PATH * 3];
-  snprintf(logPath, sizeof(logPath), "%s\\hdv-%s.serial.log", options->out,
-      flexibleIov ? "flexible-iov" : "plain");
+  char logName[OUT_NAME_MAX], logPath[MAX_PATH * 3];
+  snprintf(logName, sizeof(logName), "hdv-%s.serial.log", variant);
+  outPath(options, logName, logPath, sizeof(logPath));
 
   HDV_HOST   host   = NULL;
   HDV_DEVICE handle = NULL;
@@ -1605,9 +1630,26 @@ static bool runHdv(const struct Options * options, struct Json * report)
     printf("[hdv] vmdevicehost.dll or its functions are missing\n");
   else if (sectionCreate(&section, NULL, options->size))
   {
+    // the device declared in the configuration, again with the newest
+    // schema in case the older one lacks the declaration, then undeclared
+    const struct
+    {
+      bool     flexibleIov;
+      unsigned schemaMinor;
+    }
+    attempts[] =
+    {
+      { true , SCHEMA_MINOR         },
+      { true , options->schemaMinor },
+      { false, SCHEMA_MINOR         }
+    };
+
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    for(int i = 0; i < 2 && !passed && !aborted; ++i)
-      passed = hdvAttempt(options, i == 0, &section, report);
+    for(size_t i = 0; i < sizeof(attempts) / sizeof(attempts[0]) &&
+        !passed && !aborted; ++i)
+      if (i != 1 || options->schemaMinor > SCHEMA_MINOR)
+        passed = hdvAttempt(options, attempts[i].flexibleIov,
+            attempts[i].schemaMinor, &section, report);
     sectionClose(&section);
   }
 
@@ -1649,13 +1691,13 @@ static enum ShmResult shmAttempt(const struct Options * options,
       hidden ? "true" : "false");
 
   struct Str config = { 0 };
-  vmConfig(&vm, &config, devices.data);
+  vmConfig(&vm, &config, SCHEMA_MINOR, devices.data);
   free(devices.data);
 
-  char logPath[MAX_PATH * 3];
-  snprintf(logPath, sizeof(logPath), "%s\\shm-%s-%s.serial.log",
-      options->out, sectionName[0] == '\\' ? "nt" : "win32",
-      hidden ? "hidden" : "visible");
+  char logName[OUT_NAME_MAX], logPath[MAX_PATH * 3];
+  snprintf(logName, sizeof(logName), "shm-%s-%s.serial.log",
+      sectionName[0] == '\\' ? "nt" : "win32", hidden ? "hidden" : "visible");
+  outPath(options, logName, logPath, sizeof(logPath));
 
   enum ShmResult result = SHM_REFUSED;
   char reply[512];
@@ -1751,6 +1793,25 @@ static bool runShm(const struct Options * options, struct Json * report)
   jsonBool(report, "passed", passed);
   jsonClose(report, '}');
   return passed;
+}
+
+// the newest 2.x configuration schema in the HCS's service properties
+static unsigned newestSchema(const char * doc)
+{
+  unsigned newest = SCHEMA_MINOR;
+  for(const char * p = doc; (p = jsonFind(p, "Major"));)
+  {
+    const unsigned long major = strtoul(p, NULL, 10);
+    const char * minor = jsonFind(p, "Minor");
+    if (!minor)
+      break;
+
+    const unsigned long value = strtoul(minor, NULL, 10);
+    if (major == 2 && value > newest && value < 100)
+      newest = value;
+    p = minor;
+  }
+  return newest;
 }
 
 static BOOL WINAPI onConsoleCtrl(DWORD type)
@@ -1915,8 +1976,12 @@ static bool prepare(struct Options * options)
   }
 
   char * out = fullPath(options->out);
-  if (!out)
+  if (!out || strlen(out) + 1 + OUT_NAME_MAX > sizeof(options->out))
+  {
+    printf("The output folder's path is too long: %s\n", options->out);
+    free(out);
     return false;
+  }
   snprintf(options->out, sizeof(options->out), "%s", out);
   free(out);
 
@@ -1932,8 +1997,7 @@ static bool prepare(struct Options * options)
 
   // the VMs boot copies, so that granting them access changes no file of
   // WSL's
-  snprintf(options->kernel, sizeof(options->kernel), "%s\\kernel",
-      options->out);
+  outPath(options, "kernel", options->kernel, sizeof(options->kernel));
   WCHAR * source = widen(options->kernelSource);
   WCHAR * copy   = widen(options->kernel);
   const bool  copied    = CopyFileW(source, copy, FALSE);
@@ -1947,8 +2011,7 @@ static bool prepare(struct Options * options)
     return false;
   }
 
-  snprintf(options->initrd, sizeof(options->initrd), "%s\\initrd.cpio",
-      options->out);
+  outPath(options, "initrd.cpio", options->initrd, sizeof(options->initrd));
   if (!writeInitrd(options->initrd))
   {
     printf("Cannot write %s\n", options->initrd);
@@ -1999,6 +2062,25 @@ int main(int argc, char ** argv)
   jsonRaw(&report, "compute_systems", SUCCEEDED(hr) ? systems : NULL);
   free(systems);
 
+  // the configuration schemas the HCS supports
+  options.schemaMinor = SCHEMA_MINOR;
+  if (api.getServiceProperties)
+  {
+    PWSTR result = NULL;
+    const HRESULT shr = api.getServiceProperties(
+        L"{\"PropertyTypes\":[\"Basic\"]}", &result);
+    char * doc = result ? narrow(result) : NULL;
+    if (result)
+      LocalFree(result);
+
+    jsonResult(&report, "service_properties_query", shr);
+    jsonRaw(&report, "service_properties", SUCCEEDED(shr) ? doc : NULL);
+    if (SUCCEEDED(shr))
+      options.schemaMinor = newestSchema(doc);
+    free(doc);
+  }
+  jsonNumber(&report, "newest_schema_minor", options.schemaMinor);
+
   jsonOpen(&report, "cases", '[');
   bool hdvPassed = false, shmPassed = false;
   if (options.hdv && !aborted)
@@ -2011,7 +2093,7 @@ int main(int argc, char ** argv)
   strAdd(&report.s, "\n", 1);
 
   char reportPath[MAX_PATH * 3];
-  snprintf(reportPath, sizeof(reportPath), "%s\\report.json", options.out);
+  outPath(&options, "report.json", reportPath, sizeof(reportPath));
   if (!writeFile(reportPath, report.s.data, report.s.len))
     printf("Cannot write %s\n", reportPath);
   free(report.s.data);
