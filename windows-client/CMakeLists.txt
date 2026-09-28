@@ -74,6 +74,19 @@ if(WIN32)
   set_target_properties(lg-windows-client-producer PROPERTIES
     LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
 
+  # runs in a Windows guest, which has no MinGW runtime
+  add_executable(lg-hyperv-ivshmem src/hyperv_ivshmem.c)
+  target_include_directories(lg-hyperv-ivshmem PRIVATE
+    "${PROJECT_TOP}/vendor/ivshmem")
+  target_link_libraries(lg-hyperv-ivshmem
+    advapi32
+    cfgmgr32
+    newdev
+    setupapi
+  )
+  set_target_properties(lg-hyperv-ivshmem PROPERTIES
+    LINK_FLAGS "-municode -static -Wl,--gc-sections -Wl,--nxcompat")
+
   # the HCS shared memory probe boots VMs with its own init, which needs a
   # compiler for x86_64 Linux: the host's GCC when cross-compiling from
   # Linux, else Clang with LLD

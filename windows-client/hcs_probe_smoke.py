@@ -25,7 +25,9 @@ stands in for the kernel, so no VM can boot. With --kernel, the VMs boot a
 real kernel where the runner can run them, and the report's findings, the
 guests' replies and their kernels' messages about devices are printed; what
 works there is reported, not required. With --vm, the probe checks an
-existing VM instead, and what the HCS let it do is printed, not required."""
+existing VM instead, and what the HCS let it do is printed, not required.
+With --windows-disk, it boots a Windows guest from that disk, and what the
+guest's IVSHMEM driver did is printed, not required."""
 
 import argparse
 import json
@@ -116,6 +118,43 @@ def check_vm(args):
   return 0
 
 
+def check_windows(args):
+  """The probe's Windows guest, which may take many minutes to set itself up
+  on its first boot."""
+  result = run([args.probe, '--windows-disk', args.windows_disk, '--out',
+      args.output], 3600)
+  out = result.stdout + result.stderr
+  if result.returncode == 2 and 'computecore.dll is missing' in out:
+    print('This machine has no Host Compute Service, nothing more to check')
+    return 0
+  if result.returncode not in (0, 1):
+    sys.exit(f'the probe exited with {result.returncode}')
+
+  report = json.loads((args.output / 'report.json').read_text('utf-8'))
+  if report['aborted']:
+    sys.exit('the report says the probe was aborted')
+  cases = {case['case']: case for case in report['cases']}
+  if set(cases) != {'windows'}:
+    sys.exit(f'unexpected cases: {sorted(cases)}')
+
+  case = cases['windows']
+  if case.get('still_listed'):
+    sys.exit(f'the HCS still lists VM {case["vm_id"]}')
+
+  print(f'Windows {report["windows"]}')
+  print('windows:')
+  for key, value in case.items():
+    if key in ('config', 'guest'):
+      continue
+    if key.endswith('_gpa') and isinstance(value, int):
+      value = hex(value)
+    print_value(key, value, '  ')
+  for line in (case.get('guest') or '').splitlines()[:200]:
+    print(f'  guest: {line}')
+  print('The probe ended cleanly and wrote a well-formed report')
+  return 0
+
+
 def print_findings(report, output):
   print(f'Windows {report["windows"]}, newest configuration schema '
       f'2.{report["newest_schema_minor"]}')
@@ -162,6 +201,9 @@ def main():
       help='the ID of an existing VM for the probe to check instead')
   parser.add_argument('--size-mib', type=int,
       help='the size of the shared memory for --vm')
+  parser.add_argument('--windows-disk', type=Path,
+      help='a disk with Windows that runs lg-hyperv-ivshmem on COM1, for '
+      'the probe to boot instead')
   args = parser.parse_args()
   args.probe  = args.probe.resolve()
   args.output = args.output.resolve()
@@ -175,6 +217,9 @@ def main():
   args.output.parent.mkdir(parents=True, exist_ok=True)
   if args.vm:
     return check_vm(args)
+  if args.windows_disk:
+    args.windows_disk = args.windows_disk.resolve()
+    return check_windows(args)
 
   # without a kernel, any existing file stands in for one and no guest can
   # answer, so a short wait does; with one, the probe waits as it does on a PC

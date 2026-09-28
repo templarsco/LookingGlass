@@ -382,6 +382,93 @@ jobs:
           hcs-probe-vm-*/report.json
         if-no-files-found: ignore
 
+  windows-client-guest:
+    runs-on: windows-2025
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        submodules: recursive
+    - name: Build the HCS probe and lg-hyperv-ivshmem
+      run: |
+        mkdir windows-client\build
+        cd windows-client\build
+        cmake -G "MinGW Makefiles" ..
+        mingw32-make "-j$([Environment]::ProcessorCount)" `
+          lg-windows-client-hcs-probe lg-hyperv-ivshmem
+    - name: Show the runner's memory as lg-hyperv-ivshmem reads it
+      run: |
+        windows-client\build\lg-hyperv-ivshmem.exe memory
+        $bytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+        "Windows reports 0x{0:x} bytes of memory" -f $bytes
+    - name: Get the IVSHMEM driver that Looking Glass's installer bundles
+      id: driver
+      run: |
+        # relative paths, as Git's GNU tar takes D: for a host
+        cd $env:RUNNER_TEMP
+        Invoke-WebRequest https://dl.quantum2.xyz/ivshmem.tar.gz `
+          -OutFile ivshmem.tar.gz
+        New-Item -ItemType Directory ivshmem-driver | Out-Null
+        tar -xzf ivshmem.tar.gz -C ivshmem-driver
+        $dir = "$env:RUNNER_TEMP\ivshmem-driver"
+        Get-ChildItem -Recurse $dir -File | Format-Table FullName, Length
+        Get-ChildItem -Recurse $dir -File -Include *.cat, *.sys |
+          Get-AuthenticodeSignature | Format-List Path, Status,
+            @{ n = 'Signer'; e = { $_.SignerCertificate.Subject } },
+            @{ n = 'Issuer'; e = { $_.SignerCertificate.Issuer } }
+        # the 64-bit INF for the newest Windows in the archive
+        $infs = @(Get-ChildItem -Recurse $dir -Filter *.inf)
+        $inf = $null
+        foreach ($os in 'w11', 'win11', '2k25', '2k22', 'w10', 'win10', '') {
+          $inf = $infs | Where-Object FullName -match "$os.*(amd64|x64)" |
+            Select-Object -First 1
+          if ($inf) {
+            break
+          }
+        }
+        if (-not $inf) {
+          $inf = $infs | Select-Object -First 1
+        }
+        "Using $($inf.FullName)"
+        Get-Content $inf.FullName | Select-Object -First 80
+        "inf=$($inf.FullName)" >> $env:GITHUB_OUTPUT
+    - name: Get Windows Server's evaluation ISO
+      run: |
+        # Microsoft's evaluation center: Windows Server 2025, 64-bit, en-US
+        curl.exe -L --fail --retry 3 --silent --show-error `
+          -o "$env:RUNNER_TEMP\server.iso" `
+          "https://go.microsoft.com/fwlink/?linkid=2345730&clcid=0x409&culture=en-us&country=us"
+        Get-Item "$env:RUNNER_TEMP\server.iso" | Format-List FullName, Length
+    - name: Make a Windows disk that runs lg-hyperv-ivshmem on COM1
+      shell: powershell
+      run: |
+        windows-client\hcs_probe_windows_disk.ps1 `
+          -Iso "$env:RUNNER_TEMP\server.iso" `
+          -Disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
+          -Tool windows-client\build\lg-hyperv-ivshmem.exe `
+          -Inf "${{ steps.driver.outputs.inf }}"
+        Remove-Item "$env:RUNNER_TEMP\server.iso"
+    - name: Check the IVSHMEM driver over shared memory in a Windows guest
+      run: |
+        python windows-client\hcs_probe_smoke.py `
+          windows-client\build\lg-windows-client-hcs-probe.exe `
+          --windows-disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
+          --output hcs-probe-windows
+    - name: Show what the Windows guest logged
+      if: always()
+      shell: powershell
+      run: |
+        windows-client\hcs_probe_windows_disk.ps1 -Logs `
+          -Disk "$env:RUNNER_TEMP\guest\windows.vhdx"
+    - name: Upload the Windows guest's report and serial log
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-hcs-probe-windows
+        path: |
+          hcs-probe-windows/report.json
+          hcs-probe-windows/*.serial.log
+        if-no-files-found: ignore
+
   windows-client-display:
     runs-on: windows-2025
     defaults:
