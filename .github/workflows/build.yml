@@ -193,12 +193,32 @@ jobs:
         cmake ..
         make -j$(nproc)
         ctest --output-on-failure
-    - name: Cross-compile the Windows client loopback
+    - name: Cross-compile the Windows client loopback and the HCS probe
       run: |
         mkdir windows-client/build
         cd windows-client/build
         cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake ..
         make -j$(nproc)
+    - name: Check the HCS probe's guest init under QEMU with ivshmem
+      run: |
+        sudo apt-get install qemu-system-x86
+        # Ubuntu's generic kernel, unpacked rather than installed
+        mkdir guest-kernel
+        cd guest-kernel
+        image=$(apt-cache depends linux-image-virtual |
+          awk '/Depends: linux-image-[0-9]/ { print $2; exit }')
+        apt-get download "${image/linux-image-/linux-image-unsigned-}"
+        dpkg-deb -x linux-image-unsigned-*.deb .
+        cd ..
+        python3 windows-client/hcs_probe_guest_test.py \
+          windows-client/build/hcs-probe-guest-init guest-kernel/boot/vmlinuz-* \
+          --log guest-serial.log
+    - name: Upload the guest serial log
+      if: failure()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-hcs-guest
+        path: guest-serial.log
     - name: Cross-compile the Windows client
       run: |
         mkdir client/build-windows
