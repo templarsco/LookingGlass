@@ -273,19 +273,48 @@ jobs:
         }
         Get-Item $kernel | Format-List FullName, Length, LastWriteTime
         "kernel=$kernel" >> $env:GITHUB_OUTPUT
+    - name: Keep a dump when a VM worker process crashes
+      run: |
+        # each VM runs in a vmwp.exe; Windows Error Reporting writes the dump
+        $dumps = "$env:RUNNER_TEMP\vmwp-dumps"
+        New-Item -ItemType Directory -Force $dumps | Out-Null
+        icacls $dumps /grant '*S-1-1-0:(OI)(CI)F' | Out-Null
+        $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\' +
+          'LocalDumps\vmwp.exe'
+        New-Item -Force $key | Out-Null
+        Set-ItemProperty $key -Name DumpFolder -Value $dumps -Type ExpandString
+        Set-ItemProperty $key -Name DumpType -Value 1 -Type DWord
+        Set-ItemProperty $key -Name DumpCount -Value 8 -Type DWord
     - name: Check shared memory with Hyper-V VMs that boot WSL's kernel
       run: |
         python windows-client\hcs_probe_smoke.py `
           windows-client\build\lg-windows-client-hcs-probe.exe `
           --kernel "${{ steps.wsl-kernel.outputs.kernel }}" --output hcs-probe
+    - name: Check shared memory with a VM of Hyper-V Manager
+      run: |
+        # a disposable VM without a disk, which waits in its firmware
+        $vm = New-VM -Name lg-hcs-probe-vmms -Generation 2 `
+          -MemoryStartupBytes 512MB -NoVHD -Path "$env:RUNNER_TEMP\vmms"
+        try {
+          Set-VMMemory -VM $vm -DynamicMemoryEnabled $false
+          Start-VM -VM $vm
+          python windows-client\hcs_probe_smoke.py `
+            windows-client\build\lg-windows-client-hcs-probe.exe `
+            --vm $vm.Id --output hcs-probe-vm
+          $code = $LASTEXITCODE
+        } finally {
+          Stop-VM -VM $vm -TurnOff -Force -ErrorAction SilentlyContinue
+          Remove-VM -VM $vm -Force
+        }
+        exit $code
     - name: Show the Hyper-V events from the HCS probe's VMs
       if: always()
       run: |
         # what the VM workers say, such as why a VM stopped by itself
-        function Show-Events($events, $log) {
+        function Show-Events($events, $log, $length = 500) {
           $events | Sort-Object TimeCreated | ForEach-Object {
             $text = "$($_.Message)" -replace '\s+', ' '
-            $text = $text.Substring(0, [Math]::Min(500, $text.Length))
+            $text = $text.Substring(0, [Math]::Min($length, $text.Length))
             "$($_.TimeCreated.ToString('HH:mm:ss.fff')) $log $($_.Id) " +
               "$($_.LevelDisplayName): $text"
           }
@@ -297,10 +326,48 @@ jobs:
               -ErrorAction SilentlyContinue | Where-Object TimeCreated -ge $since)
             Show-Events $events $_.LogName
           }
-        # a crash of the worker process shows here
+        # a crash of the worker process shows here, and its report's bucket
         $crashes = @(Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
           LogName = 'Application'; StartTime = $since; Level = 1, 2 })
         Show-Events $crashes Application
+        $reports = @(Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
+          LogName = 'Application'; StartTime = $since
+          ProviderName = 'Windows Error Reporting' })
+        Show-Events $reports Application 2000
+    - name: Show where a VM worker process crashed
+      if: always()
+      run: |
+        $wer = "$env:ProgramData\Microsoft\Windows\WER"
+        Get-ChildItem $wer -Recurse -File -Filter Report.wer `
+            -ErrorAction SilentlyContinue |
+          Where-Object DirectoryName -match 'vmwp' | ForEach-Object {
+            "== $($_.FullName)"
+            Get-Content $_.FullName -Encoding Unicode |
+              Select-String '^(EventType|Sig|DynamicSig|ReportDescription)'
+          }
+        $dumps = @(Get-ChildItem "$env:RUNNER_TEMP\vmwp-dumps", $wer -Recurse `
+            -File -Include *.dmp, *.mdmp, *.hdmp -ErrorAction SilentlyContinue |
+          Where-Object FullName -match 'vmwp')
+        if (-not $dumps) {
+          'No dump of a crashed VM worker process'
+          exit 0
+        }
+        $dumps | Format-Table FullName, Length
+        $cdb = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe"
+        if (-not (Test-Path $cdb)) {
+          "No debugger at $cdb"
+          exit 0
+        }
+        # Microsoft's public symbols name the functions on the stack
+        $symbols = "srv*$env:RUNNER_TEMP\symbols*" +
+          'https://msdl.microsoft.com/download/symbols'
+        foreach ($dump in $dumps | Select-Object -First 2) {
+          "== $($dump.FullName)"
+          & $cdb -z $dump.FullName -y $symbols -i "$env:SystemRoot\System32" `
+            -c ('.exr -1; .ecxr; kn 30; ub @rip L30; u @rip L6; ' +
+              'lmvm vmvpci; !analyze -v; q') 2>&1 | Select-Object -Last 400
+        }
+        exit 0
     - name: Upload the HCS probe's report and serial logs
       if: always()
       uses: actions/upload-artifact@v6
@@ -309,6 +376,7 @@ jobs:
         path: |
           hcs-probe/report.json
           hcs-probe/*.serial.log
+          hcs-probe-vm/report.json
         if-no-files-found: ignore
 
   windows-client-display:

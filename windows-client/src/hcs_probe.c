@@ -32,6 +32,10 @@
  * on the serial port. The VMs boot copies of the kernel and the initrd in the
  * probe's output folder and end when it exits, so the probe leaves nothing on
  * the host but that folder.
+ *
+ * With --vm it instead checks a VM that something else created, such as
+ * Hyper-V Manager: whether the HCS opens it and lets this PC add a
+ * SharedMemory region to it, which the probe removes again.
  */
 
 #include <windows.h>
@@ -39,6 +43,7 @@
 #include <objbase.h>
 #include <sddl.h>
 
+#include <ctype.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -200,6 +205,11 @@ static struct
   HRESULT (WINAPI * getServiceProperties)(PCWSTR, PWSTR *);
   HRESULT (WINAPI * setComputeSystemCallback)(HCS_SYSTEM, DWORD, const void *,
       HCS_EVENT_CALLBACK);
+
+  // only needed to check an existing VM
+  HRESULT (WINAPI * openComputeSystem)(PCWSTR, DWORD, HCS_SYSTEM *);
+  HRESULT (WINAPI * modifyComputeSystem)(HCS_SYSTEM, HCS_OPERATION, PCWSTR,
+      HANDLE);
 
   // device emulation, only needed by the hdv case
   HRESULT (WINAPI * initializeDeviceHost)(HCS_SYSTEM, HDV_HOST *);
@@ -534,6 +544,16 @@ static HRESULT hcsCall(HCS_SYSTEM system, HcsSystemCall call,
   return hr;
 }
 
+static HRESULT hcsModify(HCS_SYSTEM system, const char * request, char ** doc)
+{
+  WCHAR * wrequest = widen(request);
+  HCS_OPERATION op = hcsOperation();
+  HRESULT hr = hcsFinish(op, api.modifyComputeSystem(system, op, wrequest,
+        NULL), 30000, doc);
+  free(wrequest);
+  return hr;
+}
+
 // every compute system the HCS knows
 static HRESULT hcsEnumerate(char ** doc)
 {
@@ -576,6 +596,8 @@ static bool loadHcs(void)
   }
   RESOLVE(core, getServiceProperties, "HcsGetServiceProperties");
   RESOLVE(core, setComputeSystemCallback, "HcsSetComputeSystemCallback");
+  RESOLVE(core, openComputeSystem, "HcsOpenComputeSystem");
+  RESOLVE(core, modifyComputeSystem, "HcsModifyComputeSystem");
 
   HMODULE hdv = LoadLibraryExW(L"vmdevicehost.dll", NULL,
       LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -800,6 +822,9 @@ struct Options
   uint64_t size;
   DWORD    bootTimeoutMs;
   bool     hdv, shm;
+
+  // an existing VM to check instead
+  char     vm[40];
 
   // the newest 2.x configuration schema the HCS supports
   unsigned schemaMinor;
@@ -1673,6 +1698,31 @@ static bool guestConfig(struct Vm * vm, unsigned offset, unsigned size,
   return true;
 }
 
+// a device host for the VM, with the COM security that lets the VM worker
+// call back, which a process sets only once
+static HRESULT hdvHost(HCS_SYSTEM system, HDV_HOST * host)
+{
+  static bool comSecurity = false;
+
+  HRESULT hr;
+  if (api.initializeDeviceHostEx)
+  {
+    hr = api.initializeDeviceHostEx(system, comSecurity ?
+        HdvDeviceHostFlagNone : HdvDeviceHostFlagInitializeComSecurity, host);
+
+    // maybe set already by a failed attempt
+    if (hr == RPC_E_TOO_LATE && !comSecurity)
+      hr = api.initializeDeviceHostEx(system, HdvDeviceHostFlagNone, host);
+    comSecurity = comSecurity || SUCCEEDED(hr);
+  }
+  else
+    hr = api.initializeDeviceHost(system, host);
+
+  if (FAILED(hr))
+    *host = NULL;
+  return hr;
+}
+
 static HRESULT hdvMap(HDV_DEVICE handle, struct Section * section)
 {
   return api.createSectionBackedMmioRange(handle, HDV_PCI_BAR2, 0,
@@ -1741,8 +1791,6 @@ static enum AttemptResult hdvAttempt(const struct Options * options,
     enum HdvMapping mapping, unsigned schemaMinor, struct Section * section,
     struct Json * report)
 {
-  static bool comSecurity = false;
-
   struct Vm vm;
   vmInit(&vm, options);
 
@@ -1791,27 +1839,11 @@ static enum AttemptResult hdvAttempt(const struct Options * options,
     goto done;
   result = ATTEMPT_FAILED;
 
-  // the device host needs COM security that lets the VM worker call back
-  HRESULT hr;
-  if (api.initializeDeviceHostEx)
-  {
-    hr = api.initializeDeviceHostEx(vm.system, comSecurity ?
-        HdvDeviceHostFlagNone : HdvDeviceHostFlagInitializeComSecurity,
-        &host);
-
-    // COM security is set once per process, maybe by a failed attempt
-    if (hr == RPC_E_TOO_LATE && !comSecurity)
-      hr = api.initializeDeviceHostEx(vm.system, HdvDeviceHostFlagNone,
-          &host);
-    comSecurity = comSecurity || SUCCEEDED(hr);
-  }
-  else
-    hr = api.initializeDeviceHost(vm.system, &host);
+  HRESULT hr = hdvHost(vm.system, &host);
   jsonResult(report, "device_host", hr);
   if (FAILED(hr))
   {
     printf("  HdvInitializeDeviceHost failed: 0x%08lx\n", (unsigned long)hr);
-    host = NULL;
     goto done;
   }
 
@@ -1874,12 +1906,16 @@ static enum AttemptResult hdvAttempt(const struct Options * options,
   const LONG readsBefore  = device.bar2Reads;
   const LONG writesBefore = device.bar2Writes;
   const bool checked = guestChecks(&vm, section, nonce, report);
-  direct = mapped &&
-    device.bar2Reads == readsBefore && device.bar2Writes == writesBefore;
+  const bool intercepted =
+    device.bar2Reads != readsBefore || device.bar2Writes != writesBefore;
+  direct = checked && mapped && !intercepted;
+  jsonBool(report, "bar2_intercepted", intercepted);
   jsonBool(report, "bar2_direct", direct);
   printf("  %s\n", direct ?
       "BAR2 is the section itself: no guest access reached the emulator" :
-      "BAR2 accesses went through the emulator, far too slow for frames");
+      intercepted ?
+      "BAR2 accesses went through the emulator, far too slow for frames" :
+      "BAR2 shows neither the section nor the emulator");
   if (checked && direct)
     result = ATTEMPT_PASSED;
 
@@ -2117,6 +2153,144 @@ static bool runShm(const struct Options * options, struct Json * report)
   return passed;
 }
 
+static bool containsNoCase(const char * text, const char * part)
+{
+  const size_t len = strlen(part);
+  for(; *text; ++text)
+    if (_strnicmp(text, part, len) == 0)
+      return true;
+  return false;
+}
+
+static void regionRequest(struct Str * request, const char * type,
+    const char * sectionName, uint64_t size)
+{
+  strPrintf(request, "{\"ResourcePath\":"
+      "\"VirtualMachine/Devices/SharedMemory/Regions\",\"RequestType\":"
+      "\"%s\",\"Settings\":{\"SectionName\":", type);
+  strJsonString(request, sectionName);
+  strPrintf(request, ",\"StartOffset\":0,\"Length\":%" PRIu64 ","
+      "\"AllowGuestWrite\":true,\"HiddenFromGuest\":false}}", size);
+}
+
+// what the HCS lets this PC do with a VM that it did not create, such as one
+// of Hyper-V Manager: open it, create a device host for it, and add a
+// SharedMemory region, which the probe removes again. The VM keeps running,
+// and no guest checks the region.
+static bool runVm(const struct Options * options, const char * systems,
+    struct Json * report)
+{
+  jsonOpen(report, NULL, '{');
+  jsonString(report, "case", "vm");
+  jsonString(report, "vm_id", options->vm);
+
+  const bool listed = systems && containsNoCase(systems, options->vm);
+  jsonBool(report, "listed", listed);
+  printf("[vm] %s %s among the compute systems the HCS lists\n", options->vm,
+      listed ? "is" : "is not");
+
+  bool added = false, removed = false;
+  HCS_SYSTEM system = NULL;
+  struct Section section = { 0 };
+  char * doc = NULL;
+
+  if (!api.openComputeSystem || !api.modifyComputeSystem)
+  {
+    printf("  computecore.dll lacks HcsOpenComputeSystem or "
+        "HcsModifyComputeSystem\n");
+    goto done;
+  }
+
+  WCHAR * wid = widen(options->vm);
+  HRESULT hr = api.openComputeSystem(wid, GENERIC_ALL, &system);
+  free(wid);
+  jsonResult(report, "open", hr);
+  printf("  Opening it through the HCS: 0x%08lx\n", (unsigned long)hr);
+  if (FAILED(hr))
+  {
+    system = NULL;
+    goto done;
+  }
+
+  hr = hcsCall(system, api.getComputeSystemProperties, NULL, 10000, &doc);
+  jsonResult(report, "properties_query", hr);
+  jsonRaw(report, "properties", SUCCEEDED(hr) ? doc : NULL);
+  printf("  Its properties: 0x%08lx %s\n", (unsigned long)hr,
+      doc ? doc : "");
+  free(doc);
+  doc = NULL;
+
+  // whether a process of this PC could emulate a device for it
+  if (hdvAvailable())
+  {
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    HDV_HOST host;
+    hr = hdvHost(system, &host);
+    jsonResult(report, "device_host", hr);
+    printf("  A device host for it: 0x%08lx\n", (unsigned long)hr);
+    if (host)
+      jsonResult(report, "device_host_teardown",
+          api.teardownDeviceHost(host));
+  }
+
+  GUID guid;
+  char name[48], sectionName[96], configName[96];
+  newGuid(&guid, name, sizeof(name));
+  snprintf(sectionName, sizeof(sectionName), "Global\\lg-hcs-probe-%s",
+      name);
+  snprintf(configName, sizeof(configName),
+      "\\BaseNamedObjects\\lg-hcs-probe-%s", name);
+  if (!sectionCreate(&section, sectionName, options->size))
+    goto done;
+  sectionFill(&section, random64());
+  jsonString(report, "section_name", configName);
+
+  struct Str request = { 0 };
+  regionRequest(&request, "Add", configName, section.size);
+  hr = hcsModify(system, request.data, &doc);
+  free(request.data);
+  jsonResult(report, "region_add", hr);
+  jsonString(report, "region_add_result", doc);
+  printf("  Adding a %" PRIu64 " MiB SharedMemory region to it: 0x%08lx %s\n",
+      section.size >> 20, (unsigned long)hr, doc ? doc : "");
+  free(doc);
+  doc = NULL;
+  added = SUCCEEDED(hr);
+  if (!added)
+    goto done;
+
+  hr = hcsCall(system, api.getComputeSystemProperties,
+      "{\"PropertyTypes\":[\"SharedMemoryRegion\"]}", 10000, &doc);
+  jsonResult(report, "region_query", hr);
+  jsonRaw(report, "region_info", SUCCEEDED(hr) ? doc : NULL);
+  printf("  Where the HCS maps it: 0x%08lx %s\n", (unsigned long)hr,
+      doc ? doc : "");
+  free(doc);
+  doc = NULL;
+
+  request = (struct Str){ 0 };
+  regionRequest(&request, "Remove", configName, section.size);
+  hr = hcsModify(system, request.data, &doc);
+  free(request.data);
+  jsonResult(report, "region_remove", hr);
+  jsonString(report, "region_remove_result", doc);
+  printf("  Removing the region: 0x%08lx %s\n", (unsigned long)hr,
+      doc ? doc : "");
+  free(doc);
+  removed = SUCCEEDED(hr);
+
+done:
+  sectionClose(&section);
+  if (system)
+    api.closeComputeSystem(system);
+
+  jsonBool(report, "region_added", added);
+  jsonBool(report, "region_removed", removed);
+  jsonBool(report, "passed", added && removed);
+  jsonClose(report, '}');
+  return added && removed;
+}
+
 // the newest 2.x configuration schema in the HCS's service properties
 static unsigned newestSchema(const char * doc)
 {
@@ -2160,7 +2334,12 @@ static void usage(void)
     "                  shm (SharedMemory region) case\n"
     "  --out DIR       where to write the report and serial logs\n"
     "                  (default: a new folder next to this program)\n"
-    "  --timeout S     how long a VM may take to boot (default: 90)\n");
+    "  --timeout S     how long a VM may take to boot (default: 90)\n"
+    "  --vm ID         check an existing VM instead, such as one of Hyper-V\n"
+    "                  Manager, by its ID ((Get-VM NAME).Id): whether the\n"
+    "                  HCS opens it and lets this PC add shared memory to\n"
+    "                  it, which the probe removes again. The VM keeps\n"
+    "                  running.\n");
 }
 
 static void parseOptions(int argc, char ** argv, struct Options * options)
@@ -2170,6 +2349,7 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
   options->bootTimeoutMs = 90000;
   options->hdv           = true;
   options->shm           = true;
+  bool only = false;
 
   for(int i = 1; i < argc; i += 2)
   {
@@ -2206,6 +2386,18 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
       options->shm = strcmp(value, "shm") == 0;
       if (!options->hdv && !options->shm)
         fail("--only takes hdv or shm");
+      only = true;
+    }
+    else if (strcmp(arg, "--vm") == 0)
+    {
+      // a GUID, as Get-VM and the HCS give it
+      bool guid = strlen(value) == 36;
+      for(int c = 0; guid && c < 36; ++c)
+        guid = c == 8 || c == 13 || c == 18 || c == 23 ?
+          value[c] == '-' : isxdigit((unsigned char)value[c]);
+      if (!guid)
+        fail("--vm takes the VM's ID, such as (Get-VM NAME).Id");
+      snprintf(options->vm, sizeof(options->vm), "%s", value);
     }
     else if (strcmp(arg, "--timeout") == 0)
     {
@@ -2219,6 +2411,13 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
       usage();
       exit(2);
     }
+  }
+
+  if (options->vm[0])
+  {
+    if (only)
+      fail("--vm and --only do not go together");
+    options->hdv = options->shm = false;
   }
 }
 
@@ -2236,9 +2435,11 @@ static void windowsVersion(char * text, size_t size)
     snprintf(text, size, "unknown");
 }
 
+// the output folder, and what the probe's VMs boot when it boots any
 static bool prepare(struct Options * options)
 {
-  if (!options->kernelSource[0])
+  const bool bootsVms = options->hdv || options->shm;
+  if (bootsVms && !options->kernelSource[0])
   {
     // WSL's kernel, or where WSL from before version 2 kept it
     WCHAR programFiles[MAX_PATH], systemRoot[MAX_PATH];
@@ -2265,18 +2466,21 @@ static bool prepare(struct Options * options)
     }
   }
 
-  char * kernel = fullPath(options->kernelSource);
-  if (!kernel || !fileExists(kernel))
+  if (bootsVms)
   {
-    printf("The kernel %s does not exist. Install WSL (wsl --install) or "
-        "pass --kernel with a x86_64 Linux kernel that has Hyper-V PCI "
-        "support.\n", options->kernelSource);
+    char * kernel = fullPath(options->kernelSource);
+    if (!kernel || !fileExists(kernel))
+    {
+      printf("The kernel %s does not exist. Install WSL (wsl --install) or "
+          "pass --kernel with a x86_64 Linux kernel that has Hyper-V PCI "
+          "support.\n", options->kernelSource);
+      free(kernel);
+      return false;
+    }
+    snprintf(options->kernelSource, sizeof(options->kernelSource), "%s",
+        kernel);
     free(kernel);
-    return false;
   }
-  snprintf(options->kernelSource, sizeof(options->kernelSource), "%s",
-      kernel);
-  free(kernel);
 
   if (!options->out[0])
   {
@@ -2316,6 +2520,8 @@ static bool prepare(struct Options * options)
     printf("Cannot create %s: error %lu\n", options->out, error);
     return false;
   }
+  if (!bootsVms)
+    return true;
 
   // the VMs boot copies, so that granting them access changes no file of
   // WSL's
@@ -2365,8 +2571,9 @@ int main(int argc, char ** argv)
 
   char version[32];
   windowsVersion(version, sizeof(version));
-  printf("Windows %s, kernel %s, %" PRIu64 " MiB of shared memory\n"
-      "Writing the report to %s\n", version, options.kernelSource,
+  printf("Windows %s, %s %s, %" PRIu64 " MiB of shared memory\n"
+      "Writing the report to %s\n", version, options.vm[0] ? "VM" :
+      "kernel", options.vm[0] ? options.vm : options.kernelSource,
       options.size >> 20, options.out);
 
   struct Json report = { 0 };
@@ -2374,7 +2581,7 @@ int main(int argc, char ** argv)
   jsonString(&report, "probe", "lg-windows-client-hcs-probe");
   jsonNumber(&report, "report_version", 1);
   jsonString(&report, "windows", version);
-  jsonString(&report, "kernel", options.kernelSource);
+  jsonString(&report, "kernel", options.vm[0] ? NULL : options.kernelSource);
   jsonNumber(&report, "shared_memory_size", options.size);
 
   // what the HCS runs already, such as WSL or VMs of Hyper-V Manager
@@ -2382,7 +2589,6 @@ int main(int argc, char ** argv)
   const HRESULT hr = hcsEnumerate(&systems);
   jsonResult(&report, "enumerate", hr);
   jsonRaw(&report, "compute_systems", SUCCEEDED(hr) ? systems : NULL);
-  free(systems);
 
   // the configuration schemas the HCS supports
   options.schemaMinor = SCHEMA_MINOR;
@@ -2404,11 +2610,14 @@ int main(int argc, char ** argv)
   jsonNumber(&report, "newest_schema_minor", options.schemaMinor);
 
   jsonOpen(&report, "cases", '[');
-  bool hdvPassed = false, shmPassed = false;
+  bool hdvPassed = false, shmPassed = false, vmPassed = false;
   if (options.hdv && !aborted)
     hdvPassed = runHdv(&options, &report);
   if (options.shm && !aborted)
     shmPassed = runShm(&options, &report);
+  if (options.vm[0] && !aborted)
+    vmPassed = runVm(&options, SUCCEEDED(hr) ? systems : NULL, &report);
+  free(systems);
   jsonClose(&report, ']');
   jsonBool(&report, "aborted", aborted);
   jsonClose(&report, '}');
@@ -2427,9 +2636,13 @@ int main(int argc, char ** argv)
   if (options.shm)
     printf("  shm, SharedMemory region    : %s\n", shmPassed ? "works" :
         "does not work");
+  if (options.vm[0])
+    printf("  vm, SharedMemory region added to the VM and removed: %s\n",
+        vmPassed ? "yes" : "no");
   printf("Report: %s\n", reportPath);
 
   if (aborted)
     return 1;
-  return (!options.hdv || hdvPassed) && (!options.shm || shmPassed) ? 0 : 1;
+  return (!options.hdv || hdvPassed) && (!options.shm || shmPassed) &&
+    (!options.vm[0] || vmPassed) ? 0 : 1;
 }

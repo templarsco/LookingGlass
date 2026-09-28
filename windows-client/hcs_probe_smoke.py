@@ -24,7 +24,8 @@ Service can tell, and ends up in a well-formed report. By default the probe
 stands in for the kernel, so no VM can boot. With --kernel, the VMs boot a
 real kernel where the runner can run them, and the report's findings, the
 guests' replies and their kernels' messages about devices are printed; what
-works there is reported, not required."""
+works there is reported, not required. With --vm, the probe checks an
+existing VM instead, and what the HCS let it do is printed, not required."""
 
 import argparse
 import json
@@ -82,6 +83,38 @@ NOTABLE = ('hv_pci', 'pci', 'bar', 'vmbus', 'error', 'fail', 'warn', 'panic',
     'call trace')
 
 
+def print_value(key, value, indent):
+  if isinstance(value, (dict, list)):
+    value = json.dumps(value)[:2000]
+  print(f'{indent}{key}: {value}')
+
+
+def check_vm(args):
+  """The probe's check of an existing VM, which only the HCS's answers show."""
+  result = run([args.probe, '--vm', args.vm, '--out', args.output], 600)
+  out = result.stdout + result.stderr
+  if result.returncode == 2 and 'computecore.dll is missing' in out:
+    print('This machine has no Host Compute Service, nothing more to check')
+    return 0
+  if result.returncode not in (0, 1):
+    sys.exit(f'the probe exited with {result.returncode}')
+
+  report = json.loads((args.output / 'report.json').read_text('utf-8'))
+  if report['aborted']:
+    sys.exit('the report says the probe was aborted')
+  cases = {case['case']: case for case in report['cases']}
+  if set(cases) != {'vm'}:
+    sys.exit(f'unexpected cases: {sorted(cases)}')
+
+  print(f'Windows {report["windows"]}, enumerate {report["enumerate"]}')
+  print_value('compute_systems', report['compute_systems'], '')
+  print('vm:')
+  for key, value in cases['vm'].items():
+    print_value(key, value, '  ')
+  print('The probe ended cleanly and wrote a well-formed report')
+  return 0
+
+
 def print_findings(report, output):
   print(f'Windows {report["windows"]}, newest configuration schema '
       f'2.{report["newest_schema_minor"]}')
@@ -97,7 +130,7 @@ def print_findings(report, output):
           for line in value:
             print(f'    device: {line}')
         elif isinstance(value, (dict, list)):
-          print(f'    {key}: {json.dumps(value)[:2000]}')
+          print_value(key, value, '    ')
         elif isinstance(value, int) and not isinstance(value, bool) and \
             (key.endswith('_address') or key.endswith('_gpa')):
           print(f'    {key}: {value:#x}')
@@ -124,6 +157,8 @@ def main():
       help='where the probe writes its report')
   parser.add_argument('--kernel', type=Path,
       help='an x86_64 Linux kernel with Hyper-V support for the VMs to boot')
+  parser.add_argument('--vm',
+      help='the ID of an existing VM for the probe to check instead')
   args = parser.parse_args()
   args.probe  = args.probe.resolve()
   args.output = args.output.resolve()
@@ -134,9 +169,12 @@ def main():
   if run([args.probe, '--only', 'nothing'], 60).returncode != 2:
     sys.exit('an invalid option was accepted')
 
+  args.output.parent.mkdir(parents=True, exist_ok=True)
+  if args.vm:
+    return check_vm(args)
+
   # without a kernel, any existing file stands in for one and no guest can
   # answer, so a short wait does; with one, the probe waits as it does on a PC
-  args.output.parent.mkdir(parents=True, exist_ok=True)
   result = run([args.probe, '--kernel', kernel, '--out', args.output] +
       ([] if args.kernel else ['--timeout', '30']), 3000)
   out = result.stdout + result.stderr
