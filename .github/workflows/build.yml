@@ -367,13 +367,8 @@ jobs:
           'https://msdl.microsoft.com/download/symbols'
         foreach ($dump in $dumps | Select-Object -First 2) {
           "== $($dump.FullName)"
-          # the stack, and the vPCI device's code that gave up
-          $device = 'vmvpci!Vpci::Core::VirtualDevice'
           & $cdb -z $dump.FullName -y $symbols -i "$env:SystemRoot\System32" `
-            -c (".exr -1; .ecxr; kn 30; lmvm vmvpci; .frame /r 8; " +
-              "x ${device}::*; uf ${device}::AddSectionToMitigatedRange; " +
-              "uf ${device}::CreateNewRangesForSection; q") 2>&1 |
-            Select-Object -Last 2500
+            -c '.exr -1; .ecxr; kn 30; q' 2>&1 | Select-Object -Last 120
         }
         exit 0
     - name: Upload the HCS probe's report and serial logs

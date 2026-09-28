@@ -88,7 +88,9 @@ in [windows-client](windows-client/README.md).
    Hyper-V runs nested:
    - The second route works there. The HCS maps the section, named
      `\BaseNamedObjects\<name>`, right after the VM's memory, and the PC
-     and the guest see each other's writes.
+     and the guest see each other's writes. The region has to be in the
+     VM's configuration when the HCS creates the VM: the HCS does not add
+     one to a running VM (0x80070032).
    - The first route does not work yet. The HCS offers the emulated device
      only when the VM's configuration declares it under `FlexibleIov`, and
      the guest reaches its configuration space but not its BARs. Backing
@@ -99,7 +101,8 @@ in [windows-client](windows-client/README.md).
      that VM with Hyper-V's PowerShell module, so the Hyper-V management
      service (VMMS) runs it, not the HCS directly. On the runners, the HCS
      lists and opens such a VM and creates a device host for it, but
-     refuses to add the region to it while it runs (0x8004102B).
+     refuses to add the region to it (0x8004102B). So the second route
+     needs a VM that the HCS creates with the region in its configuration.
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.

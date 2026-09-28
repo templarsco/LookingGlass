@@ -200,7 +200,9 @@ On those runners, Windows 10.0.26100, on September 28, 2026:
   the VM starts (0x800700a1). It maps the section right after the VM's
   memory and reports `GuestPhysicalAddress` as a page number. The guest and
   the PC see each other's writes. With `HiddenFromGuest`, the guest does not
-  find the section there.
+  find the section there. The HCS does not add a region to a running VM
+  (0x80070032, `ERROR_NOT_SUPPORTED`), so the region has to be in the VM's
+  configuration when the VM is created.
 - `hdv` does not work. The HCS offers the device only when the VM's
   configuration declares it under `FlexibleIov` with
   `"HostingModel": "External"`. The guest's reads and writes of the
@@ -215,9 +217,9 @@ On those runners, Windows 10.0.26100, on September 28, 2026:
   `E_UNEXPECTED`. The probe's first `hdv` VM ends that way. Once the guest
   is up, backing BAR2 succeeds with no effect.
 - `--vm` on a Hyper-V Manager VM: the HCS lists it, with `"Owner": "VMMS"`,
-  opens it and creates a device host for it, but refuses to add the region
-  while it runs (0x8004102B) and logs that the memory's virtual quantity,
-  limit and reservation are below their minimums.
+  opens it and creates a device host for it, but refuses to add the region,
+  of 32 MiB or of 1 GiB (0x8004102B), and logs that the memory's virtual
+  quantity, limit and reservation are below their minimums.
 
 The probe has not run on a PC with Limiar's VM yet.
 
