@@ -54,7 +54,7 @@ endif()
 add_subdirectory("${PROJECT_TOP}/common"          "${CMAKE_BINARY_DIR}/common")
 add_subdirectory("${PROJECT_TOP}/repos/LGMP/lgmp" "${CMAKE_BINARY_DIR}/lgmp"  )
 
-add_executable(lg-windows-client-loopback src/loopback.c)
+add_executable(lg-windows-client-loopback src/loopback.c src/session.c)
 target_link_libraries(lg-windows-client-loopback
   lg_common
   lgmp
@@ -62,6 +62,16 @@ target_link_libraries(lg-windows-client-loopback
 
 if(WIN32)
   set_target_properties(lg-windows-client-loopback PROPERTIES
+    LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+
+  # serves frames on a named section, for the client's LGMP smoke test
+  add_executable(lg-windows-client-producer src/producer.c src/session.c)
+  target_link_libraries(lg-windows-client-producer
+    lg_common
+    lgmp
+    advapi32
+  )
+  set_target_properties(lg-windows-client-producer PROPERTIES
     LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
 else()
   set_target_properties(lg-windows-client-loopback PROPERTIES

@@ -3,7 +3,7 @@
 This is Limiar's native Looking Glass viewer for a physical Windows PC. The
 plan and acceptance gates are in [LIMIAR-WINDOWS.md](../LIMIAR-WINDOWS.md).
 
-Two steps of that plan exist so far:
+Three steps of that plan exist so far:
 
 - Step 1: LGProtocol, LGMP and the `common` library build for the Windows
   client, with the bounded loopback test in this directory.
@@ -12,10 +12,15 @@ Two steps of that plan exist so far:
   and handles per-monitor DPI, resizing and fullscreen, focus, pointer
   capture with raw relative mouse input, a keyboard grab while captured,
   keyboard state and reconnects.
+- Step 3: the client reads frames over LGMP from a named shared memory
+  section on the PC, the Windows counterpart of the KVMFR device on Linux.
+  It refuses a section that accounts other than the user's can open.
 
-The client cannot show a guest yet. On Windows it only has the `test`
-transport, which generates frames inside the client. The local endpoint is
-step 3 and the guest transport is step 5.
+The client cannot show a guest yet, because nothing maps the section into a
+virtual machine yet. That is step 5, IVSHMEM on Hyper-V. Until then the
+client starts on the `test` transport, which generates frames inside the
+client, and the LGMP path is exercised with the test producer in this
+directory.
 
 ## Win32 Client
 
@@ -47,8 +52,8 @@ embeds resources with `cp` and `dd`.
 
 The MinGW runtime is linked statically, so `looking-glass-client.exe` needs
 no extra DLLs. It renders with the OpenGL renderer through WGL. EGL, audio,
-clipboard file transfer, evdev input, LGMP and SPICE are left out of the
-Windows build.
+clipboard file transfer, evdev input and SPICE are left out of the Windows
+build.
 
 ### Running
 
@@ -66,6 +71,35 @@ animated test pattern. Some useful options:
 
 Options can also go in `%APPDATA%\looking-glass\client.ini`.
 
+### Shared Memory
+
+With `app:transport=lgmp`, the client opens the named section in
+`lgmp:shmDevice`, `Global\looking-glass` by default, and reads LGMP from it
+as it reads `/dev/kvmfr0` or `/dev/shm/looking-glass` on Linux. Whatever maps
+the section into the VM creates it; the client only opens it.
+
+The section gives whoever can open it the guest's screen and the input sent
+to the guest, so the client checks its owner and DACL first. The owner and
+every account that may map or modify it must be the user, the user's logon
+session, SYSTEM, the Administrators group, or a Hyper-V virtual machine
+account (`NT VIRTUAL MACHINE\...`). Anything else, a NULL DACL included,
+makes the client refuse the section and log which account can open it.
+
+`lg-windows-client-producer` stands in for the guest on the PC. It creates
+a section owned by the user with a DACL for the user and SYSTEM, and serves
+the moving test pattern on it:
+
+```bat
+lg-windows-client-producer.exe Local\looking-glass
+looking-glass-client.exe app:transport=lgmp lgmp:shmDevice=Local\looking-glass
+```
+
+`Local\` names live in the user's session. `Global\` names are visible to
+services such as Hyper-V's, and creating one needs administrator rights.
+The producer also takes `--size=WxH`, `--fps=N` and `--frames=N`, and
+refuses to start if the section already exists, as that section would keep
+someone else's DACL.
+
 ### Tests
 
 - The Win32 input layer and keymap have unit tests in
@@ -82,6 +116,17 @@ Options can also go in `%APPDATA%\looking-glass\client.ini`.
 
   Under Wine, add `--runner wine64`. The Wine prefix needs a monospace
   font, passed after `--`, such as `-- "win:uiFont=DejaVu Sans Mono"`.
+- With `--producer lg-windows-client-producer.exe`, the same frame comes
+  from the producer over a named section and the LGMP transport instead,
+  with a padded stride. Adding `--world` makes the producer let every
+  account open the section, and the test then passes only if the client
+  refuses it. CI runs both on Windows.
+
+  ```sh
+  python windows-client/client_smoke_test.py \
+    --producer windows-client/build/lg-windows-client-producer.exe \
+    client/build/looking-glass-client.exe
+  ```
 
 Focus changes, pointer capture, the keyboard grab, DPI scaling, fullscreen
 and reconnects were checked by hand under Wine with Xvfb, not by an
@@ -93,13 +138,14 @@ another escape key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
 [windows-client-release](../.github/workflows/windows-client-release.yml)
 publishes the client as a GitHub pre-release. Run it from the Actions tab
 with a new tag such as `limiar-windows-v0.1.0`, or push a tag with that
-prefix. It cross-compiles the client, packages it with
-[package.py](package.py), runs the smoke test on the packaged executable on
-a Windows runner, and only then publishes:
+prefix. It cross-compiles the client and the test frame producer, packages
+them with [package.py](package.py), runs the smoke test on the packaged
+executables on a Windows runner, with the test transport and over LGMP,
+and only then publishes:
 
-- `looking-glass-client-<version>-windows-x64.zip`: the executable, the
-  README from [release/README.md](release/README.md), the GPL and the
-  licenses of the code built into the executable.
+- `looking-glass-client-<version>-windows-x64.zip`: the client, the
+  producer, the README from [release/README.md](release/README.md), the GPL
+  and the licenses of the code built into the executables.
 - `looking-glass-<version>-source.tar.gz`: the complete source of the
   build, including every submodule.
 - `SHA256SUMS`.
@@ -125,9 +171,9 @@ pitch/width mix-up fails. The test also fails if the host sees the frame
 released only because it dropped a stalled viewer. Its waits are bounded,
 and ctest stops it after 60 seconds.
 
-The shared region is an unnamed mapping private to the test process. It is
-not the local endpoint planned for step 3 and exposes nothing to other
-processes.
+The shared region is an unnamed mapping private to the test process, so it
+exposes nothing to other processes. The client's named section is covered
+by the smoke test above.
 
 ### Building the Loopback Test
 
@@ -161,8 +207,10 @@ keeps the shared code covered there.
 
 ## Not Covered Yet
 
-- No guest frame reaches the window. Windows has no transport besides
-  `test`; the local endpoint is step 3 and the guest transport is step 5.
+- No guest frame reaches the window. Nothing maps the shared memory section
+  into a VM yet; that is step 5.
+- The LGMP path copies each frame through the CPU into an OpenGL texture.
+  There is no zero-copy import on Windows; DMA-BUF is Linux only.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
 - There is no audio, clipboard or SPICE support on Windows.

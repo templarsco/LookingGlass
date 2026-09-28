@@ -256,12 +256,28 @@ jobs:
       run: |
         cd client/build
         make -j$(nproc)
+    - name: Build the test frame producer
+      run: |
+        mkdir windows-client/build
+        cd windows-client/build
+        cmake -G "MSYS Makefiles" ..
+        make -j$(nproc) lg-windows-client-producer
     - name: Check a test frame in a Windows window
       run: |
         # the runner has no GPU, so the client uses Mesa's software OpenGL
         cp /mingw64/bin/opengl32.dll client/build/
         GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
-          --output smoke client/build/looking-glass-client.exe
+          --output smoke/test client/build/looking-glass-client.exe
+    - name: Check a frame from a shared memory section in a Windows window
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
+          --producer windows-client/build/lg-windows-client-producer.exe \
+          --output smoke/lgmp client/build/looking-glass-client.exe
+    - name: Check that the client refuses a section every account can open
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
+          --producer windows-client/build/lg-windows-client-producer.exe \
+          --world --output smoke/world client/build/looking-glass-client.exe
     - name: Upload Windows client smoke test output
       if: failure()
       uses: actions/upload-artifact@v6
