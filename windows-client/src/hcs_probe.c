@@ -789,6 +789,9 @@ struct Options
 // the configuration schema of Limiar's HCS probe VMs, 2.2
 #define SCHEMA_MINOR 2
 
+// the memory of the probe's VMs
+#define VM_MEMORY_MB 512
+
 // room that prepare() leaves after the output folder's path for file names
 #define OUT_NAME_MAX 64
 
@@ -989,7 +992,8 @@ static void vmConfig(struct Vm * vm, struct Str * config, unsigned minor,
   strJsonString(&s, "console=ttyS0,115200 8250_core.nr_uarts=1 "
       "8250_core.skip_txen_test=1 panic=-1 rdinit=/init");
   strLiteral(&s, "}},\"ComputeTopology\":{");
-  strLiteral(&s, "\"Memory\":{\"SizeInMB\":512,\"AllowOvercommit\":true},");
+  strPrintf(&s, "\"Memory\":{\"SizeInMB\":%d,\"AllowOvercommit\":true},",
+      VM_MEMORY_MB);
   strLiteral(&s, "\"Processor\":{\"Count\":2}},");
   strLiteral(&s, "\"Devices\":{\"ComPorts\":{\"0\":{\"NamedPipe\":");
   strJsonString(&s, vm->pipe);
@@ -1253,16 +1257,49 @@ static bool guestReady(struct Vm * vm, struct Json * report)
 
 // the emulated IVSHMEM device, as QEMU's ivshmem-plain: BAR0 holds the
 // registers, which this probe leaves unused, and BAR2 the shared memory
+#define IVSHMEM_LOG_MAX  96
+#define IVSHMEM_LOG_LINE 48
+
 struct Ivshmem
 {
   CRITICAL_SECTION lock;
   uint32_t         config[64];
   struct Section * section;
 
+  // what happened to the device, in order, for the report
+  DWORD    created;
+  char     log[IVSHMEM_LOG_MAX][IVSHMEM_LOG_LINE];
+  unsigned logLen, logDropped;
+
   volatile LONG initialize, teardown, setConfiguration, getDetails, start,
                 stop, configReads, configWrites, bar0Reads, bar0Writes,
                 bar2Reads, bar2Writes, otherAccesses, command;
 };
+
+static void ivshmemLog(struct Ivshmem * d, const char * fmt, ...)
+  __attribute__((format(__MINGW_PRINTF_FORMAT, 2, 3)));
+
+// a line of the device's log, after the milliseconds since it was set up
+static void ivshmemLog(struct Ivshmem * d, const char * fmt, ...)
+{
+  EnterCriticalSection(&d->lock);
+  if (d->logLen == IVSHMEM_LOG_MAX)
+    ++d->logDropped;
+  else
+  {
+    char * line = d->log[d->logLen++];
+    const int len = snprintf(line, IVSHMEM_LOG_LINE, "+%lu ",
+        (unsigned long)(GetTickCount() - d->created));
+    if (len > 0 && len < IVSHMEM_LOG_LINE)
+    {
+      va_list ap;
+      va_start(ap, fmt);
+      vsnprintf(line + len, IVSHMEM_LOG_LINE - len, fmt, ap);
+      va_end(ap);
+    }
+  }
+  LeaveCriticalSection(&d->lock);
+}
 
 static uint32_t barMask(const struct Ivshmem * d, unsigned bar)
 {
@@ -1285,6 +1322,7 @@ static HRESULT CALLBACK ivshmemInitialize(void * context)
 {
   struct Ivshmem * d = context;
   InterlockedIncrement(&d->initialize);
+  ivshmemLog(d, "initialize");
   return S_OK;
 }
 
@@ -1292,6 +1330,7 @@ static void CALLBACK ivshmemTeardown(void * context)
 {
   struct Ivshmem * d = context;
   InterlockedIncrement(&d->teardown);
+  ivshmemLog(d, "teardown");
 }
 
 static HRESULT CALLBACK ivshmemSetConfiguration(void * context, UINT32 count,
@@ -1299,6 +1338,7 @@ static HRESULT CALLBACK ivshmemSetConfiguration(void * context, UINT32 count,
 {
   struct Ivshmem * d = context;
   InterlockedIncrement(&d->setConfiguration);
+  ivshmemLog(d, "set configuration, %u values", (unsigned)count);
   return S_OK;
 }
 
@@ -1307,6 +1347,7 @@ static HRESULT CALLBACK ivshmemGetDetails(void * context,
 {
   struct Ivshmem * d = context;
   InterlockedIncrement(&d->getDetails);
+  ivshmemLog(d, "get details, %u BARs", (unsigned)probedBarsCount);
 
   *pnpId = (HDV_PCI_PNP_ID)
   {
@@ -1330,6 +1371,7 @@ static HRESULT CALLBACK ivshmemStart(void * context)
 {
   struct Ivshmem * d = context;
   InterlockedIncrement(&d->start);
+  ivshmemLog(d, "start");
   return S_OK;
 }
 
@@ -1337,6 +1379,7 @@ static void CALLBACK ivshmemStop(void * context)
 {
   struct Ivshmem * d = context;
   InterlockedIncrement(&d->stop);
+  ivshmemLog(d, "stop");
 }
 
 static HRESULT CALLBACK ivshmemReadConfig(void * context, UINT32 offset,
@@ -1348,6 +1391,8 @@ static HRESULT CALLBACK ivshmemReadConfig(void * context, UINT32 offset,
   EnterCriticalSection(&d->lock);
   *value = offset < sizeof(d->config) ? d->config[offset / 4] : 0;
   LeaveCriticalSection(&d->lock);
+  ivshmemLog(d, "config read  %03x: %08x", (unsigned)offset,
+      (unsigned)*value);
   return S_OK;
 }
 
@@ -1356,6 +1401,8 @@ static HRESULT CALLBACK ivshmemWriteConfig(void * context, UINT32 offset,
 {
   struct Ivshmem * d = context;
   InterlockedIncrement(&d->configWrites);
+  ivshmemLog(d, "config write %03x: %08x", (unsigned)offset,
+      (unsigned)value);
   if (offset >= sizeof(d->config))
     return S_OK;
 
@@ -1390,17 +1437,23 @@ static HRESULT CALLBACK ivshmemReadMemory(void * context,
     HDV_PCI_BAR_SELECTOR bar, UINT64 offset, UINT64 length, BYTE * value)
 {
   struct Ivshmem * d = context;
+  LONG count;
   if (bar == HDV_PCI_BAR2 && offset <= d->section->size &&
       length <= d->section->size - offset)
   {
-    InterlockedIncrement(&d->bar2Reads);
+    count = InterlockedIncrement(&d->bar2Reads);
     memcpy(value, d->section->view + offset, length);
-    return S_OK;
+  }
+  else
+  {
+    count = InterlockedIncrement(bar == HDV_PCI_BAR0 ? &d->bar0Reads :
+        &d->otherAccesses);
+    memset(value, 0, length);
   }
 
-  InterlockedIncrement(bar == HDV_PCI_BAR0 ? &d->bar0Reads :
-      &d->otherAccesses);
-  memset(value, 0, length);
+  if (count <= 4)
+    ivshmemLog(d, "read  BAR%d +%" PRIx64 ", %" PRIu64 " bytes", (int)bar,
+        (uint64_t)offset, (uint64_t)length);
   return S_OK;
 }
 
@@ -1409,16 +1462,20 @@ static HRESULT CALLBACK ivshmemWriteMemory(void * context,
     const BYTE * value)
 {
   struct Ivshmem * d = context;
+  LONG count;
   if (bar == HDV_PCI_BAR2 && offset <= d->section->size &&
       length <= d->section->size - offset)
   {
-    InterlockedIncrement(&d->bar2Writes);
+    count = InterlockedIncrement(&d->bar2Writes);
     memcpy(d->section->view + offset, value, length);
-    return S_OK;
   }
+  else
+    count = InterlockedIncrement(bar == HDV_PCI_BAR0 ? &d->bar0Writes :
+        &d->otherAccesses);
 
-  InterlockedIncrement(bar == HDV_PCI_BAR0 ? &d->bar0Writes :
-      &d->otherAccesses);
+  if (count <= 4)
+    ivshmemLog(d, "write BAR%d +%" PRIx64 ", %" PRIu64 " bytes", (int)bar,
+        (uint64_t)offset, (uint64_t)length);
   return S_OK;
 }
 
@@ -1442,6 +1499,7 @@ static void ivshmemInit(struct Ivshmem * d, struct Section * section)
   memset(d, 0, sizeof(*d));
   InitializeCriticalSection(&d->lock);
   d->section    = section;
+  d->created    = GetTickCount();
   d->config[0]  = IVSHMEM_DEVICE << 16 | IVSHMEM_VENDOR;
   d->config[2]  = 0x05 << 24 | 0x00 << 16 | 0 << 8 | 1; // RAM, revision 1
   d->config[6]  = barType(2);
@@ -1466,10 +1524,150 @@ static void ivshmemReport(struct Ivshmem * d, struct Json * report)
   jsonNumber(report, "bar2_intercepted_writes", d->bar2Writes);
   jsonNumber(report, "other_accesses"   , d->otherAccesses   );
   jsonClose(report, '}');
+
+  // where the guest placed the BARs, as far as the device was told
+  EnterCriticalSection(&d->lock);
+  jsonNumber(report, "bar0_address", d->config[4] & ~0xfU);
+  jsonNumber(report, "bar2_address",
+      (uint64_t)d->config[7] << 32 | (d->config[6] & ~0xfU));
+  jsonOpen(report, "device_log", '[');
+  for(unsigned i = 0; i < d->logLen; ++i)
+    jsonString(report, NULL, d->log[i]);
+  jsonClose(report, ']');
+  jsonNumber(report, "device_log_dropped", d->logDropped);
+  LeaveCriticalSection(&d->lock);
 }
 
-static bool hdvAttempt(const struct Options * options, bool flexibleIov,
-    unsigned schemaMinor, struct Section * section, struct Json * report)
+// how an attempt with one VM ended
+enum AttemptResult
+{
+  ATTEMPT_REFUSED, // the HCS did not take the VM's configuration
+  ATTEMPT_FAILED,
+  ATTEMPT_PASSED
+};
+
+// whether a peek reply holds the host's pattern for a page
+static bool peekShows(const char * reply, uint64_t page, uint64_t nonce)
+{
+  const char * w0 = strstr(reply, "w0=");
+  const char * w1 = strstr(reply, "w1=");
+  return w0 && w1 &&
+    strtoull(w0 + 3, NULL, 16) == (PROBE_MAGIC ^ page) &&
+    strtoull(w1 + 3, NULL, 16) == (nonce ^ (page * GOLDEN));
+}
+
+// the guest reads the start of a BAR of the IVSHMEM device where it placed
+// it; true when that is page 0 of the host's pattern
+static bool guestPeekBar(struct Vm * vm, unsigned bar, uint64_t nonce,
+    const char * key, struct Json * report)
+{
+  char command[96], reply[512];
+  snprintf(command, sizeof(command), "peek pci 0x%x 0x%x 0x%x 0x0",
+      IVSHMEM_VENDOR, IVSHMEM_DEVICE, bar);
+  const bool shows = vmCommand(vm, command, "peek", 20000, reply,
+      sizeof(reply)) && peekShows(reply, 0, nonce);
+
+  char patternKey[64];
+  snprintf(patternKey, sizeof(patternKey), "%s_pattern", key);
+  jsonString(report, key, reply);
+  jsonBool(report, patternKey, shows);
+  printf("  %s: %s%s\n", command, reply, shows ? ", the host's pattern" :
+      "");
+  return shows;
+}
+
+// a register of the IVSHMEM device's configuration space, through the
+// guest, after writing *write to it if given
+static bool guestConfig(struct Vm * vm, unsigned offset, unsigned size,
+    const uint64_t * write, uint64_t * value, const char * key,
+    struct Json * report)
+{
+  char valueText[24] = "", command[128], reply[512];
+  if (write)
+    snprintf(valueText, sizeof(valueText), " 0x%" PRIx64, *write);
+  snprintf(command, sizeof(command), "config 0x%x 0x%x 0x%x 0x%x%s",
+      IVSHMEM_VENDOR, IVSHMEM_DEVICE, offset, size, valueText);
+
+  const bool ok = vmCommand(vm, command, "config", 20000, reply,
+      sizeof(reply));
+  jsonString(report, key, reply);
+  printf("  %s: %s\n", command, reply);
+
+  const char * at = strstr(reply, "value=");
+  if (!ok || !at)
+    return false;
+  if (value)
+    *value = strtoull(at + 6, NULL, 16);
+  return true;
+}
+
+static HRESULT hdvMap(HDV_DEVICE handle, struct Section * section)
+{
+  return api.createSectionBackedMmioRange(handle, HDV_PCI_BAR2, 0,
+      section->size / PAGE, HdvMmioMappingFlagWriteable, section->handle, 0);
+}
+
+// backs BAR2 by the section once the guest is up and has placed the BAR,
+// reading page 0 through the guest after each step that could make the
+// mapping take effect
+static void hdvMapLate(struct Vm * vm, struct Ivshmem * device,
+    HDV_DEVICE handle, struct Section * section, uint64_t nonce,
+    struct Json * report, bool * mapped)
+{
+  // the device's handlers serve both BARs until then
+  LONG before = device->bar2Reads;
+  guestPeekBar(vm, 2, nonce, "bar2_before_mapping", report);
+  jsonNumber(report, "bar2_before_mapping_intercepts",
+      device->bar2Reads - before);
+  before = device->bar0Reads;
+  guestPeekBar(vm, 0, nonce, "bar0", report);
+  jsonNumber(report, "bar0_intercepts", device->bar0Reads - before);
+
+  const HRESULT hr = hdvMap(handle, section);
+  jsonResult(report, "bar2_mapping_late", hr);
+  ivshmemLog(device, "BAR2 mapping: %08lx", (unsigned long)hr);
+  printf("  Backing BAR2 by the section once the guest is up: 0x%08lx\n",
+      (unsigned long)hr);
+  *mapped = SUCCEEDED(hr);
+  if (!*mapped || aborted ||
+      guestPeekBar(vm, 2, nonce, "bar2_after_mapping", report))
+    return;
+
+  // memory decoding off and on again, which may make the host map the BAR
+  uint64_t command, off;
+  if (!guestConfig(vm, 0x4, 2, NULL, &command, "command", report))
+    return;
+  off = command & ~(uint64_t)2;
+  ivshmemLog(device, "decoding off and on");
+  if (!guestConfig(vm, 0x4, 2, &off, NULL, "decode_off", report) ||
+      !guestConfig(vm, 0x4, 2, &command, NULL, "decode_on", report) ||
+      guestPeekBar(vm, 2, nonce, "bar2_after_decode", report))
+    return;
+
+  // the BAR's address written again while decoding is off
+  uint64_t low, high;
+  ivshmemLog(device, "BAR2 written again");
+  if (guestConfig(vm, 0x18, 4, NULL, &low , "bar2_low" , report) &&
+      guestConfig(vm, 0x1c, 4, NULL, &high, "bar2_high", report) &&
+      guestConfig(vm, 0x4 , 2, &off    , NULL, "rebar_decode_off", report) &&
+      guestConfig(vm, 0x18, 4, &low    , NULL, "rebar_low"       , report) &&
+      guestConfig(vm, 0x1c, 4, &high   , NULL, "rebar_high"      , report) &&
+      guestConfig(vm, 0x4 , 2, &command, NULL, "rebar_decode_on" , report))
+    guestPeekBar(vm, 2, nonce, "bar2_after_rebar", report);
+}
+
+// when the probe backs BAR2 by the section: as soon as the device host
+// takes it after the VM starts, before the guest places the BAR, or once
+// the guest is up, checking each step
+enum HdvMapping
+{
+  HDV_MAP_EARLY,
+  HDV_MAP_LATE
+};
+
+static enum AttemptResult hdvAttempt(const struct Options * options,
+    enum HdvMapping mapping, unsigned schemaMinor, struct Section * section,
+    struct Json * report)
 {
   static bool comSecurity = false;
 
@@ -1481,21 +1679,21 @@ static bool hdvAttempt(const struct Options * options, bool flexibleIov,
   newGuid(&instance, instanceText, sizeof(instanceText));
   guidText(&emulatorClass, classText, sizeof(classText));
 
+  // the HCS offers the guest only a device its configuration declares
   struct Str devices = { 0 };
-  if (flexibleIov)
-    strPrintf(&devices, "\"FlexibleIov\":{\"%s\":{\"EmulatorId\":\"%s\","
-        "\"HostingModel\":\"External\"}}", instanceText, classText);
+  strPrintf(&devices, "\"FlexibleIov\":{\"%s\":{\"EmulatorId\":\"%s\","
+      "\"HostingModel\":\"External\"}}", instanceText, classText);
 
   char variant[32];
   snprintf(variant, sizeof(variant), "%s-2.%u",
-      flexibleIov ? "flexible-iov" : "plain", schemaMinor);
+      mapping == HDV_MAP_EARLY ? "early" : "late", schemaMinor);
 
   jsonOpen(report, NULL, '{');
   jsonString(report, "variant", variant);
   jsonString(report, "device_instance", instanceText);
-  printf("[hdv] VM %s with the emulated IVSHMEM device%s, schema 2.%u\n",
-      vm.id, flexibleIov ? " declared as a FlexibleIov device" : "",
-      schemaMinor);
+  printf("[hdv] VM %s with the emulated IVSHMEM device, BAR2 backed by the "
+      "section %s, schema 2.%u\n", vm.id, mapping == HDV_MAP_EARLY ?
+      "as soon as the VM runs" : "once the guest is up", schemaMinor);
 
   const uint64_t nonce = random64();
   sectionFill(section, nonce);
@@ -1504,7 +1702,7 @@ static bool hdvAttempt(const struct Options * options, bool flexibleIov,
   ivshmemInit(&device, section);
 
   struct Str config = { 0 };
-  vmConfig(&vm, &config, schemaMinor, devices.len ? devices.data : NULL);
+  vmConfig(&vm, &config, schemaMinor, devices.data);
   free(devices.data);
 
   char logName[OUT_NAME_MAX], logPath[MAX_PATH * 3];
@@ -1513,11 +1711,13 @@ static bool hdvAttempt(const struct Options * options, bool flexibleIov,
 
   HDV_HOST   host   = NULL;
   HDV_DEVICE handle = NULL;
-  bool mapped = false, passed = false, direct = false;
+  bool mapped = false, direct = false;
+  enum AttemptResult result = ATTEMPT_REFUSED;
   char reply[512];
 
   if (!vmCreate(&vm, config.data, report, logPath))
     goto done;
+  result = ATTEMPT_FAILED;
 
   // the device host needs COM security that lets the VM worker call back
   HRESULT hr;
@@ -1553,28 +1753,34 @@ static bool hdvAttempt(const struct Options * options, bool flexibleIov,
     goto done;
   }
 
-  hr = api.createSectionBackedMmioRange(handle, HDV_PCI_BAR2, 0,
-      section->size / PAGE, HdvMmioMappingFlagWriteable, section->handle, 0);
+  // Windows 10.0.26100 refuses this until the VM runs
+  hr = hdvMap(handle, section);
   jsonResult(report, "bar2_mapping", hr);
+  ivshmemLog(&device, "BAR2 mapping before the start: %08lx",
+      (unsigned long)hr);
   mapped = SUCCEEDED(hr);
-  if (!mapped)
-    printf("  Backing BAR2 by the section failed before the start: "
-        "0x%08lx, trying again once the guest is up\n", (unsigned long)hr);
 
-  if (!vmStart(&vm, report) || !guestReady(&vm, report))
+  if (!vmStart(&vm, report))
     goto done;
+  ivshmemLog(&device, "VM started");
 
-  if (!mapped)
+  if (!mapped && mapping == HDV_MAP_EARLY)
   {
-    hr = api.createSectionBackedMmioRange(handle, HDV_PCI_BAR2, 0,
-        section->size / PAGE, HdvMmioMappingFlagWriteable, section->handle,
-        0);
-    jsonResult(report, "bar2_mapping_retry", hr);
+    const DWORD start = GetTickCount();
+    while ((hr = hdvMap(handle, section)) ==
+        HRESULT_FROM_WIN32(ERROR_INVALID_STATE) && !aborted &&
+        GetTickCount() - start < 20000)
+      Sleep(1);
     mapped = SUCCEEDED(hr);
-    if (!mapped)
-      printf("  Backing BAR2 by the section failed: 0x%08lx; the device "
-          "can only work through intercepts\n", (unsigned long)hr);
+    jsonResult(report, "bar2_mapping_early", hr);
+    jsonNumber(report, "bar2_mapping_ms", GetTickCount() - start);
+    ivshmemLog(&device, "BAR2 mapping: %08lx", (unsigned long)hr);
+    printf("  Backing BAR2 by the section as the VM runs: 0x%08lx after "
+        "%lu ms\n", (unsigned long)hr, GetTickCount() - start);
   }
+
+  if (!guestReady(&vm, report))
+    goto done;
 
   char command[64];
   snprintf(command, sizeof(command), "map pci 0x%x 0x%x 0x2", IVSHMEM_VENDOR,
@@ -1588,15 +1794,22 @@ static bool hdvAttempt(const struct Options * options, bool flexibleIov,
   if (!guestMapped)
     goto done;
 
+  if (!mapped)
+    hdvMapLate(&vm, &device, handle, section, nonce, report, &mapped);
+  if (aborted)
+    goto done;
+
   const LONG readsBefore  = device.bar2Reads;
   const LONG writesBefore = device.bar2Writes;
-  passed = guestChecks(&vm, section, nonce, report);
+  const bool checked = guestChecks(&vm, section, nonce, report);
   direct = mapped &&
     device.bar2Reads == readsBefore && device.bar2Writes == writesBefore;
   jsonBool(report, "bar2_direct", direct);
   printf("  %s\n", direct ?
       "BAR2 is the section itself: no guest access reached the emulator" :
       "BAR2 accesses went through the emulator, far too slow for frames");
+  if (checked && direct)
+    result = ATTEMPT_PASSED;
 
 done:
   if (vm.system)
@@ -1612,10 +1825,9 @@ done:
   DeleteCriticalSection(&device.lock);
   free(config.data);
 
-  passed = passed && direct;
-  jsonBool(report, "passed", passed);
+  jsonBool(report, "passed", result == ATTEMPT_PASSED);
   jsonClose(report, '}');
-  return passed;
+  return result;
 }
 
 static bool runHdv(const struct Options * options, struct Json * report)
@@ -1630,26 +1842,22 @@ static bool runHdv(const struct Options * options, struct Json * report)
     printf("[hdv] vmdevicehost.dll or its functions are missing\n");
   else if (sectionCreate(&section, NULL, options->size))
   {
-    // the device declared in the configuration, again with the newest
-    // schema in case the older one lacks the declaration, then undeclared
-    const struct
-    {
-      bool     flexibleIov;
-      unsigned schemaMinor;
-    }
-    attempts[] =
-    {
-      { true , SCHEMA_MINOR         },
-      { true , options->schemaMinor },
-      { false, SCHEMA_MINOR         }
-    };
-
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    for(size_t i = 0; i < sizeof(attempts) / sizeof(attempts[0]) &&
+
+    // each with the schema of Limiar's probe VMs, then with the newest one
+    // in case the older one cannot declare the device
+    const enum HdvMapping mappings[] = { HDV_MAP_EARLY, HDV_MAP_LATE };
+    for(size_t i = 0; i < sizeof(mappings) / sizeof(mappings[0]) &&
         !passed && !aborted; ++i)
-      if (i != 1 || options->schemaMinor > SCHEMA_MINOR)
-        passed = hdvAttempt(options, attempts[i].flexibleIov,
-            attempts[i].schemaMinor, &section, report);
+    {
+      enum AttemptResult result = hdvAttempt(options, mappings[i],
+          SCHEMA_MINOR, &section, report);
+      if (result == ATTEMPT_REFUSED && !aborted &&
+          options->schemaMinor > SCHEMA_MINOR)
+        result = hdvAttempt(options, mappings[i], options->schemaMinor,
+            &section, report);
+      passed = result == ATTEMPT_PASSED;
+    }
     sectionClose(&section);
   }
 
@@ -1660,16 +1868,19 @@ static bool runHdv(const struct Options * options, struct Json * report)
   return passed;
 }
 
-enum ShmResult
+static void addCandidate(uint64_t * list, size_t * count, uint64_t address)
 {
-  SHM_REFUSED, // the HCS did not take this section name
-  SHM_FAILED,
-  SHM_PASSED
-};
+  if (!address || address % PAGE)
+    return;
+  for(size_t i = 0; i < *count; ++i)
+    if (list[i] == address)
+      return;
+  list[(*count)++] = address;
+}
 
-static enum ShmResult shmAttempt(const struct Options * options,
+static enum AttemptResult shmAttempt(const struct Options * options,
     struct Section * section, const char * sectionName, bool hidden,
-    struct Json * report)
+    uint64_t * found, struct Json * report)
 {
   struct Vm vm;
   vmInit(&vm, options);
@@ -1699,12 +1910,12 @@ static enum ShmResult shmAttempt(const struct Options * options,
       sectionName[0] == '\\' ? "nt" : "win32", hidden ? "hidden" : "visible");
   outPath(options, logName, logPath, sizeof(logPath));
 
-  enum ShmResult result = SHM_REFUSED;
-  char reply[512];
+  enum AttemptResult result = ATTEMPT_REFUSED;
+  char reply[512], command[96];
 
   if (!vmCreate(&vm, config.data, report, logPath) || !vmStart(&vm, report))
     goto done;
-  result = SHM_FAILED;
+  result = ATTEMPT_FAILED;
 
   char * doc = NULL;
   const HRESULT hr = hcsCall(vm.system, api.getComputeSystemProperties,
@@ -1717,17 +1928,54 @@ static enum ShmResult shmAttempt(const struct Options * options,
     jsonGetUInt64(doc, "GuestPhysicalAddress", &gpa);
   free(doc);
   if (located)
-    printf("  The HCS mapped the section at guest physical address 0x%"
-        PRIx64 "\n", gpa);
+    printf("  The HCS reports the section at guest physical 0x%" PRIx64
+        "\n", gpa);
   else
     printf("  The HCS did not report where it mapped the section: 0x%08lx\n",
         (unsigned long)hr);
 
-  if (!guestReady(&vm, report) || !located)
+  if (!guestReady(&vm, report))
     goto done;
 
-  char command[96];
-  snprintf(command, sizeof(command), "map phys 0x%" PRIx64 " 0x%" PRIx64, gpa,
+  // the reported number as a page, which Windows 10.0.26100 gives, and as
+  // an address; else where an earlier VM had the section, or right after
+  // the VM's memory
+  uint64_t candidates[4];
+  size_t count = 0;
+  if (located && gpa < (UINT64_C(1) << 40))
+    addCandidate(candidates, &count, gpa * PAGE);
+  if (located)
+    addCandidate(candidates, &count, gpa);
+  addCandidate(candidates, &count, *found);
+  addCandidate(candidates, &count, (uint64_t)VM_MEMORY_MB << 20);
+
+  uint64_t at = 0;
+  jsonOpen(report, "peeks", '[');
+  for(size_t i = 0; i < count && !at && !aborted; ++i)
+  {
+    snprintf(command, sizeof(command), "peek phys 0x%" PRIx64,
+        candidates[i]);
+    const bool ok = vmCommand(&vm, command, "peek", 20000, reply,
+        sizeof(reply));
+    jsonString(report, NULL, reply);
+    printf("  %s: %s\n", command, reply);
+    if (ok && peekShows(reply, 0, nonce))
+      at = candidates[i];
+  }
+  jsonClose(report, ']');
+
+  jsonNumber(report, "region_gpa", at);
+  jsonString(report, "gpa_units", !at || !located ? NULL :
+      at == gpa * PAGE ? "pages" : at == gpa ? "bytes" : "other");
+  if (!at)
+  {
+    printf("  The guest does not find the section at any of these "
+        "addresses\n");
+    goto done;
+  }
+  *found = at;
+
+  snprintf(command, sizeof(command), "map phys 0x%" PRIx64 " 0x%" PRIx64, at,
       section->size);
   const bool guestMapped = vmCommand(&vm, command, "map", 20000, reply,
       sizeof(reply));
@@ -1737,7 +1985,7 @@ static enum ShmResult shmAttempt(const struct Options * options,
       reply);
 
   if (guestMapped && guestChecks(&vm, section, nonce, report))
-    result = SHM_PASSED;
+    result = ATTEMPT_PASSED;
 
 done:
   if (vm.system)
@@ -1745,7 +1993,7 @@ done:
   vmDestroy(&vm, report);
   free(config.data);
 
-  jsonBool(report, "passed", result == SHM_PASSED);
+  jsonBool(report, "passed", result == ATTEMPT_PASSED);
   jsonClose(report, '}');
   return result;
 }
@@ -1766,23 +2014,25 @@ static bool runShm(const struct Options * options, struct Json * report)
   struct Section section;
   if (sectionCreate(&section, sectionName, options->size))
   {
-    // the name as a Win32 program opens it, then as the kernel does
-    const char * formats[] = { "Global\\%s", "\\BaseNamedObjects\\%s" };
+    // the name as the kernel has it, which Windows 10.0.26100 wants, then
+    // as a Win32 program opens it
+    const char * formats[] = { "\\BaseNamedObjects\\%s", "Global\\%s" };
+    uint64_t found = 0;
     for(int i = 0; i < 2 && !aborted; ++i)
     {
       char configName[96];
       snprintf(configName, sizeof(configName), formats[i],
           sectionName + strlen("Global\\"));
 
-      enum ShmResult result = shmAttempt(options, &section, configName, false,
-          report);
-      if (result == SHM_REFUSED)
+      enum AttemptResult result = shmAttempt(options, &section, configName,
+          false, &found, report);
+      if (result == ATTEMPT_REFUSED)
         continue;
 
       // either way the name worked, see how a hidden region behaves too
-      passed = result == SHM_PASSED;
+      passed = result == ATTEMPT_PASSED;
       if (!aborted && shmAttempt(options, &section, configName, true,
-            report) == SHM_PASSED)
+            &found, report) == ATTEMPT_PASSED)
         passed = true;
       break;
     }

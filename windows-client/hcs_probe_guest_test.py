@@ -192,6 +192,31 @@ def main():
     guest.command(f'read 0x{page:x}',
         f'read ok page=0x{page:x} value=0x{value:x}')
 
+    # single reads, where the guest placed BAR2 and by physical address
+    def peeked(page):
+      return (f'peek ok addr=0x{bar + page * PAGE:x} w0=0x{MAGIC ^ page:x} '
+          f'w1=0x{nonce ^ ((page * GOLDEN) & MASK):x}')
+    guest.command('peek pci 0x1af4 0x1110 0x2 0x0', peeked(0))
+    guest.command(f'peek phys 0x{bar + 3 * PAGE:x}', peeked(3))
+    guest.command('peek pci 0x1af4 0x1110 0x0 0x0', 'peek ok')
+
+    # memory decoding off and on again through the configuration space
+    reply = guest.command('config 0x1af4 0x1110 0x4 0x2', 'config ok')
+    command = int(reply.split('value=')[1], 16)
+    if not command & 2:
+      sys.exit('memory decoding is off after map pci')
+    guest.command(f'config 0x1af4 0x1110 0x4 0x2 0x{command & ~2:x}',
+        'config ok')
+    reply = guest.command('peek pci 0x1af4 0x1110 0x2 0x0', 'peek ok')
+    if reply == peeked(0):
+      sys.exit('BAR2 still answers with memory decoding off')
+    reply = guest.command(f'config 0x1af4 0x1110 0x4 0x2 0x{command:x}',
+        'config ok')
+    if int(reply.split('value=')[1], 16) != command:
+      sys.exit('memory decoding did not come back on')
+    guest.command('peek pci 0x1af4 0x1110 0x2 0x0', peeked(0))
+    guest.command(verify, 'verify ok')
+
     # the same memory by physical address, as for a SharedMemory region
     guest.command(f'map phys 0x{bar:x} 0x{size:x}', 'map ok')
     guest.command(verify, 'verify ok')

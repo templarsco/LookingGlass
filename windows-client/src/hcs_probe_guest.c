@@ -48,7 +48,10 @@ enum
   SYS_close      = 3,
   SYS_poll       = 7,
   SYS_mmap       = 9,
+  SYS_munmap     = 11,
   SYS_ioctl      = 16,
+  SYS_pread64    = 17,
+  SYS_pwrite64   = 18,
   SYS_nanosleep  = 35,
   SYS_exit       = 60,
   SYS_uname      = 63,
@@ -501,30 +504,43 @@ static void cmdInfo(void)
   say("info end");
 }
 
-static bool mapFile(const char * path, u64 offset, u64 size, int flags,
-    const char ** step, long * error)
+static volatile u64 * mapAt(const char * path, u64 offset, u64 size,
+    int flags, const char ** step, long * error)
 {
-  long fd = SYSCALL(SYS_open, path, O_RDWR | flags, 0);
-  if (fd < 0)
-  {
-    *step  = "open";
-    *error = fd;
-    return false;
-  }
+  *step  = "open";
+  *error = SYSCALL(SYS_open, path, O_RDWR | flags, 0);
+  if (*error < 0)
+    return NULL;
 
+  const long fd = *error;
   long addr = syscall6(SYS_mmap, 0, size, PROT_READ | PROT_WRITE, MAP_SHARED,
       fd, offset);
   SYSCALL(SYS_close, fd, 0, 0);
-  if (addr < 0 && addr > -4096)
-  {
-    *step  = "mmap";
-    *error = addr;
-    return false;
-  }
 
-  map     = (volatile u64 *)addr;
+  *step  = "mmap";
+  *error = addr;
+  return addr < 0 && addr > -4096 ? NULL : (volatile u64 *)addr;
+}
+
+static bool mapFile(const char * path, u64 offset, u64 size, int flags,
+    const char ** step, long * error)
+{
+  volatile u64 * addr = mapAt(path, offset, size, flags, step, error);
+  if (!addr)
+    return false;
+
+  map     = addr;
   mapSize = size;
   return true;
+}
+
+// physical memory through /dev/mem: cached first, as a region the kernel
+// tracks as uncached only maps as such
+static volatile u64 * mapPhys(u64 addr, u64 size, const char ** step,
+    long * error)
+{
+  volatile u64 * p = mapAt("/dev/mem", addr, size, 0, step, error);
+  return p ? p : mapAt("/dev/mem", addr, size, O_SYNC, step, error);
 }
 
 // map phys ADDR SIZE: a region at a guest physical address, through /dev/mem
@@ -540,70 +556,95 @@ static void cmdMapPhys(const char * args)
 
   const char * step;
   long error;
-  // cached first; a region the kernel tracks as uncached only maps as such
-  if (!mapFile("/dev/mem", addr, size, 0, &step, &error) &&
-      !mapFile("/dev/mem", addr, size, O_SYNC, &step, &error))
+  volatile u64 * p = mapPhys(addr, size, &step, &error);
+  if (!p)
   {
     sayError("map", step, error);
     return;
   }
 
+  map     = p;
+  mapSize = size;
   replyBegin("map ok");
   replyField("addr", addr);
   replyField("size", size);
   replyEnd();
 }
 
-// map pci VENDOR DEVICE BAR: a BAR of the first matching PCI device
-static void cmdMapPci(const char * args)
+// Hyper-V offers virtual PCI devices over VMBus, after init has started
+static bool pciWait(struct PciMatch * match)
 {
-  struct PciMatch match;
-  u64 bar;
-  if (!parseHex(&args, &match.vendor) || !parseHex(&args, &match.device) ||
-      !parseHex(&args, &bar) || bar > 5)
-  {
-    say("map failed step=args");
-    return;
-  }
-
-  // Hyper-V offers virtual PCI devices over VMBus, after init has started
-  bool found = false;
   for(int i = 0; i < 300; ++i)
   {
-    if ((found = dirEach(PCI_DEVICES, pciFind, &match)))
-      break;
+    if (dirEach(PCI_DEVICES, pciFind, match))
+      return true;
     sleepMs(100);
   }
+  return false;
+}
 
-  if (!found)
-  {
-    say("map failed step=find");
-    return;
-  }
-
+// where the guest placed a BAR, from the device's resource file
+static bool pciBar(const char * device, u64 bar, u64 * start, u64 * end,
+    u64 * flags)
+{
   char path[256];
-  join(path, sizeof(path), PCI_DEVICES, match.name, "/resource");
-  long len = readFile(path, fileBuf, sizeof(fileBuf));
-  if (len < 0)
-  {
-    sayError("map", "resource", len);
-    return;
-  }
+  join(path, sizeof(path), PCI_DEVICES, device, "/resource");
+  if (readFile(path, fileBuf, sizeof(fileBuf)) < 0)
+    return false;
 
   // one "start end flags" line per resource, BARs first
   const char * p = fileBuf;
   for(u64 i = 0; i < bar && p; ++i)
     for(; *p && *p++ != '\n';);
 
-  u64 start, end, flags;
-  if (!parseHex(&p, &start) || !parseHex(&p, &end) || !parseHex(&p, &flags) ||
-      !start || end <= start)
+  return parseHex(&p, start) && parseHex(&p, end) && parseHex(&p, flags) &&
+    *start && *end > *start;
+}
+
+// VENDOR DEVICE, then the device must be there
+static bool pciArgs(const char ** args, struct PciMatch * match,
+    const char * what)
+{
+  if (!parseHex(args, &match->vendor) || !parseHex(args, &match->device))
+  {
+    replyBegin(what);
+    replyStr(" failed step=args");
+    replyEnd();
+    return false;
+  }
+
+  if (!pciWait(match))
+  {
+    replyBegin(what);
+    replyStr(" failed step=find");
+    replyEnd();
+    return false;
+  }
+  return true;
+}
+
+// map pci VENDOR DEVICE BAR: a BAR of the first matching PCI device
+static void cmdMapPci(const char * args)
+{
+  struct PciMatch match;
+  u64 bar, start, end, flags;
+  if (!pciArgs(&args, &match, "map"))
+    return;
+
+  if (!parseHex(&args, &bar) || bar > 5)
+  {
+    say("map failed step=args");
+    return;
+  }
+
+  if (!pciBar(match.name, bar, &start, &end, &flags))
   {
     say("map failed step=bar");
     return;
   }
 
   // enables memory decoding, which no driver does for this device
+  char path[256];
   join(path, sizeof(path), PCI_DEVICES, match.name, "/enable");
   long fd = SYSCALL(SYS_open, path, O_WRONLY, 0);
   if (fd >= 0)
@@ -663,6 +704,142 @@ static void cmdMapFile(const char * args)
 
   replyBegin("map ok");
   replyField("size", size);
+  replyEnd();
+}
+
+// the two words at a guest physical address, through a mapping of its page
+// that only lasts for the read
+static void peek(u64 addr)
+{
+  const char * step;
+  long error;
+  volatile u64 * page = mapPhys(addr & ~(PAGE_SIZE - 1), PAGE_SIZE, &step,
+      &error);
+  if (!page)
+  {
+    sayError("peek", step, error);
+    return;
+  }
+
+  const volatile u64 * word = page + (addr & (PAGE_SIZE - 1)) / sizeof(u64);
+  const u64 w0 = word[0];
+  const u64 w1 = word[1];
+  SYSCALL(SYS_munmap, page, PAGE_SIZE, 0);
+
+  replyBegin("peek ok");
+  replyField("addr", addr);
+  replyField("w0"  , w0  );
+  replyField("w1"  , w1  );
+  replyEnd();
+}
+
+static bool peekable(u64 addr)
+{
+  return !(addr & 7) && (addr & (PAGE_SIZE - 1)) <= PAGE_SIZE - 16;
+}
+
+// peek phys ADDR: the two words at a guest physical address
+static void cmdPeekPhys(const char * args)
+{
+  u64 addr;
+  if (!parseHex(&args, &addr) || !peekable(addr))
+  {
+    say("peek failed step=args");
+    return;
+  }
+  peek(addr);
+}
+
+// peek pci VENDOR DEVICE BAR OFFSET: the two words at an offset into a BAR,
+// read where the guest placed the BAR
+static void cmdPeekPci(const char * args)
+{
+  struct PciMatch match;
+  u64 bar, offset, start, end, flags;
+  if (!pciArgs(&args, &match, "peek"))
+    return;
+
+  if (!parseHex(&args, &bar) || bar > 5 || !parseHex(&args, &offset))
+  {
+    say("peek failed step=args");
+    return;
+  }
+
+  if (!pciBar(match.name, bar, &start, &end, &flags) ||
+      offset > end - start || end - start - offset < 15 ||
+      !peekable(start + offset))
+  {
+    say("peek failed step=bar");
+    return;
+  }
+  peek(start + offset);
+}
+
+// config VENDOR DEVICE OFFSET SIZE [VALUE]: a register of the device's
+// configuration space, read back after writing VALUE to it if given
+static void cmdConfig(const char * args)
+{
+  struct PciMatch match;
+  u64 offset, size, value = 0;
+  if (!pciArgs(&args, &match, "config"))
+    return;
+
+  if (!parseHex(&args, &offset) || !parseHex(&args, &size) ||
+      (size != 1 && size != 2 && size != 4) || offset & (size - 1) ||
+      offset >= 4096)
+  {
+    say("config failed step=args");
+    return;
+  }
+
+  while (*args == ' ')
+    ++args;
+  const bool write = *args && *args != '\n';
+  if (write && !parseHex(&args, &value))
+  {
+    say("config failed step=args");
+    return;
+  }
+
+  char path[256];
+  join(path, sizeof(path), PCI_DEVICES, match.name, "/config");
+  long fd = SYSCALL(SYS_open, path, write ? O_RDWR : O_RDONLY, 0);
+  if (fd < 0)
+  {
+    sayError("config", "open", fd);
+    return;
+  }
+
+  u8 bytes[4] = { 0 };
+  for(u64 i = 0; i < size; ++i)
+    bytes[i] = (u8)(value >> (i * 8));
+
+  long n = size;
+  const char * step = "write";
+  if (write)
+    n = syscall6(SYS_pwrite64, fd, (long)bytes, size, offset, 0, 0);
+  if (n == (long)size)
+  {
+    step = "read";
+    n = syscall6(SYS_pread64, fd, (long)bytes, size, offset, 0, 0);
+  }
+  SYSCALL(SYS_close, fd, 0, 0);
+
+  // errno 0 is a short transfer
+  if (n != (long)size)
+  {
+    sayError("config", step, n < 0 ? n : 0);
+    return;
+  }
+
+  value = 0;
+  for(u64 i = 0; i < size; ++i)
+    value |= (u64)bytes[i] << (i * 8);
+
+  replyBegin("config ok device=");
+  replyStr(match.name);
+  replyField("offset", offset);
+  replyField("value" , value );
   replyEnd();
 }
 
@@ -777,6 +954,12 @@ static void handle(const char * line)
     cmdMapPci(args);
   else if (command(line, "map file", &args))
     cmdMapFile(args);
+  else if (command(line, "peek phys", &args))
+    cmdPeekPhys(args);
+  else if (command(line, "peek pci", &args))
+    cmdPeekPci(args);
+  else if (command(line, "config", &args))
+    cmdConfig(args);
   else if (command(line, "verify", &args))
     cmdVerify(args);
   else if (command(line, "write", &args))

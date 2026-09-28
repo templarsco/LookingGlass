@@ -23,8 +23,8 @@ ends cleanly: every attempt leaves no VM behind, as far as the Host Compute
 Service can tell, and ends up in a well-formed report. By default the probe
 stands in for the kernel, so no VM can boot. With --kernel, the VMs boot a
 real kernel where the runner can run them, and the report's findings, the
-guests' replies and the ends of their serial logs are printed; what works
-there is reported, not required."""
+guests' replies and their kernels' messages about devices are printed; what
+works there is reported, not required."""
 
 import argparse
 import json
@@ -72,12 +72,14 @@ def check_initrd(path):
   print(f'{path.name}: {len(entries) - 1} entries, a {len(init)} byte init')
 
 
-# what each attempt found, in the order the probe gets there
-FINDINGS = ('variant', 'section_name', 'hidden_from_guest', 'create',
-    'device_host', 'device', 'bar2_mapping', 'start', 'region_query',
-    'guest_ready', 'bar2_mapping_retry', 'map', 'verify',
-    'guest_write_seen_by_host', 'host_write_seen_by_guest', 'bar2_direct',
-    'stopped_by_guest', 'exit_type', 'terminate', 'passed')
+# what only identifies an attempt or repeats its setup
+QUIET = {'vm_id', 'device_instance', 'config', 'serial_log', 'guest',
+    'grant_kernel', 'grant_initrd', 'revoke_kernel', 'revoke_initrd',
+    'cleanup_enumerate', 'still_listed', 'cleanup_verified'}
+
+# kernel messages about the devices the guests were offered, and trouble
+NOTABLE = ('hv_pci', 'pci', 'bar', 'vmbus', 'error', 'fail', 'warn', 'panic',
+    'call trace')
 
 
 def print_findings(report, output):
@@ -87,22 +89,30 @@ def print_findings(report, output):
     print(f'\n{case["case"]}: passed {case["passed"]}')
     for attempt in case['attempts']:
       print('  attempt')
-      for key in FINDINGS:
-        if key in attempt:
-          print(f'    {key}: {attempt[key]}')
-      for key in ('device_calls', 'region_info', 'create_result',
-          'start_result'):
-        if attempt.get(key):
-          print(f'    {key}: {json.dumps(attempt[key])[:2000]}')
+      # in the order the probe got there
+      for key, value in attempt.items():
+        if key in QUIET:
+          continue
+        if key == 'device_log':
+          for line in value:
+            print(f'    device: {line}')
+        elif isinstance(value, (dict, list)):
+          print(f'    {key}: {json.dumps(value)[:2000]}')
+        elif isinstance(value, int) and not isinstance(value, bool) and \
+            (key.endswith('_address') or key.endswith('_gpa')):
+          print(f'    {key}: {value:#x}')
+        else:
+          print(f'    {key}: {value}')
       for line in (attempt.get('guest') or '').splitlines()[:80]:
         print(f'    guest: {line}')
 
-  # the kernel's own messages, such as how it found the PCI devices
   for log in sorted(output.glob('*.serial.log')):
     lines = log.read_bytes().decode(errors='replace').splitlines()
-    print(f'\n{log.name}, the last {min(len(lines), 60)} of {len(lines)} '
-        f'lines:')
-    for line in lines[-60:]:
+    notable = [line for line in lines
+        if any(word in line.lower() for word in NOTABLE)]
+    print(f'\n{log.name}, {len(notable)} of {len(lines)} lines about '
+        f'devices or trouble, the first 80:')
+    for line in notable[:80]:
       print(f'  {line}')
 
 
