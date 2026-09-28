@@ -295,13 +295,17 @@ jobs:
         # a disposable VM without a disk, which waits in its firmware
         $vm = New-VM -Name lg-hcs-probe-vmms -Generation 2 `
           -MemoryStartupBytes 512MB -NoVHD -Path "$env:RUNNER_TEMP\vmms"
+        $code = 0
         try {
           Set-VMMemory -VM $vm -DynamicMemoryEnabled $false
           Start-VM -VM $vm
-          python windows-client\hcs_probe_smoke.py `
-            windows-client\build\lg-windows-client-hcs-probe.exe `
-            --vm $vm.Id --output hcs-probe-vm
-          $code = $LASTEXITCODE
+          # the HCS may want the region to be of some minimum size
+          foreach ($mib in 32, 1024) {
+            python windows-client\hcs_probe_smoke.py `
+              windows-client\build\lg-windows-client-hcs-probe.exe `
+              --vm $vm.Id --size-mib $mib --output hcs-probe-vm-$mib
+            if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
+          }
         } finally {
           Stop-VM -VM $vm -TurnOff -Force -ErrorAction SilentlyContinue
           Remove-VM -VM $vm -Force
@@ -363,9 +367,13 @@ jobs:
           'https://msdl.microsoft.com/download/symbols'
         foreach ($dump in $dumps | Select-Object -First 2) {
           "== $($dump.FullName)"
+          # the stack, and the vPCI device's code that gave up
+          $device = 'vmvpci!Vpci::Core::VirtualDevice'
           & $cdb -z $dump.FullName -y $symbols -i "$env:SystemRoot\System32" `
-            -c ('.exr -1; .ecxr; kn 30; ub @rip L30; u @rip L6; ' +
-              'lmvm vmvpci; !analyze -v; q') 2>&1 | Select-Object -Last 400
+            -c (".exr -1; .ecxr; kn 30; lmvm vmvpci; .frame /r 8; " +
+              "x ${device}::*; uf ${device}::AddSectionToMitigatedRange; " +
+              "uf ${device}::CreateNewRangesForSection; q") 2>&1 |
+            Select-Object -Last 2500
         }
         exit 0
     - name: Upload the HCS probe's report and serial logs
@@ -376,7 +384,7 @@ jobs:
         path: |
           hcs-probe/report.json
           hcs-probe/*.serial.log
-          hcs-probe-vm/report.json
+          hcs-probe-vm-*/report.json
         if-no-files-found: ignore
 
   windows-client-display:

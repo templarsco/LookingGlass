@@ -134,7 +134,7 @@ jobs:
         GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
           --producer "$(cygpath -w "$dir/lg-windows-client-producer.exe")" \
           --output smoke/lgmp "$(cygpath -w "$dir/looking-glass-client.exe")"
-    - name: Check the packaged HCS probe on a runner without Hyper-V
+    - name: Check the packaged HCS probe with a kernel that cannot boot
       run: |
         dir=$(echo unpacked/*)
         python windows-client/hcs_probe_smoke.py \

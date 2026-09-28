@@ -91,7 +91,8 @@ def print_value(key, value, indent):
 
 def check_vm(args):
   """The probe's check of an existing VM, which only the HCS's answers show."""
-  result = run([args.probe, '--vm', args.vm, '--out', args.output], 600)
+  result = run([args.probe, '--vm', args.vm, '--out', args.output] +
+      (['--size-mib', str(args.size_mib)] if args.size_mib else []), 600)
   out = result.stdout + result.stderr
   if result.returncode == 2 and 'computecore.dll is missing' in out:
     print('This machine has no Host Compute Service, nothing more to check')
@@ -159,6 +160,8 @@ def main():
       help='an x86_64 Linux kernel with Hyper-V support for the VMs to boot')
   parser.add_argument('--vm',
       help='the ID of an existing VM for the probe to check instead')
+  parser.add_argument('--size-mib', type=int,
+      help='the size of the shared memory for --vm')
   args = parser.parse_args()
   args.probe  = args.probe.resolve()
   args.output = args.output.resolve()

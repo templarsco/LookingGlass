@@ -1986,9 +1986,33 @@ static void addCandidate(uint64_t * list, size_t * count, uint64_t address)
   list[(*count)++] = address;
 }
 
+// a SharedMemoryRegion as the HCS takes it
+static void regionSettings(struct Str * s, const char * sectionName,
+    uint64_t size, bool hidden)
+{
+  strLiteral(s, "{\"SectionName\":");
+  strJsonString(s, sectionName);
+  strPrintf(s, ",\"StartOffset\":0,\"Length\":%" PRIu64 ","
+      "\"AllowGuestWrite\":true,\"HiddenFromGuest\":%s}", size,
+      hidden ? "true" : "false");
+}
+
+// adds a region to a running VM or removes it
+static void regionRequest(struct Str * request, const char * type,
+    const char * sectionName, uint64_t size, bool hidden)
+{
+  strPrintf(request, "{\"ResourcePath\":"
+      "\"VirtualMachine/Devices/SharedMemory/Regions\",\"RequestType\":"
+      "\"%s\",\"Settings\":", type);
+  regionSettings(request, sectionName, size, hidden);
+  strLiteral(request, "}");
+}
+
+// with hotAdd, the region is added once the guest is up, as it would be to a
+// VM that something else created, instead of in the VM's configuration
 static enum AttemptResult shmAttempt(const struct Options * options,
     struct Section * section, const char * sectionName, bool hidden,
-    uint64_t * found, struct Json * report)
+    bool hotAdd, uint64_t * found, struct Json * report)
 {
   struct Vm vm;
   vmInit(&vm, options);
@@ -1996,37 +2020,63 @@ static enum AttemptResult shmAttempt(const struct Options * options,
   jsonOpen(report, NULL, '{');
   jsonString(report, "section_name", sectionName);
   jsonBool(report, "hidden_from_guest", hidden);
-  printf("[shm] VM %s with %s mapped%s\n", vm.id, sectionName,
+  jsonBool(report, "hot_add", hotAdd);
+  printf("[shm] VM %s with %s %s%s\n", vm.id, sectionName,
+      hotAdd ? "added once the guest is up" : "mapped",
       hidden ? ", hidden from the guest's memory map" : "");
 
   const uint64_t nonce = random64();
   sectionFill(section, nonce);
 
   struct Str devices = { 0 };
-  strLiteral(&devices, "\"SharedMemory\":{\"Regions\":[{\"SectionName\":");
-  strJsonString(&devices, sectionName);
-  strPrintf(&devices, ",\"StartOffset\":0,\"Length\":%" PRIu64 ","
-      "\"AllowGuestWrite\":true,\"HiddenFromGuest\":%s}]}", section->size,
-      hidden ? "true" : "false");
+  if (!hotAdd)
+  {
+    strLiteral(&devices, "\"SharedMemory\":{\"Regions\":[");
+    regionSettings(&devices, sectionName, section->size, hidden);
+    strLiteral(&devices, "]}");
+  }
 
   struct Str config = { 0 };
   vmConfig(&vm, &config, SCHEMA_MINOR, devices.data);
   free(devices.data);
 
   char logName[OUT_NAME_MAX], logPath[MAX_PATH * 3];
-  snprintf(logName, sizeof(logName), "shm-%s-%s.serial.log",
-      sectionName[0] == '\\' ? "nt" : "win32", hidden ? "hidden" : "visible");
+  snprintf(logName, sizeof(logName), "shm-%s-%s%s.serial.log",
+      sectionName[0] == '\\' ? "nt" : "win32", hidden ? "hidden" : "visible",
+      hotAdd ? "-hotadd" : "");
   outPath(options, logName, logPath, sizeof(logPath));
 
   enum AttemptResult result = ATTEMPT_REFUSED;
   char reply[512], command[96];
+  bool added = false;
+  char * doc = NULL;
+  HRESULT hr;
 
   if (!vmCreate(&vm, config.data, report, logPath) || !vmStart(&vm, report))
     goto done;
   result = ATTEMPT_FAILED;
 
-  char * doc = NULL;
-  const HRESULT hr = hcsCall(vm.system, api.getComputeSystemProperties,
+  if (hotAdd)
+  {
+    if (!guestReady(&vm, report))
+      goto done;
+
+    struct Str request = { 0 };
+    regionRequest(&request, "Add", sectionName, section->size, hidden);
+    hr = hcsModify(vm.system, request.data, &doc);
+    free(request.data);
+    jsonResult(report, "region_add", hr);
+    jsonString(report, "region_add_result", doc);
+    printf("  Adding the region while the guest runs: 0x%08lx %s\n",
+        (unsigned long)hr, doc ? doc : "");
+    free(doc);
+    doc = NULL;
+    if (FAILED(hr))
+      goto done;
+    added = true;
+  }
+
+  hr = hcsCall(vm.system, api.getComputeSystemProperties,
       "{\"PropertyTypes\":[\"SharedMemoryRegion\"]}", 10000, &doc);
   jsonResult(report, "region_query", hr);
   jsonRaw(report, "region_info", SUCCEEDED(hr) ? doc : NULL);
@@ -2042,7 +2092,7 @@ static enum AttemptResult shmAttempt(const struct Options * options,
     printf("  The HCS did not report where it mapped the section: 0x%08lx\n",
         (unsigned long)hr);
 
-  if (!guestReady(&vm, report))
+  if (!hotAdd && !guestReady(&vm, report))
     goto done;
 
   // the reported number as a page, which Windows 10.0.26100 gives, and as
@@ -2096,6 +2146,16 @@ static enum AttemptResult shmAttempt(const struct Options * options,
     result = ATTEMPT_PASSED;
 
 done:
+  if (added)
+  {
+    struct Str request = { 0 };
+    regionRequest(&request, "Remove", sectionName, section->size, hidden);
+    hr = hcsModify(vm.system, request.data, &doc);
+    free(request.data);
+    jsonResult(report, "region_remove", hr);
+    jsonString(report, "region_remove_result", doc);
+    free(doc);
+  }
   if (vm.system)
     vmStop(&vm, report);
   vmDestroy(&vm, report);
@@ -2118,7 +2178,7 @@ static bool runShm(const struct Options * options, struct Json * report)
   snprintf(sectionName, sizeof(sectionName), "Global\\lg-hcs-probe-%s",
       name);
 
-  bool passed = false;
+  bool passed = false, hotAddPassed = false;
   struct Section section;
   if (sectionCreate(&section, sectionName, options->size))
   {
@@ -2133,21 +2193,29 @@ static bool runShm(const struct Options * options, struct Json * report)
           sectionName + strlen("Global\\"));
 
       enum AttemptResult result = shmAttempt(options, &section, configName,
-          false, &found, report);
+          false, false, &found, report);
       if (result == ATTEMPT_REFUSED)
         continue;
 
       // either way the name worked, see how a hidden region behaves too
       passed = result == ATTEMPT_PASSED;
-      if (!aborted && shmAttempt(options, &section, configName, true,
+      if (!aborted && shmAttempt(options, &section, configName, true, false,
             &found, report) == ATTEMPT_PASSED)
         passed = true;
+
+      // and whether a running VM takes the region, as one that something
+      // else created would have to
+      hotAddPassed = !aborted && shmAttempt(options, &section, configName,
+          false, true, &found, report) == ATTEMPT_PASSED;
       break;
     }
     sectionClose(&section);
   }
 
   jsonClose(report, ']');
+  printf("[shm] A running VM %s a region added to it\n", hotAddPassed ?
+      "takes" : "does not take");
+  jsonBool(report, "hot_add_passed", hotAddPassed);
   jsonBool(report, "passed", passed);
   jsonClose(report, '}');
   return passed;
@@ -2160,17 +2228,6 @@ static bool containsNoCase(const char * text, const char * part)
     if (_strnicmp(text, part, len) == 0)
       return true;
   return false;
-}
-
-static void regionRequest(struct Str * request, const char * type,
-    const char * sectionName, uint64_t size)
-{
-  strPrintf(request, "{\"ResourcePath\":"
-      "\"VirtualMachine/Devices/SharedMemory/Regions\",\"RequestType\":"
-      "\"%s\",\"Settings\":{\"SectionName\":", type);
-  strJsonString(request, sectionName);
-  strPrintf(request, ",\"StartOffset\":0,\"Length\":%" PRIu64 ","
-      "\"AllowGuestWrite\":true,\"HiddenFromGuest\":false}}", size);
 }
 
 // what the HCS lets this PC do with a VM that it did not create, such as one
@@ -2246,7 +2303,7 @@ static bool runVm(const struct Options * options, const char * systems,
   jsonString(report, "section_name", configName);
 
   struct Str request = { 0 };
-  regionRequest(&request, "Add", configName, section.size);
+  regionRequest(&request, "Add", configName, section.size, false);
   hr = hcsModify(system, request.data, &doc);
   free(request.data);
   jsonResult(report, "region_add", hr);
@@ -2269,7 +2326,7 @@ static bool runVm(const struct Options * options, const char * systems,
   doc = NULL;
 
   request = (struct Str){ 0 };
-  regionRequest(&request, "Remove", configName, section.size);
+  regionRequest(&request, "Remove", configName, section.size, false);
   hr = hcsModify(system, request.data, &doc);
   free(request.data);
   jsonResult(report, "region_remove", hr);

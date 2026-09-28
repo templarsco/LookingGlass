@@ -81,13 +81,25 @@ in [windows-client](windows-client/README.md).
      This client speaks KVMFR 34 and LGMP 12, and the B7 release is older, so
      the client refuses a B7 host at the version check.
    Status, September 28, 2026: `lg-windows-client-hcs-probe` checks both
-   routes on a Hyper-V PC with disposable Linux VMs whose init checks, from
-   inside the VM, that the PC and the guest see each other's writes; see
+   routes with disposable Linux VMs whose init checks, from inside the VM,
+   that the PC and the guest see each other's writes; see
    [windows-client](windows-client/README.md#hcs-shared-memory-probe). CI
-   runs that init under QEMU with QEMU's own ivshmem-plain device, and runs
-   the probe on a Windows runner without Hyper-V, where it must fail
-   cleanly. The probe has not run on a Hyper-V PC yet, so neither route is
-   verified.
+   runs it on GitHub's Windows Server 2025 runners (10.0.26100), where
+   Hyper-V runs nested:
+   - The second route works there. The HCS maps the section, named
+     `\BaseNamedObjects\<name>`, right after the VM's memory, and the PC
+     and the guest see each other's writes.
+   - The first route does not work yet. The HCS offers the emulated device
+     only when the VM's configuration declares it under `FlexibleIov`, and
+     the guest reaches its configuration space but not its BARs. Backing
+     BAR2 by the section makes the VM's worker process fail fast in
+     `vmvpci.dll` when the guest enables the device's memory space, or has
+     no effect once the guest is up.
+   - Neither route has run with Limiar's VM. Limiar's GPU-PV guide drives
+     that VM with Hyper-V's PowerShell module, so the Hyper-V management
+     service (VMMS) runs it, not the HCS directly. On the runners, the HCS
+     lists and opens such a VM and creates a device host for it, but
+     refuses to add the region to it while it runs (0x8004102B).
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.

@@ -146,11 +146,15 @@ write in each direction, all over the VM's serial port:
 
 - `hdv`: the probe emulates an IVSHMEM PCI device (1af4:1110, like QEMU's
   ivshmem-plain) through the HCS device emulation API, with BAR2 backed by
-  a section. It passes only if no guest access to BAR2 reaches the
-  emulator, which means the guest reads and writes the section itself.
-  This is the route where the guest's IVSHMEM driver works unchanged.
+  a section. It passes only if the guest finds the section in BAR2 and no
+  guest access to BAR2 reaches the emulator, which means the guest reads
+  and writes the section itself. This is the route where the guest's
+  IVSHMEM driver works unchanged.
 - `shm`: a HCS `SharedMemory` region maps a named section into guest
-  memory, and the guest maps it at the address the HCS reports.
+  memory, and the guest maps it at the address the HCS reports. One VM has
+  the region in its configuration, one has it hidden from the guest's
+  memory map, and one gets it added while it runs, as a VM that something
+  else created would have to.
 
 Run it from an elevated prompt:
 
@@ -165,6 +169,12 @@ kernel with Hyper-V PCI support, and `--size-mib` sets the size of the
 memory, 32 MiB by default. The report also lists the compute systems the
 HCS already knows, such as WSL.
 
+`--vm ID` checks an existing VM instead, such as one of Hyper-V Manager, by
+its ID (`(Get-VM NAME).Id`): whether the HCS opens it and creates a device
+host for it, and whether it lets the probe add a `SharedMemory` region,
+which the probe removes again. The VM keeps running, and nothing in it
+checks the region.
+
 The init is built for x86_64 Linux, with the host's GCC when
 cross-compiling from Linux or with Clang and LLD on Windows; CMake skips the
 probe when it finds neither. CI boots the init under QEMU with QEMU's own
@@ -174,9 +184,42 @@ the probe's side of the protocol
 port only after the guest has booted, which can happen on Hyper-V, where
 the output written before is lost; the init repeats its greeting until the
 first command for that reason. The release workflow runs the packaged probe
-on a Windows runner without Hyper-V, where every case must fail cleanly
-into a well-formed report ([hcs_probe_smoke.py](hcs_probe_smoke.py)).
-Neither shows that the Hyper-V side works; only a run on a Hyper-V PC does.
+with the probe itself standing in for the kernel, so no guest boots and
+every case must fail cleanly into a well-formed report
+([hcs_probe_smoke.py](hcs_probe_smoke.py)). The build workflow runs it with
+WSL's kernel on GitHub's Windows Server 2025 runners, where Hyper-V runs
+nested, and runs `--vm` on a disposable Hyper-V Manager VM without a disk.
+It prints the report, the guests' kernel messages about devices, the
+Hyper-V events and, when a VM worker process crashes, the functions on its
+stack.
+
+On those runners, Windows 10.0.26100, on September 28, 2026:
+
+- `shm` works. The HCS takes the section by its NT name,
+  `\BaseNamedObjects\<name>`; the Win32 name, `Global\<name>`, fails when
+  the VM starts (0x800700a1). It maps the section right after the VM's
+  memory and reports `GuestPhysicalAddress` as a page number. The guest and
+  the PC see each other's writes. With `HiddenFromGuest`, the guest does not
+  find the section there.
+- `hdv` does not work. The HCS offers the device only when the VM's
+  configuration declares it under `FlexibleIov` with
+  `"HostingModel": "External"`. The guest's reads and writes of the
+  configuration space reach the emulator, but the host handles the BAR
+  registers itself, and reads of BAR0 and BAR2 return all ones without
+  reaching the emulator. Backing BAR2 by the section fails before the VM
+  starts (`ERROR_INVALID_STATE`). Right after the start it succeeds, and
+  then the VM's worker process, `vmwp.exe`, stops with a fast fail in
+  `vmvpci.dll` when the guest enables the device's memory space: with
+  Microsoft's public symbols, the dump shows
+  `Vpci::Core::VirtualDevice::CreateNewRangesForSection` giving up with
+  `E_UNEXPECTED`. The probe's first `hdv` VM ends that way. Once the guest
+  is up, backing BAR2 succeeds with no effect.
+- `--vm` on a Hyper-V Manager VM: the HCS lists it, with `"Owner": "VMMS"`,
+  opens it and creates a device host for it, but refuses to add the region
+  while it runs (0x8004102B) and logs that the memory's virtual quantity,
+  limit and reservation are below their minimums.
+
+The probe has not run on a PC with Limiar's VM yet.
 
 ### Releases
 
@@ -253,8 +296,8 @@ keeps the shared code covered there.
 ## Not Covered Yet
 
 - No guest frame reaches the window. Nothing maps the shared memory section
-  into a VM yet; that is step 5. The HCS probe has not run on a Hyper-V PC
-  yet.
+  into Limiar's VM yet; that is step 5. The HCS probe has run only on
+  GitHub's runners, not on a PC with Limiar's VM.
 - The LGMP path copies each frame through the CPU into an OpenGL texture.
   There is no zero-copy import on Windows; DMA-BUF is Linux only.
 - Resizing by dragging the window border has no automated test. The

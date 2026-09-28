@@ -71,9 +71,19 @@ lg-windows-client-hcs-probe.exe
 
 It prints what works and writes `report.json` and the VMs' serial logs to
 a new folder next to it. The report also lists the virtual machines and
-containers the Host Compute Service already runs. The probe has not run
-on a Hyper-V PC before this build; on a Windows runner without Hyper-V it
-only showed that it fails cleanly.
+containers the Host Compute Service already runs.
+
+On GitHub's Windows Server 2025 runners, where Hyper-V runs nested, the
+shared memory region works and the emulated IVSHMEM device does not: the
+worker process of the probe's first VM with the device crashes when the
+guest enables the device, which Windows records as an application error.
+That VM is the probe's own; no other VM is affected. The probe has not run
+on a PC with Limiar's VM yet.
+
+`lg-windows-client-hcs-probe.exe --vm ID` instead checks an existing VM,
+such as one of Hyper-V Manager, by its ID (`(Get-VM NAME).Id` in
+PowerShell): whether the Host Compute Service opens it and lets this PC add
+shared memory to it, which the probe removes again. The VM keeps running.
 
 Before this build was published, the same `looking-glass-client.exe` drew a
 known test frame in a window on a Windows runner, once from its test
