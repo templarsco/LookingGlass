@@ -31,11 +31,18 @@
 #include <lgmp/stream.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <bcrypt.h>
+#else
 #include <sys/random.h>
+#endif
 
 #define CLIPBOARD_PENDING_MAX         128U
 #define CLIPBOARD_PENDING_NORMAL_MAX  64U
@@ -358,6 +365,21 @@ static uint64_t nextClientGeneration(LGMPClipboard * clipboard)
 static bool randomBytes(void * buffer, size_t size)
 {
   uint8_t * output = buffer;
+#ifdef _WIN32
+  while (size)
+  {
+    const ULONG chunk = size > ULONG_MAX ? ULONG_MAX : (ULONG)size;
+    if (!BCRYPT_SUCCESS(BCryptGenRandom(NULL, output, chunk,
+          BCRYPT_USE_SYSTEM_PREFERRED_RNG)))
+    {
+      errno = EIO;
+      return false;
+    }
+    output += chunk;
+    size   -= chunk;
+  }
+  return true;
+#else
   while (size)
   {
     const ssize_t received = getrandom(output, size, 0);
@@ -373,6 +395,7 @@ static bool randomBytes(void * buffer, size_t size)
     size   -= (size_t)received;
   }
   return true;
+#endif
 }
 
 static LG_ClipboardFileError fromWireFileError(uint32_t error)
