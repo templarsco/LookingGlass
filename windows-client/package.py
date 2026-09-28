@@ -18,9 +18,9 @@
 # with this program; if not, write to the Free Software Foundation, Inc., 59
 # Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
-"""Packages the Windows client for a release: a zip with the executable, the
-README, the GPL and the licenses of the code built into the executable, and
-the release notes rendered from the same README."""
+"""Packages the Windows client for a release: a zip with the client, the test
+frame producer, the README, the GPL and the licenses of the code built into
+the executables, and the release notes rendered from the same README."""
 
 import argparse
 import os
@@ -62,6 +62,8 @@ def text_file(text):
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('client', help='path to looking-glass-client.exe')
+  parser.add_argument('--producer', required=True,
+      help='path to lg-windows-client-producer.exe')
   parser.add_argument('--version', required=True)
   parser.add_argument('--commit', required=True)
   parser.add_argument('--output', required=True, type=Path)
@@ -77,9 +79,10 @@ def main():
       args.version, args.commit)
 
   files = {
-    'looking-glass-client.exe': Path(args.client).read_bytes(),
-    'README.txt'              : text_file(readme),
-    'LICENSE.txt'             : text_file(read(TOP / 'LICENSE')),
+    'looking-glass-client.exe'      : Path(args.client).read_bytes(),
+    'lg-windows-client-producer.exe': Path(args.producer).read_bytes(),
+    'README.txt'                    : text_file(readme),
+    'LICENSE.txt'                   : text_file(read(TOP / 'LICENSE')),
   }
 
   for name, path in SOURCE_LICENSES.items():

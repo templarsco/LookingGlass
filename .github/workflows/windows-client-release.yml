@@ -65,6 +65,13 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON \
           -DOPTIMIZE_FOR_NATIVE=OFF ..
         make -j$(nproc)
+    - name: Cross-compile the test frame producer
+      run: |
+        mkdir windows-client/build
+        cd windows-client/build
+        cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake \
+          -DCMAKE_BUILD_TYPE=Release -DOPTIMIZE_FOR_NATIVE=OFF ..
+        make -j$(nproc) lg-windows-client-producer
     - name: Package the Windows client and its source
       env:
         VERSION: ${{ steps.version.outputs.version }}
@@ -72,6 +79,7 @@ jobs:
         export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
         python3 windows-client/package.py \
           client/build-windows/looking-glass-client.exe \
+          --producer windows-client/build/lg-windows-client-producer.exe \
           --version "$VERSION" --commit "$GITHUB_SHA" --output dist \
           --notice mingw-w64-runtime=/usr/share/doc/mingw-w64-x86-64-dev/copyright \
           --notice gcc-runtime=/usr/share/doc/gcc-mingw-w64-x86-64-win32/copyright
@@ -118,7 +126,13 @@ jobs:
         # the runner has no GPU, so the client uses Mesa's software OpenGL
         cp /mingw64/bin/opengl32.dll "$(dirname "$client")/"
         GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
-          --output smoke "$(cygpath -w "$client")"
+          --output smoke/test "$(cygpath -w "$client")"
+    - name: Check a frame from the packaged producer
+      run: |
+        dir=$(echo unpacked/*)
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
+          --producer "$(cygpath -w "$dir/lg-windows-client-producer.exe")" \
+          --output smoke/lgmp "$(cygpath -w "$dir/looking-glass-client.exe")"
     - name: Upload the smoke test output
       if: failure()
       uses: actions/upload-artifact@v6
