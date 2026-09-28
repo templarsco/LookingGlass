@@ -20,8 +20,8 @@ endfunction()
 
 # Add/remove transports here!
 if(WIN32)
-  # LGMP needs a Windows shared memory endpoint and SPICE a Winsock port of
-  # PureSpice, so Windows only has the synthetic test source for now
+  # SPICE needs a Winsock port of PureSpice
+  add_transport(LGMP)
   add_transport(Test)
 else()
   add_transport(LGMP)

@@ -193,7 +193,7 @@ static void test_setup(void)
     {
       .module      = "test",
       .name        = "captureFrame",
-      .description = "Capture after this synthetic frame serial is submitted",
+      .description = "Capture after the frame with this serial is submitted",
       .type        = OPTION_TYPE_INT,
       .value.x_int = 0,
     },

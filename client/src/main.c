@@ -3540,24 +3540,23 @@ static int lg_run(void)
   atomic_store_explicit(&l_testFrameSerial, 0, memory_order_relaxed);
   atomic_store_explicit(&l_testFrameType, FRAME_TYPE_INVALID,
       memory_order_relaxed);
-  if (strcmp(g_params.transport, "test") == 0)
+  /* the test transport registers these options, but the capture works with
+   * any transport, so that LGMP frames can be checked too */
+  const char * capturePath = option_get_string("test", "captureFile");
+  const int captureFrame   = option_get_int("test", "captureFrame");
+  const int captureDelay   = option_get_int("test", "captureDelay");
+  if (capturePath)
   {
-    const char * capturePath = option_get_string("test", "captureFile");
-    const int captureFrame   = option_get_int("test", "captureFrame");
-    const int captureDelay   = option_get_int("test", "captureDelay");
-    if (capturePath)
+    if (captureFrame < 1 || captureDelay < 0)
     {
-      if (captureFrame < 1 || captureDelay < 0)
-      {
-        DEBUG_ERROR("test capture requires captureFrame >= 1 and "
-            "captureDelay >= 0");
-        return -1;
-      }
-      l_testCapture.path         = capturePath;
-      l_testCapture.targetSerial = captureFrame;
-      l_testCapture.delay        = captureDelay;
-      l_testCapture.enabled      = true;
+      DEBUG_ERROR("test capture requires captureFrame >= 1 and "
+          "captureDelay >= 0");
+      return -1;
     }
+    l_testCapture.path         = capturePath;
+    l_testCapture.targetSerial = captureFrame;
+    l_testCapture.delay        = captureDelay;
+    l_testCapture.enabled      = true;
   }
 #endif
 

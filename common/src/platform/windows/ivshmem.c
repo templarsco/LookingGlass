@@ -26,11 +26,16 @@
 #include <windows.h>
 #include "ivshmem.h"
 
+#include <aclapi.h>
+#include <limits.h>
+#include <sddl.h>
 #include <setupapi.h>
 #include <io.h>
 
 struct IVSHMEMInfo
 {
+  // the guest's IVSHMEM driver, or a named section on the PC running the VM
+  bool   section;
   HANDLE handle;
 };
 
@@ -201,10 +206,11 @@ bool ivshmemInit(struct IVSHMEM * dev)
 
   struct IVSHMEMInfo * info = malloc(sizeof(*info));
 
-  info->handle = handle;
-  dev->opaque  = info;
-  dev->size    = 0;
-  dev->mem     = NULL;
+  info->section = false;
+  info->handle  = handle;
+  dev->opaque   = info;
+  dev->size     = 0;
+  dev->mem      = NULL;
 
   return true;
 }
@@ -241,11 +247,275 @@ bool ivshmemOpen(struct IVSHMEM * dev)
   return true;
 }
 
+static void * tokenInfo(HANDLE token, TOKEN_INFORMATION_CLASS type)
+{
+  DWORD size = 0;
+  GetTokenInformation(token, type, NULL, 0, &size);
+
+  void * info = size ? malloc(size) : NULL;
+  if (!info || !GetTokenInformation(token, type, info, size, &size))
+  {
+    DEBUG_WINERROR("GetTokenInformation failed", GetLastError());
+    free(info);
+    return NULL;
+  }
+  return info;
+}
+
+/* This user and logon session, the system and administrators, who can open
+ * any object anyway, and Hyper-V's per-VM accounts, as the VM maps the
+ * section too. Anyone else could see the guest's screen and send it input. */
+static bool sidTrusted(PSID sid, const TOKEN_USER * user,
+    const TOKEN_GROUPS * groups)
+{
+  if (EqualSid(sid, user->User.Sid))
+    return true;
+
+  for (DWORD i = 0; i < groups->GroupCount; ++i)
+    if ((groups->Groups[i].Attributes & SE_GROUP_LOGON_ID) ==
+          SE_GROUP_LOGON_ID &&
+        EqualSid(sid, groups->Groups[i].Sid))
+      return true;
+
+  if (IsWellKnownSid(sid, WinLocalSystemSid) ||
+      IsWellKnownSid(sid, WinBuiltinAdministratorsSid) ||
+      IsWellKnownSid(sid, WinCreatorOwnerRightsSid))
+    return true;
+
+  // NT VIRTUAL MACHINE, S-1-5-83-...
+  static const SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+  return
+    memcmp(GetSidIdentifierAuthority(sid), &ntAuthority,
+        sizeof(ntAuthority)) == 0 &&
+    *GetSidSubAuthorityCount(sid) >= 1 &&
+    *GetSidSubAuthority(sid, 0) == SECURITY_VIRTUALSERVER_ID_BASE_RID;
+}
+
+static void sectionUntrusted(const char * name, const char * what, PSID sid)
+{
+  char * sidString = NULL;
+  if (sid)
+    ConvertSidToStringSidA(sid, &sidString);
+  DEBUG_ERROR("The shared memory section %s %s %s; only this user and the VM "
+      "may have access", name, what, sidString ? sidString : "another account");
+  LocalFree(sidString);
+}
+
+static bool sectionIsPrivate(HANDLE handle, const char * name)
+{
+  bool                 result = false;
+  HANDLE               token  = NULL;
+  TOKEN_USER         * user   = NULL;
+  TOKEN_GROUPS       * groups = NULL;
+  PSID                 owner  = NULL;
+  PACL                 dacl   = NULL;
+  PSECURITY_DESCRIPTOR sd     = NULL;
+
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+  {
+    DEBUG_WINERROR("OpenProcessToken failed", GetLastError());
+    goto out;
+  }
+
+  if (!(user   = tokenInfo(token, TokenUser  )) ||
+      !(groups = tokenInfo(token, TokenGroups)))
+    goto out;
+
+  const DWORD error = GetSecurityInfo(handle, SE_KERNEL_OBJECT,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+      &owner, NULL, &dacl, NULL, &sd);
+  if (error != ERROR_SUCCESS)
+  {
+    DEBUG_WINERROR("Failed to read who can open the shared memory section",
+        error);
+    goto out;
+  }
+
+  if (!dacl)
+  {
+    DEBUG_ERROR("The shared memory section %s has no DACL, so every account "
+        "can open it", name);
+    goto out;
+  }
+
+  // the owner can always change the DACL
+  if (!owner || !sidTrusted(owner, user, groups))
+  {
+    sectionUntrusted(name, "is owned by", owner);
+    goto out;
+  }
+
+  const ACCESS_MASK access =
+    SECTION_MAP_READ | SECTION_MAP_WRITE | SECTION_MAP_EXECUTE |
+    SECTION_EXTEND_SIZE | WRITE_DAC | WRITE_OWNER |
+    GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL;
+
+  for (DWORD i = 0; i < dacl->AceCount; ++i)
+  {
+    ACE_HEADER * header;
+    if (!GetAce(dacl, i, (void **)&header))
+    {
+      DEBUG_WINERROR("GetAce failed", GetLastError());
+      goto out;
+    }
+
+    if (header->AceFlags & INHERIT_ONLY_ACE)
+      continue;
+
+    switch (header->AceType)
+    {
+      // the callback variant has the same layout
+      case ACCESS_ALLOWED_ACE_TYPE:
+      case ACCESS_ALLOWED_CALLBACK_ACE_TYPE:
+        break;
+
+      case ACCESS_ALLOWED_COMPOUND_ACE_TYPE:
+      case ACCESS_ALLOWED_OBJECT_ACE_TYPE:
+      case ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE:
+        DEBUG_ERROR("The shared memory section %s has an access entry of an "
+            "unsupported type (%u)", name, header->AceType);
+        goto out;
+
+      // denied, audit and label entries grant nothing
+      default:
+        continue;
+    }
+
+    const ACCESS_ALLOWED_ACE * ace = (const ACCESS_ALLOWED_ACE *)header;
+    PSID sid = (PSID)&ace->SidStart;
+    if ((ace->Mask & access) && !sidTrusted(sid, user, groups))
+    {
+      sectionUntrusted(name, "can be opened by", sid);
+      goto out;
+    }
+  }
+
+  result = true;
+
+out:
+  LocalFree(sd);
+  free(groups);
+  free(user);
+  if (token)
+    CloseHandle(token);
+  return result;
+}
+
+bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
+{
+  DEBUG_ASSERT(dev);
+
+  dev->opaque = NULL;
+  dev->mem    = NULL;
+  dev->size   = 0;
+
+  DEBUG_INFO("Shared memory    : %s", shmDevice);
+
+  const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+      shmDevice, -1, NULL, 0);
+  wchar_t * name = length > 0 ? malloc(length * sizeof(*name)) : NULL;
+  if (!name || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        shmDevice, -1, name, length))
+  {
+    DEBUG_ERROR("Invalid shared memory section name: %s", shmDevice);
+    free(name);
+    return false;
+  }
+
+  // READ_CONTROL lets us check who else can open the section
+  HANDLE handle = OpenFileMappingW(
+      FILE_MAP_READ | FILE_MAP_WRITE | READ_CONTROL, FALSE, name);
+  free(name);
+  if (!handle)
+  {
+    DEBUG_WINERROR("Failed to open the shared memory section",
+        GetLastError());
+    return false;
+  }
+
+  if (!sectionIsPrivate(handle, shmDevice))
+  {
+    CloseHandle(handle);
+    return false;
+  }
+
+  uint8_t * mem = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE,
+      0, 0, 0);
+  if (!mem)
+  {
+    DEBUG_WINERROR("Failed to map the shared memory section", GetLastError());
+    CloseHandle(handle);
+    return false;
+  }
+
+  // the view covers the whole section, but a section that commits memory in
+  // parts reports one region per part, and reserved pages cannot be read
+  size_t size      = 0;
+  bool   committed = true;
+  MEMORY_BASIC_INFORMATION region;
+  while (VirtualQuery(mem + size, &region, sizeof(region)) == sizeof(region) &&
+      region.AllocationBase == mem)
+  {
+    committed &= region.State == MEM_COMMIT;
+    size      += region.RegionSize;
+  }
+
+  if (!committed)
+  {
+    DEBUG_ERROR("The shared memory section %s is not fully committed",
+        shmDevice);
+    UnmapViewOfFile(mem);
+    CloseHandle(handle);
+    return false;
+  }
+
+  if (!size || size > UINT_MAX)
+  {
+    DEBUG_ERROR("Unsupported shared memory section size: %" PRIuPTR, size);
+    UnmapViewOfFile(mem);
+    CloseHandle(handle);
+    return false;
+  }
+
+  struct IVSHMEMInfo * info = malloc(sizeof(*info));
+  if (!info)
+  {
+    DEBUG_ERROR("Failed to allocate memory");
+    UnmapViewOfFile(mem);
+    CloseHandle(handle);
+    return false;
+  }
+
+  info->section = true;
+  info->handle  = handle;
+
+  dev->opaque = info;
+  dev->mem    = mem;
+  dev->size   = (unsigned int)size;
+  return true;
+}
+
 void ivshmemClose(struct IVSHMEM * dev)
 {
-  DEBUG_ASSERT(dev && dev->opaque && dev->mem);
+  DEBUG_ASSERT(dev);
+
+  if (!dev->opaque)
+    return;
 
   struct IVSHMEMInfo * info = (struct IVSHMEMInfo *)dev->opaque;
+
+  if (info->section)
+  {
+    UnmapViewOfFile(dev->mem);
+    CloseHandle(info->handle);
+    free(info);
+    dev->opaque = NULL;
+    dev->size   = 0;
+    dev->mem    = NULL;
+    return;
+  }
+
+  DEBUG_ASSERT(dev->mem);
 
   if (!DeviceIoControl(info->handle, IOCTL_IVSHMEM_RELEASE_MMAP, NULL, 0, NULL,
         0, NULL, NULL))
@@ -263,4 +533,15 @@ void ivshmemFree(struct IVSHMEM * dev)
 
   free(info);
   dev->opaque = NULL;
+}
+
+bool ivshmemHasDMA(struct IVSHMEM * dev)
+{
+  return false;
+}
+
+int ivshmemGetDMABuf(struct IVSHMEM * dev, uint64_t offset, uint64_t size)
+{
+  DEBUG_ERROR("DMA buffers are only available with the Linux KVMFR module");
+  return -1;
 }
