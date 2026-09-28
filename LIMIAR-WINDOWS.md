@@ -62,21 +62,32 @@ in [windows-client](windows-client/README.md).
    this sequence was written. IVSHMEM is a QEMU device, so on September 28,
    2026 the plan became porting it to Hyper-V rather than replacing it:
    - The PC side is the section from step 3.
-   - The Host Compute Service's `SharedMemory` device maps a named section
-     into guest memory (schema 2.1: `SharedMemoryRegion` with `SectionName`,
+   - First route: the Host Compute Service's device emulation API (HDV)
+     lets a process on the PC present a PCI device to a VM and back a BAR
+     with a section (`HdvCreateSectionBackedMmioRange`). Presenting QEMU's
+     ivshmem-plain (1af4:1110) with BAR2 backed by the section gives the
+     guest a real IVSHMEM device, so the guest's IVSHMEM driver and the
+     Looking Glass host run unchanged, without a custom guest driver or test
+     signing.
+   - Second route: the HCS `SharedMemory` device maps a named section into
+     guest memory (schema 2.1: `SharedMemoryRegion` with `SectionName`,
      `StartOffset`, `Length` and `AllowGuestWrite`), and the guest physical
-     address can be queried as `SharedMemoryRegionInfo`. It exists only for
-     VMs created through HCS, and it is untested with GPU-PV and OpenHCL.
-   - In the VM, Limiar's OpenHCL presents a PCI device like QEMU's
-     ivshmem-plain (1af4:1110) with BAR2 at that address. The guest's IVSHMEM
-     driver and the Looking Glass host then run unchanged, without a custom
-     guest driver or test signing.
+     address can be queried as `SharedMemoryRegionInfo`. Something in the VM,
+     such as OpenHCL, would then have to present that memory as a device.
+   - Both routes need a VM that the HCS created or can open. Whether
+     Limiar's native Hyper-V VM qualifies is open. Neither route is tested
+     with GPU-PV or OpenHCL.
    - The host in the guest must be built from the same source as the client.
      This client speaks KVMFR 34 and LGMP 12, and the B7 release is older, so
      the client refuses a B7 host at the version check.
-   None of this is verified yet. The first check is a probe on a Hyper-V
-   host: an HCS VM with a `SharedMemory` region, where the PC and the guest
-   must see each other's writes.
+   Status, September 28, 2026: `lg-windows-client-hcs-probe` checks both
+   routes on a Hyper-V PC with disposable Linux VMs whose init checks, from
+   inside the VM, that the PC and the guest see each other's writes; see
+   [windows-client](windows-client/README.md#hcs-shared-memory-probe). CI
+   runs that init under QEMU with QEMU's own ivshmem-plain device, and runs
+   the probe on a Windows runner without Hyper-V, where it must fail
+   cleanly. The probe has not run on a Hyper-V PC yet, so neither route is
+   verified.
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.
