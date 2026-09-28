@@ -83,6 +83,22 @@ typedef HANDLE HCS_OPERATION;
 typedef HANDLE HCS_SYSTEM;
 typedef void (CALLBACK * HCS_OPERATION_COMPLETION)(HCS_OPERATION, void *);
 
+typedef struct
+{
+  DWORD         Type;
+  PCWSTR        EventData;
+  HCS_OPERATION Operation;
+}
+HCS_EVENT;
+
+#define HcsEventSystemExited          0x00000001
+#define HcsEventSystemCrashInitiated  0x00000002
+#define HcsEventSystemCrashReport     0x00000003
+#define HcsEventGuestConnectionClosed 0x00000006
+#define HcsEventServiceDisconnect     0x02000000
+
+typedef void (CALLBACK * HCS_EVENT_CALLBACK)(HCS_EVENT *, void *);
+
 // vmdevicehost.h, which MinGW does not ship
 typedef void * HDV_HOST;
 typedef void * HDV_DEVICE;
@@ -182,6 +198,8 @@ static struct
   HRESULT (WINAPI * grantVmAccess)(PCWSTR, PCWSTR);
   HRESULT (WINAPI * revokeVmAccess)(PCWSTR, PCWSTR);
   HRESULT (WINAPI * getServiceProperties)(PCWSTR, PWSTR *);
+  HRESULT (WINAPI * setComputeSystemCallback)(HCS_SYSTEM, DWORD, const void *,
+      HCS_EVENT_CALLBACK);
 
   // device emulation, only needed by the hdv case
   HRESULT (WINAPI * initializeDeviceHost)(HCS_SYSTEM, HDV_HOST *);
@@ -557,6 +575,7 @@ static bool loadHcs(void)
     return false;
   }
   RESOLVE(core, getServiceProperties, "HcsGetServiceProperties");
+  RESOLVE(core, setComputeSystemCallback, "HcsSetComputeSystemCallback");
 
   HMODULE hdv = LoadLibraryExW(L"vmdevicehost.dll", NULL,
       LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -820,6 +839,10 @@ struct Vm
   char        exitType[32];
   DWORD       lastPoll;
   const struct Options * options;
+
+  // what the HCS said about the VM, such as why it stopped
+  char        * events[8];
+  volatile LONG eventCount;
 };
 
 static void vmPollState(struct Vm * vm)
@@ -1043,6 +1066,31 @@ static void vmAccess(struct Vm * vm, bool grant, struct Json * report)
   free(id);
 }
 
+// the HCS's events about a VM, kept for the report; this runs on the HCS's
+// threads until the VM is closed
+static void CALLBACK vmEvent(HCS_EVENT * event, void * context)
+{
+  struct Vm * vm = context;
+  const LONG slot = InterlockedIncrement(&vm->eventCount) - 1;
+  if (slot >= (LONG)(sizeof(vm->events) / sizeof(vm->events[0])))
+    return;
+
+  const char * name =
+    event->Type == HcsEventSystemExited          ? "system exited"     :
+    event->Type == HcsEventSystemCrashInitiated  ? "crash initiated"   :
+    event->Type == HcsEventSystemCrashReport     ? "crash report"      :
+    event->Type == HcsEventGuestConnectionClosed ? "guest connection closed" :
+    event->Type == HcsEventServiceDisconnect     ? "service disconnect" :
+    "other";
+
+  char * data = event->EventData ? narrow(event->EventData) : NULL;
+  struct Str text = { 0 };
+  strPrintf(&text, "%s (0x%08lx): %s", name, (unsigned long)event->Type,
+      data ? data : "");
+  free(data);
+  vm->events[slot] = text.data;
+}
+
 static bool vmCreate(struct Vm * vm, const char * config,
     struct Json * report, const char * logPath)
 {
@@ -1062,6 +1110,9 @@ static bool vmCreate(struct Vm * vm, const char * config,
   }
   free(doc);
 
+  if (api.setComputeSystemCallback)
+    jsonResult(report, "event_callback", api.setComputeSystemCallback(
+          vm->system, 0, vm, vmEvent));
   vmAccess(vm, true, report);
 
   WCHAR * wlog = widen(logPath);
@@ -1116,9 +1167,11 @@ static bool vmStart(struct Vm * vm, struct Json * report)
 static void vmStop(struct Vm * vm, struct Json * report)
 {
   char reply[256];
+  bool off = false;
   if (vm->ready && !vm->stopped && !aborted &&
       vmCommand(vm, "off", "off", 10000, reply, sizeof(reply)))
   {
+    off = true;
     const DWORD start = GetTickCount();
     while (!vm->stopped && !aborted && GetTickCount() - start < 20000)
     {
@@ -1132,7 +1185,12 @@ static void vmStop(struct Vm * vm, struct Json * report)
   vmPump(vm);
   while (vmNextReply(vm, reply, sizeof(reply)));
 
-  jsonBool(report, "stopped_by_guest", vm->stopped);
+  // a VM can stop by itself, such as when its worker fails
+  if (!vm->stopped)
+    vmPollState(vm);
+
+  jsonBool(report, "stopped_by_guest"  ,  off && vm->stopped);
+  jsonBool(report, "stopped_on_its_own", !off && vm->stopped);
   jsonString(report, "exit_type", vm->exitType[0] ? vm->exitType : NULL);
   if (!vm->stopped)
     jsonResult(report, "terminate", hcsCall(vm->system,
@@ -1144,10 +1202,24 @@ static void vmDestroy(struct Vm * vm, struct Json * report)
 {
   if (vm->system)
   {
+    if (api.setComputeSystemCallback)
+      api.setComputeSystemCallback(vm->system, 0, NULL, NULL);
     api.closeComputeSystem(vm->system);
     vm->system = NULL;
     vmAccess(vm, false, report);
   }
+
+  // no event arrives once the VM is closed
+  const LONG events = min(vm->eventCount,
+      (LONG)(sizeof(vm->events) / sizeof(vm->events[0])));
+  jsonOpen(report, "hcs_events", '[');
+  for(LONG i = 0; i < events; ++i)
+  {
+    jsonString(report, NULL, vm->events[i]);
+    free(vm->events[i]);
+    vm->events[i] = NULL;
+  }
+  jsonClose(report, ']');
 
   if (vm->serial)
     CloseHandle(vm->serial);

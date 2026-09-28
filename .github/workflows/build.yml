@@ -278,6 +278,29 @@ jobs:
         python windows-client\hcs_probe_smoke.py `
           windows-client\build\lg-windows-client-hcs-probe.exe `
           --kernel "${{ steps.wsl-kernel.outputs.kernel }}" --output hcs-probe
+    - name: Show the Hyper-V events from the HCS probe's VMs
+      if: always()
+      run: |
+        # what the VM workers say, such as why a VM stopped by itself
+        function Show-Events($events, $log) {
+          $events | Sort-Object TimeCreated | ForEach-Object {
+            $text = "$($_.Message)" -replace '\s+', ' '
+            $text = $text.Substring(0, [Math]::Min(500, $text.Length))
+            "$($_.TimeCreated.ToString('HH:mm:ss.fff')) $log $($_.Id) " +
+              "$($_.LevelDisplayName): $text"
+          }
+        }
+        $since = (Get-Date).AddMinutes(-30)
+        Get-WinEvent -ListLog *Hyper-V*, *Hcs* -ErrorAction SilentlyContinue |
+          Where-Object RecordCount -gt 0 | ForEach-Object {
+            $events = @(Get-WinEvent -LogName $_.LogName -MaxEvents 80 `
+              -ErrorAction SilentlyContinue | Where-Object TimeCreated -ge $since)
+            Show-Events $events $_.LogName
+          }
+        # a crash of the worker process shows here
+        $crashes = @(Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
+          LogName = 'Application'; StartTime = $since; Level = 1, 2 })
+        Show-Events $crashes Application
     - name: Upload the HCS probe's report and serial logs
       if: always()
       uses: actions/upload-artifact@v6
