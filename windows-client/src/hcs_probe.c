@@ -875,6 +875,11 @@ struct Vm
   struct Str  transcript;
   int         replies;
   bool        ready, panicked, disconnected, stopped;
+
+  // a Windows guest restarts while it sets itself up, which closes the
+  // serial port until the VM opens it again
+  bool        reopenSerial;
+  int         serialReopened;
   char        exitType[32];
   DWORD       lastPoll;
   const struct Options * options;
@@ -902,18 +907,52 @@ static void vmPollState(struct Vm * vm)
   vm->lastPoll = GetTickCount();
 }
 
-// reads what the serial port has; false once it is gone
-static bool vmPump(struct Vm * vm)
+// opens the VM's serial port, which the HCS makes as the VM starts
+static bool vmOpenSerial(struct Vm * vm, DWORD * error)
 {
-  if (!vm->serial || vm->disconnected)
+  WCHAR * wpipe = widen(vm->pipe);
+  const HANDLE serial = CreateFileW(wpipe, GENERIC_READ | GENERIC_WRITE, 0,
+      NULL, OPEN_EXISTING, 0, NULL);
+  *error = GetLastError();
+  free(wpipe);
+  if (serial == INVALID_HANDLE_VALUE)
     return false;
 
-  DWORD available = 0;
-  if (!PeekNamedPipe(vm->serial, NULL, 0, NULL, &available, NULL))
+  vm->serial = serial;
+  return true;
+}
+
+// the serial port closed; false unless the VM may open it again
+static bool vmSerialClosed(struct Vm * vm)
+{
+  if (!vm->reopenSerial)
   {
     vm->disconnected = true;
     return false;
   }
+
+  CloseHandle(vm->serial);
+  vm->serial = NULL;
+  return true;
+}
+
+// reads what the serial port has; false once it is gone
+static bool vmPump(struct Vm * vm)
+{
+  if (vm->disconnected)
+    return false;
+
+  if (!vm->serial)
+  {
+    DWORD error;
+    if (!vm->reopenSerial || !vmOpenSerial(vm, &error))
+      return vm->reopenSerial;
+    ++vm->serialReopened;
+  }
+
+  DWORD available = 0;
+  if (!PeekNamedPipe(vm->serial, NULL, 0, NULL, &available, NULL))
+    return vmSerialClosed(vm);
 
   while (available)
   {
@@ -921,10 +960,7 @@ static bool vmPump(struct Vm * vm)
     DWORD got = 0;
     if (!ReadFile(vm->serial, buf, min(available, (DWORD)sizeof(buf)), &got,
           NULL) || !got)
-    {
-      vm->disconnected = true;
-      return false;
-    }
+      return vmSerialClosed(vm);
     available -= got;
 
     if (vm->log)
@@ -1024,7 +1060,7 @@ static bool vmCommand(struct Vm * vm, const char * command,
   char  line[256];
   DWORD written;
   const int len = snprintf(line, sizeof(line), "%s\n", command);
-  if (!WriteFile(vm->serial, line, len, &written, NULL) ||
+  if (!vm->serial || !WriteFile(vm->serial, line, len, &written, NULL) ||
       written != (DWORD)len)
   {
     snprintf(reply, size, "cannot write to the serial port");
@@ -1213,15 +1249,10 @@ static bool vmStart(struct Vm * vm, struct Json * report)
   const DWORD start = GetTickCount();
   for(;;)
   {
-    WCHAR * wpipe = widen(vm->pipe);
-    vm->serial = CreateFileW(wpipe, GENERIC_READ | GENERIC_WRITE, 0, NULL,
-        OPEN_EXISTING, 0, NULL);
-    free(wpipe);
-    if (vm->serial != INVALID_HANDLE_VALUE)
+    DWORD error;
+    if (vmOpenSerial(vm, &error))
       break;
 
-    vm->serial = NULL;
-    const DWORD error = GetLastError();
     if ((error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY) ||
         GetTickCount() - start > 10000)
     {
@@ -2431,6 +2462,7 @@ static bool runWindows(const struct Options * options, struct Json * report)
 
   struct Vm vm;
   vmInit(&vm, options);
+  vm.reopenSerial = true;
   printf("[windows] VM %s boots %s\n", vm.id, options->windowsDisk);
 
   struct Str devices = { 0 };
@@ -2493,6 +2525,7 @@ static bool runWindows(const struct Options * options, struct Json * report)
     passed = guestChecks(&vm, &section, nonce, report);
 
 done:
+  jsonNumber(report, "serial_reopened", vm.serialReopened);
   if (vm.system)
     vmStop(&vm, report);
   vmDestroy(&vm, report);
