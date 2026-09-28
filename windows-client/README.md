@@ -170,11 +170,13 @@ cross-compiling from Linux or with Clang and LLD on Windows; CMake skips the
 probe when it finds neither. CI boots the init under QEMU with QEMU's own
 ivshmem-plain device, reached the same way as the emulated one, and plays
 the probe's side of the protocol
-([hcs_probe_guest_test.py](hcs_probe_guest_test.py)). The release workflow
-runs the packaged probe on a Windows runner without Hyper-V, where every
-case must fail cleanly into a well-formed report
-([hcs_probe_smoke.py](hcs_probe_smoke.py)). Neither shows that the
-Hyper-V side works; only a run on a Hyper-V PC does.
+([hcs_probe_guest_test.py](hcs_probe_guest_test.py)). It opens the serial
+port only after the guest has booted, which can happen on Hyper-V, where
+the output written before is lost; the init repeats its greeting until the
+first command for that reason. The release workflow runs the packaged probe
+on a Windows runner without Hyper-V, where every case must fail cleanly
+into a well-formed report ([hcs_probe_smoke.py](hcs_probe_smoke.py)).
+Neither shows that the Hyper-V side works; only a run on a Hyper-V PC does.
 
 ### Releases
 

@@ -22,7 +22,9 @@
 device, backed by a file this test fills with the probe's pattern, and plays
 the probe's side of the serial protocol. The guest reaches the device the
 way it reaches the IVSHMEM device the probe emulates on Hyper-V, then maps
-the same memory again by physical address, as for a SharedMemory region."""
+the same memory again by physical address, as for a SharedMemory region.
+With --connect-after, the test opens the serial port only after the guest
+has booted, as the probe may on Hyper-V, where earlier output is lost."""
 
 import argparse
 import mmap
@@ -98,6 +100,8 @@ def main():
   parser.add_argument('kernel', type=Path, help='an x86_64 Linux kernel')
   parser.add_argument('--size-mib', type=int, default=32)
   parser.add_argument('--log', type=Path, help='where to write the serial log')
+  parser.add_argument('--connect-after', type=float, default=0,
+      help='seconds to leave the serial port unopened after QEMU starts')
   args = parser.parse_args()
 
   size  = args.size_mib << 20
@@ -133,24 +137,34 @@ def main():
     '-object', f'memory-backend-file,id=shared,share=on,mem-path={shared},'
                f'size={size}',
     '-device', 'ivshmem-plain,memdev=shared',
-    '-chardev', f'socket,id=serial,path={serial},server=on,wait=on',
+    '-chardev', f'socket,id=serial,path={serial},server=on,'
+                f'wait={"off" if args.connect_after else "on"}',
     '-serial', 'chardev:serial',
   ])
 
   try:
+    start = time.monotonic()
     for _ in range(100):
       if serial.exists():
         break
       time.sleep(0.1)
+    # QEMU drops what the guest writes while nothing is connected
+    time.sleep(args.connect_after)
     sock = socket.socket(socket.AF_UNIX)
     sock.connect(str(serial))
     sock.settimeout(0.5)
 
     log   = open(args.log or tmp / 'serial.log', 'wb')
     guest = Guest(sock, log)
-    start = time.monotonic()
-    print(f'{guest.wait("ready", 300)} after '
-        f'{time.monotonic() - start:.1f}s with {accel}')
+    ready = guest.wait('ready', 300)
+    print(f'{ready} after {time.monotonic() - start:.1f}s with {accel}')
+    greeting = int(dict(f.split('=') for f in ready.split()[1:])['greeting'],
+        16)
+    if not args.connect_after and greeting != 1:
+      sys.exit('the first greeting was lost although the port was open')
+    if args.connect_after and greeting == 1:
+      print('The guest greeted only once the port was open, so this run '
+          'did not check a late connection')
 
     guest.command('info', 'info end')
 

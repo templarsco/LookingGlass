@@ -46,6 +46,7 @@ enum
   SYS_write      = 1,
   SYS_open       = 2,
   SYS_close      = 3,
+  SYS_poll       = 7,
   SYS_mmap       = 9,
   SYS_ioctl      = 16,
   SYS_nanosleep  = 35,
@@ -69,6 +70,8 @@ enum
 #define PROT_READ  1
 #define PROT_WRITE 2
 #define MAP_SHARED 1
+
+#define POLLIN 1
 
 #define TCGETS 0x5401
 #define TCSETS 0x5402
@@ -94,6 +97,12 @@ struct KernelTermios
 struct Timespec
 {
   long sec, nsec;
+};
+
+struct PollFd
+{
+  int   fd;
+  short events, revents;
 };
 
 static long syscall6(long n, long a, long b, long c, long d, long e, long f)
@@ -829,16 +838,33 @@ int guestMain(long * stack)
     setupInit();
   }
 
-  say("ready version=0x1");
-
-  // boot messages were logged already, keep later ones off the protocol
-  if (isInit)
-    SYSCALL(SYS_syslog, SYSLOG_ACTION_CONSOLE_LEVEL, NULL, 1);
-
   static char buf[4096];
-  usize len = 0;
+  usize len       = 0;
+  u64   greetings = 0;
+  bool  heard     = false;
   for(;;)
   {
+    // the host may open the serial port after the guest has written to it,
+    // which loses the output, so the greeting repeats until a command comes
+    if (!heard)
+    {
+      replyBegin("ready");
+      replyField("version", 1);
+      replyField("greeting", ++greetings);
+      replyEnd();
+
+      // boot messages were logged already, keep later ones off the protocol
+      if (isInit && greetings == 1)
+        SYSCALL(SYS_syslog, SYSLOG_ACTION_CONSOLE_LEVEL, NULL, 1);
+
+      struct PollFd pfd = { .fd = (int)in, .events = POLLIN };
+      const long ready = SYSCALL(SYS_poll, &pfd, 1, 500);
+      if (ready < 0)
+        sleepMs(500);
+      if (ready <= 0)
+        continue;
+    }
+
     long n = SYSCALL(SYS_read, in, buf + len, sizeof(buf) - 1 - len);
     if (n <= 0)
     {
@@ -847,7 +873,8 @@ int guestMain(long * stack)
       sleepMs(100);
       continue;
     }
-    len += n;
+    heard = true;
+    len  += n;
 
     usize start = 0;
     for(usize i = 0; i < len; ++i)

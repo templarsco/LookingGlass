@@ -210,9 +210,10 @@ jobs:
         apt-get download "${image/linux-image-/linux-image-unsigned-}"
         dpkg-deb -x linux-image-unsigned-*.deb .
         cd ..
+        # the serial port opens late, as it may on Hyper-V
         python3 windows-client/hcs_probe_guest_test.py \
           windows-client/build/hcs-probe-guest-init guest-kernel/boot/vmlinuz-* \
-          --log guest-serial.log
+          --connect-after 10 --log guest-serial.log
     - name: Upload the guest serial log
       if: failure()
       uses: actions/upload-artifact@v6
