@@ -30,21 +30,30 @@ that boots with UEFI. Windows sets itself up on its first boot without
 asking anything, and then runs lg-hyperv-ivshmem on COM1 as SYSTEM, then
 and at every start, with the IVSHMEM driver next to it. With -Idd, the
 Looking Glass IDD's package goes next to it too, for the probe's --client.
-lg-windows-client-hcs-probe --windows-disk boots it. With -Logs, shows the
+With -GpuPv, the driver packages of that GPU of this PC, by the Name that
+Get-VMHostPartitionableGpu shows, go to the guest's HostDriverStore, from
+where a guest with a partition of the GPU loads the GPU's driver, for the
+probe's --gpu. lg-windows-client-hcs-probe --windows-disk boots the disk.
+Nothing on this PC changes but the new disk. With -Logs, shows the
 tool's log, the driver's installation and Windows' device events from the
-disk once the guest is off. Run this elevated on Windows with Hyper-V's
-PowerShell module.
+disk once the guest is off. With -ListGpuPackages, only shows the driver
+packages that -GpuPv would copy. Run this elevated on Windows with
+Hyper-V's PowerShell module.
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Make')]
 param(
   [Parameter(Mandatory, ParameterSetName = 'Make')] [string] $Iso,
-  [Parameter(Mandatory)] [string] $Disk,
+  [Parameter(Mandatory, ParameterSetName = 'Make')]
+  [Parameter(Mandatory, ParameterSetName = 'Logs')] [string] $Disk,
   [Parameter(Mandatory, ParameterSetName = 'Make')] [string] $Tool,
   [Parameter(Mandatory, ParameterSetName = 'Make')] [string] $Inf,
   [Parameter(ParameterSetName = 'Make')] [string] $Idd,
+  [Parameter(ParameterSetName = 'Make')]
+  [Parameter(Mandatory, ParameterSetName = 'Gpu')] [string] $GpuPv,
   [Parameter(ParameterSetName = 'Make')] [int] $SizeGB = 40,
-  [Parameter(Mandatory, ParameterSetName = 'Logs')] [switch] $Logs
+  [Parameter(Mandatory, ParameterSetName = 'Logs')] [switch] $Logs,
+  [Parameter(Mandatory, ParameterSetName = 'Gpu')] [switch] $ListGpuPackages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -86,13 +95,21 @@ function Show-Logs {
       }
     }
 
-    # Windows' device and code integrity events, and the errors of the
-    # System and Application logs, such as a user-mode driver's host that
-    # crashed
+    # the packages of a GPU's driver that -GpuPv put in the HostDriverStore
+    $store = "$w\Windows\System32\HostDriverStore\FileRepository"
+    Write-Host "== $store"
+    Get-ChildItem -LiteralPath $store -Directory -ErrorAction Ignore |
+      ForEach-Object { Write-Host $_.Name }
+
+    # Windows' device, code integrity and graphics kernel events, and the
+    # errors of the System and Application logs, such as a user-mode
+    # driver's host that crashed
     $events = "$w\Windows\System32\winevt\Logs"
-    foreach ($name in 'Microsoft-Windows-Kernel-PnP%4Configuration',
-        'Microsoft-Windows-CodeIntegrity%4Operational', 'System',
-        'Application') {
+    $names = @('Microsoft-Windows-Kernel-PnP%4Configuration',
+      'Microsoft-Windows-CodeIntegrity%4Operational') +
+      @(Get-ChildItem "$events\*DxgKrnl*.evtx" -ErrorAction Ignore |
+        ForEach-Object BaseName) + @('System', 'Application')
+    foreach ($name in $names) {
       Write-Host "== $name"
       $path = "$events\$name.evtx"
       if (-not (Test-Path $path)) {
@@ -107,6 +124,117 @@ function Show-Logs {
   } finally {
     Dismount-VHD -Path $Disk
   }
+}
+
+# the driver packages that a guest with a partition of the GPU needs: the
+# package of the driver's service, and those of its OpenGL libraries, which
+# may be another package. Each is a folder of the DriverStore, with every
+# file's size and SHA-256
+function Get-GpuPackages([string] $interface) {
+  # the device interface's path holds the device's instance ID
+  if ($interface -notmatch '^\\\\\?\\(.+?)#\{[0-9a-fA-F-]{36}\}(\\.*)?$') {
+    throw "$interface is not a device interface, such as the Name that " +
+      'Get-VMHostPartitionableGpu shows'
+  }
+  $instance = $Matches[1] -replace '#', '\'
+  $device = Get-PnpDevice -InstanceId $instance
+  if ($device.Class -ne 'Display') {
+    throw "$instance is not a display adapter"
+  }
+  Write-Host "GPU: $($device.FriendlyName), $instance"
+
+  $repository = [IO.Path]::GetFullPath(
+    "$env:SystemRoot\System32\DriverStore\FileRepository") + '\'
+
+  # the package that a driver's file is in, which must be in the DriverStore
+  function Get-Package([string] $path) {
+    $path = $path.Trim('"')
+    if ($path -match '^\\SystemRoot\\(.*)$') {
+      $path = [IO.Path]::Combine($env:SystemRoot, $Matches[1])
+    } elseif ($path -match '^\\\?\?\\(.*)$') {
+      $path = $Matches[1]
+    } elseif ($path -match '^System32\\') {
+      $path = [IO.Path]::Combine($env:SystemRoot, $path)
+    }
+    if (-not [IO.Path]::IsPathRooted($path)) {
+      return $null
+    }
+    $path = [IO.Path]::GetFullPath($path)
+    if (-not $path.StartsWith($repository,
+        [StringComparison]::OrdinalIgnoreCase)) {
+      return $null
+    }
+    return $path.Substring($repository.Length).Split('\')[0]
+  }
+
+  $service = (Get-PnpDeviceProperty -InstanceId $instance `
+    -KeyName DEVPKEY_Device_Service).Data
+  $image = (Get-ItemProperty `
+    "HKLM:\SYSTEM\CurrentControlSet\Services\$service").ImagePath
+  $main = Get-Package $image
+  if (-not $main) {
+    throw "The driver of $instance, $image, is not in the DriverStore"
+  }
+  $names = @($main)
+
+  $key = (Get-PnpDeviceProperty -InstanceId $instance `
+    -KeyName DEVPKEY_Device_Driver).Data
+  $class = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\$key"
+  foreach ($value in 'OpenGLVendorName', 'OpenGLVendorNameWow') {
+    foreach ($file in @($class.$value)) {
+      if ($file) {
+        $package = Get-Package $file
+        Write-Host "$value $file is in $(if ($package) { $package } else {
+          'no package of the DriverStore' })"
+        if ($package -and $package -notin $names) {
+          $names += $package
+        }
+      }
+    }
+  }
+
+  foreach ($name in $names) {
+    $source = [IO.Path]::Combine($repository, $name)
+    $items = @(Get-Item -LiteralPath $source -Force) +
+      @(Get-ChildItem -LiteralPath $source -Recurse -Force)
+    $links = @($items | Where-Object {
+      $_.Attributes -band [IO.FileAttributes]::ReparsePoint })
+    if ($links) {
+      throw "$source has links: $($links.FullName -join ', ')"
+    }
+    $files = @($items | Where-Object { -not $_.PSIsContainer } |
+      ForEach-Object {
+        [pscustomobject]@{
+          Path   = $_.FullName.Substring($source.Length + 1)
+          Length = $_.Length
+          Sha256 = (Get-FileHash -LiteralPath $_.FullName `
+            -Algorithm SHA256).Hash
+        }
+      })
+
+    # the package's version and its catalog's signature, for the log
+    $inf = Get-ChildItem -LiteralPath $source -Filter *.inf |
+      Select-Object -First 1
+    $version = if ($inf) {
+      Select-String -LiteralPath $inf.FullName -Pattern '^\s*DriverVer' |
+        Select-Object -First 1 | ForEach-Object { $_.Line.Trim() }
+    }
+    $signatures = Get-ChildItem -LiteralPath $source -Filter *.cat |
+      ForEach-Object {
+        "$($_.Name) $((Get-AuthenticodeSignature $_.FullName).Status)"
+      }
+    Write-Host ("Package $name`: $($files.Count) files, " +
+      "$([Math]::Round(($files | Measure-Object Length -Sum).Sum / 1MB)) " +
+      "MiB, $version, $($signatures -join ', ')")
+
+    [pscustomobject]@{ Name = $name; Source = $source; Files = $files }
+  }
+}
+
+if ($ListGpuPackages) {
+  $packages = @(Get-GpuPackages $GpuPv)
+  Write-Host "-GpuPv would copy $($packages.Count) packages"
+  exit 0
 }
 
 $Disk = [IO.Path]::GetFullPath($Disk)
@@ -127,6 +255,10 @@ if ($Idd) {
 }
 if (Test-Path $Disk) {
   throw "$Disk exists already"
+}
+$gpu = @()
+if ($GpuPv) {
+  $gpu = @(Get-GpuPackages $GpuPv)
 }
 
 $image = Mount-DiskImage -ImagePath $Iso -PassThru
@@ -245,6 +377,33 @@ try {
             'C:\lgprobe\setup.log 2>&1'
         }
       }
+    }
+
+    # the GPU's driver packages, where a guest with a partition of the GPU
+    # looks for them; every copy must match the package on this PC
+    if ($gpu) {
+      $store = "$w\Windows\System32\HostDriverStore\FileRepository"
+      foreach ($package in $gpu) {
+        $target = [IO.Path]::Combine($store, $package.Name)
+        foreach ($file in $package.Files) {
+          $to = [IO.Path]::Combine($target, $file.Path)
+          New-Item -ItemType Directory -Force (Split-Path $to) | Out-Null
+          Copy-Item -LiteralPath ([IO.Path]::Combine($package.Source,
+            $file.Path)) -Destination $to
+        }
+        foreach ($file in $package.Files) {
+          $to = [IO.Path]::Combine($target, $file.Path)
+          if ((Get-Item -LiteralPath $to).Length -ne $file.Length -or
+              (Get-FileHash -LiteralPath $to -Algorithm SHA256).Hash -ne
+                $file.Sha256) {
+            throw "$to does not match $($file.Path) of $($package.Name)"
+          }
+        }
+        Write-Host ("Copied $($package.Name) to the guest's HostDriverStore, " +
+          "$($package.Files.Count) files that match")
+      }
+      $gpu | Select-Object Name, Files | ConvertTo-Json -Depth 4 |
+        Set-Content -Path "$dir\gpu-packages.json" -Encoding UTF8
     }
 
     # Windows sets itself up without asking anything, with passwords that

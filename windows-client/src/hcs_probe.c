@@ -1105,8 +1105,12 @@ static void vmConfig(struct Vm * vm, struct Str * config, unsigned minor,
   if (windows)
   {
     // Windows restarts as it sets itself up, and boots from its disk with
-    // Secure Boot, as in Hyper-V Manager's generation 2 VMs
-    strLiteral(&s, "\"VirtualMachine\":{\"Chipset\":{\"Uefi\":{"
+    // Secure Boot, as in Hyper-V Manager's generation 2 VMs. A bare VM's
+    // firmware has no reason to reset, so a reset stops it
+    strLiteral(&s, "\"VirtualMachine\":{");
+    if (vm->bare)
+      strLiteral(&s, "\"StopOnReset\":true,");
+    strLiteral(&s, "\"Chipset\":{\"Uefi\":{"
         "\"ApplySecureBootTemplate\":\"Apply\",\"SecureBootTemplateId\":\""
         WINDOWS_SECURE_BOOT "\"}},");
   }
@@ -2535,6 +2539,86 @@ static bool vmGpu(struct Vm * vm, const char * gpu, struct Json * report)
   return SUCCEEDED(hr);
 }
 
+// the isolation types that --hcl auto tries with the HCS's paravisor
+// setting, HclEnabled: those that hcsshim gives its confidential Windows
+// containers, and none, which leaves the type to the HCS. The HCS's
+// documentation covers none of this, so the hcl case reports what the HCS
+// does and counts for nothing
+static const char * const hclTypes[] =
+{
+  "GuestStateOnly",
+  "VirtualizationBasedSecurity",
+  ""
+};
+
+// how the VM keeps its guest state: in no file, or in a new, empty one of
+// the kind that hcsshim gives a VM with the paravisor, BlockStorage, or one
+// without it, FileMode
+static const char * const guestStateTypes[] =
+{
+  NULL,
+  "BlockStorage",
+  "FileMode"
+};
+
+// the paravisor's settings in a VM's configuration, with a new guest state
+// file at vmgs if stateType is given
+static void hclMachine(struct Str * machine, const char * type,
+    const char * stateType, const char * vmgs)
+{
+  strLiteral(machine, "\"SecuritySettings\":{\"Isolation\":{");
+  if (*type)
+  {
+    strLiteral(machine, "\"IsolationType\":");
+    strJsonString(machine, type);
+    strLiteral(machine, ",");
+  }
+  strLiteral(machine, "\"HclEnabled\":true}}");
+  if (stateType)
+  {
+    strLiteral(machine, ",\"GuestState\":{\"GuestStateFilePath\":");
+    strJsonString(machine, vmgs);
+    strLiteral(machine, ",\"GuestStateFileType\":");
+    strJsonString(machine, stateType);
+    strLiteral(machine, "}");
+  }
+}
+
+// a new, empty guest state file in the output folder that the VM may use
+static bool hclGuestState(const struct Options * options, const char * id,
+    const char * name, char * vmgs, size_t size, struct Json * report)
+{
+  outPath(options, name, vmgs, size);
+  WCHAR * wvmgs = widen(vmgs);
+  HRESULT hr = api.createEmptyGuestStateFile(wvmgs);
+  jsonResult(report, "guest_state_file", hr);
+  if (SUCCEEDED(hr))
+  {
+    WCHAR * wid = widen(id);
+    hr = api.grantVmAccess(wid, wvmgs);
+    jsonResult(report, "grant_guest_state", hr);
+    free(wid);
+    if (FAILED(hr))
+      DeleteFileW(wvmgs);
+  }
+  free(wvmgs);
+  if (FAILED(hr))
+    printf("  Cannot make a guest state file for the VM: 0x%08lx\n",
+        (unsigned long)hr);
+  return SUCCEEDED(hr);
+}
+
+static void hclGuestStateDone(const char * id, const char * vmgs,
+    struct Json * report)
+{
+  WCHAR * wid   = widen(id);
+  WCHAR * wvmgs = widen(vmgs);
+  jsonResult(report, "revoke_guest_state", api.revokeVmAccess(wid, wvmgs));
+  DeleteFileW(wvmgs);
+  free(wid);
+  free(wvmgs);
+}
+
 #define IDD_TIMEOUT_MS    360000
 #define CLIENT_TIMEOUT_MS 600000
 
@@ -2643,28 +2727,115 @@ static bool guestFrames(struct Vm * vm, const struct Section * section,
   return passed;
 }
 
+#define ADAPTERS_TRIES   4
+#define ADAPTERS_WAIT_MS 15000
+
+// with --gpu: the guest's display adapters, as Windows' devices and as DXGI
+// adapters; true if Direct3D 11 works on one that is not Microsoft's, which
+// is the partition of the GPU with the GPU's driver. The partition may show
+// up a little after the guest answers, so this asks again a few times
+static bool guestAdapters(struct Vm * vm, struct Json * report)
+{
+  static const char command[] = "adapters\n";
+  jsonOpen(report, "adapters", '[');
+  bool gpu = false;
+  for(int i = 0; i < ADAPTERS_TRIES && !gpu && !aborted && !vm->stopped; ++i)
+  {
+    char  reply[512];
+    DWORD written;
+    if (i)
+    {
+      const DWORD begin = GetTickCount();
+      while (!aborted && !vm->stopped &&
+          GetTickCount() - begin < ADAPTERS_WAIT_MS)
+      {
+        vmPump(vm);
+        while (vmNextReply(vm, reply, sizeof(reply)))
+          ;
+        vmPollState(vm);
+        Sleep(200);
+      }
+    }
+    if (!vm->serial || !WriteFile(vm->serial, command, sizeof(command) - 1,
+          &written, NULL) || written != sizeof(command) - 1)
+      break;
+
+    // the adapters' lines, then the end of the list or an error
+    bool ended = false;
+    const DWORD begin = GetTickCount();
+    while (!ended && !aborted && !vm->stopped &&
+        GetTickCount() - begin < 60000)
+    {
+      if (!vmPump(vm))
+        break;
+      while (!ended && vmNextReply(vm, reply, sizeof(reply)))
+      {
+        const bool line = strncmp(reply, "adapter ", 8) == 0;
+        ended = !line && (strncmp(reply, "adapters", 8) == 0 ||
+            strncmp(reply, "error", 5) == 0);
+        if (!line && !ended)
+          continue;
+        jsonString(report, NULL, reply);
+        printf("  %s\n", reply);
+        const char * gpus = strstr(reply, " gpus=");
+        gpu = ended && strncmp(reply, "adapters ok", 11) == 0 && gpus &&
+          strtoul(gpus + 6, NULL, 10) > 0;
+      }
+      if (!ended)
+      {
+        vmPollState(vm);
+        Sleep(20);
+      }
+    }
+  }
+  jsonClose(report, ']');
+  jsonBool(report, "gpu_in_guest", gpu);
+  printf("  %s\n", gpu ? "Direct3D works on the GPU's partition in the guest" :
+      "Direct3D does not work on a GPU in the guest");
+  return gpu;
+}
+
 // one start of the Windows guest's VM, which ends when the checks ran or
-// the VM stopped before the guest answered
+// the VM stopped before the guest answered. With hclType, the VM has the
+// HCS's paravisor setting with that isolation type and a guest state file
+// of the kind hclState, if given, and then only whether the guest finds
+// the region counts
 static enum WindowsStart windowsStart(const struct Options * options,
     int start, DWORD timeoutMs, const char * configName,
-    struct Section * section, uint64_t nonce, struct Json * report)
+    struct Section * section, uint64_t nonce, const char * hclType,
+    const char * hclState, struct Json * report)
 {
   struct Vm vm;
   vmInit(&vm, options);
   vm.reopenSerial = true;
   printf("[windows] VM %s boots %s\n", vm.id, options->windowsDisk);
 
+  struct Str machine = { 0 };
+  char vmgs[MAX_PATH * 3] = "";
+  if (hclType)
+  {
+    if (hclState && !hclGuestState(options, vm.id, "hcl-windows.vmgs", vmgs,
+          sizeof(vmgs), report))
+      return WINDOWS_FAILED;
+    hclMachine(&machine, hclType, hclState, vmgs);
+  }
+
   struct Str devices = { 0 };
   strLiteral(&devices, "\"SharedMemory\":{\"Regions\":[");
   regionSettings(&devices, configName, options->size, false);
   strLiteral(&devices, "]}");
 
+  // the paravisor's settings are newer than the schema of the other VMs
   struct Str config = { 0 };
-  vmConfig(&vm, &config, SCHEMA_MINOR, devices.data, NULL);
+  vmConfig(&vm, &config, hclType ? options->schemaMinor : SCHEMA_MINOR,
+      devices.data, machine.data);
   free(devices.data);
+  free(machine.data);
 
   char logName[40], logPath[MAX_PATH * 3];
-  if (start == 1)
+  if (hclType)
+    snprintf(logName, sizeof(logName), "hcl-windows.serial.log");
+  else if (start == 1)
     snprintf(logName, sizeof(logName), "windows.serial.log");
   else
     snprintf(logName, sizeof(logName), "windows-%d.serial.log", start);
@@ -2712,6 +2883,19 @@ static enum WindowsStart windowsStart(const struct Options * options,
       "The guest found the region by itself" :
       "The guest did not find the region by itself", reply);
 
+  // with --gpu, the GPU counts once the guest's Direct3D works on it
+  if (options->gpu[0])
+    gpu = guestAdapters(&vm, report) && gpu;
+
+  // the IVSHMEM driver and the IDD that the windows case installed may use
+  // the region already, so the checks would not find the pattern
+  if (hclType)
+  {
+    result = found && (!options->gpu[0] || gpu) ? WINDOWS_PASSED :
+      WINDOWS_FAILED;
+    goto done;
+  }
+
   snprintf(command, sizeof(command), "map ivshmem 0x%" PRIx64 " 0x%" PRIx64
       " 0x%" PRIx64, gpa + shared, gpa, shared);
   mapped = vmCommand(&vm, command, "map", 300000, reply, sizeof(reply));
@@ -2720,7 +2904,7 @@ static enum WindowsStart windowsStart(const struct Options * options,
       "The IVSHMEM driver mapped the region" :
       "The IVSHMEM driver did not map the region", reply);
 
-  // with --gpu, the guest must also have had its partition of the GPU
+  // with --gpu, the guest's Direct3D must also have worked on the GPU
   if (found && mapped && guestChecks(&vm, section, nonce, report))
     result = (options->client[0] && !guestFrames(&vm, section, report)) ||
       (options->gpu[0] && !gpu) ? WINDOWS_FAILED : WINDOWS_PASSED;
@@ -2731,6 +2915,8 @@ done:
     vmStop(&vm, report);
   vmDestroy(&vm, report);
   free(config.data);
+  if (hclType && hclState)
+    hclGuestStateDone(vm.id, vmgs, report);
   return result;
 }
 
@@ -2780,7 +2966,7 @@ static bool runWindows(const struct Options * options, struct Json * report)
 
     jsonOpen(report, NULL, '{');
     result = windowsStart(options, start, left, configName, &section, nonce,
-        report);
+        NULL, NULL, report);
     jsonClose(report, '}');
     if (result != WINDOWS_STOPPED)
       break;
@@ -2796,86 +2982,57 @@ static bool runWindows(const struct Options * options, struct Json * report)
   return passed;
 }
 
-// the isolation types that --hcl auto tries with the HCS's paravisor
-// setting, HclEnabled: those that hcsshim gives its confidential Windows
-// containers, and none, which leaves the type to the HCS. The HCS's
-// documentation covers none of this, so the hcl case reports what the HCS
-// does and counts for nothing
-static const char * const hclTypes[] =
+// how long a VM with the paravisor runs before the probe ends it, and how
+// long the Windows guest, set up already, may take to answer with it
+#define HCL_RUN_MS     20000
+#define HCL_WINDOWS_MS 600000
+
+enum HclResult
 {
-  "GuestStateOnly",
-  "VirtualizationBasedSecurity",
-  ""
+  HCL_REFUSED, // the HCS did not create or start the VM
+  HCL_STOPPED, // the VM stopped by itself
+  HCL_PARTIAL, // it kept running, but without the region or the GPU
+  HCL_RAN      // it kept running with everything it was given
 };
 
-// how the VM keeps its guest state: hcsshim gives a VM with the paravisor
-// BlockStorage, and one without it FileMode
-static const char * const guestStateTypes[] =
-{
-  "BlockStorage",
-  "FileMode"
-};
-
-// how long a VM with the paravisor runs before the probe ends it
-#define HCL_RUN_MS 20000
-
-// one VM with the HCS's paravisor setting and the region, and with --gpu a
-// partition of the GPU: whether the HCS creates and starts it, where it puts
-// the region and whether the VM keeps running. It boots no disk, so its
-// firmware waits for one
-static bool hclAttempt(const struct Options * options, int attempt,
-    const char * type, const char * stateType, const char * configName,
-    struct Json * report)
+// one VM with the HCS's paravisor setting and, with region, the shared
+// memory, and with --gpu a partition of the GPU: whether the HCS creates
+// and starts it, where it puts the region, and whether the VM keeps running
+// without resetting. It boots no disk, so its firmware waits for one
+static enum HclResult hclAttempt(const struct Options * options,
+    int attempt, const char * type, const char * stateType, bool region,
+    const char * configName, struct Json * report)
 {
   struct Vm vm;
   vmInit(&vm, options);
   vm.bare = true;
-  printf("[hcl] VM %s: HclEnabled, isolation type %s\n", vm.id,
-      *type ? type : "left to the HCS");
+  printf("[hcl] VM %s: HclEnabled, isolation type %s, %s, %s\n", vm.id,
+      *type ? type : "left to the HCS",
+      stateType ? stateType : "no guest state file",
+      region ? "the shared memory" : "no shared memory");
   jsonString(report, "isolation_type", *type ? type : NULL);
+  jsonString(report, "guest_state_type", stateType);
+  jsonBool(report, "region", region);
 
-  // a new, empty file for the VM's guest state, which the VM may use
-  char name[OUT_NAME_MAX], vmgs[MAX_PATH * 3];
+  char name[OUT_NAME_MAX], vmgs[MAX_PATH * 3] = "";
   snprintf(name, sizeof(name), "hcl-%d.vmgs", attempt);
-  outPath(options, name, vmgs, sizeof(vmgs));
-  WCHAR * wid   = widen(vm.id);
-  WCHAR * wvmgs = widen(vmgs);
-  const HRESULT hr = api.createEmptyGuestStateFile ?
-    api.createEmptyGuestStateFile(wvmgs) : E_NOTIMPL;
-  jsonResult(report, "guest_state_file", hr);
-  const bool vmgsMade = SUCCEEDED(hr);
-  jsonString(report, "guest_state_type", vmgsMade ? stateType : NULL);
-  if (vmgsMade)
+  if (stateType &&
+      !hclGuestState(options, vm.id, name, vmgs, sizeof(vmgs), report))
   {
-    jsonResult(report, "grant_guest_state", api.grantVmAccess(wid, wvmgs));
-    printf("  Its guest state goes to a new %s file\n", stateType);
+    jsonBool(report, "passed", false);
+    return HCL_REFUSED;
   }
-  else
-    printf("  Cannot make an empty guest state file, trying without one: "
-        "0x%08lx\n", (unsigned long)hr);
 
   struct Str devices = { 0 };
-  strLiteral(&devices, "\"SharedMemory\":{\"Regions\":[");
-  regionSettings(&devices, configName, options->size, false);
-  strLiteral(&devices, "]}");
+  if (region)
+  {
+    strLiteral(&devices, "\"SharedMemory\":{\"Regions\":[");
+    regionSettings(&devices, configName, options->size, false);
+    strLiteral(&devices, "]}");
+  }
 
   struct Str machine = { 0 };
-  strLiteral(&machine, "\"SecuritySettings\":{\"Isolation\":{");
-  if (*type)
-  {
-    strLiteral(&machine, "\"IsolationType\":");
-    strJsonString(&machine, type);
-    strLiteral(&machine, ",");
-  }
-  strLiteral(&machine, "\"HclEnabled\":true}}");
-  if (vmgsMade)
-  {
-    strLiteral(&machine, ",\"GuestState\":{\"GuestStateFilePath\":");
-    strJsonString(&machine, vmgs);
-    strLiteral(&machine, ",\"GuestStateFileType\":");
-    strJsonString(&machine, stateType);
-    strLiteral(&machine, "}");
-  }
+  hclMachine(&machine, type, stateType, vmgs);
 
   // the settings are newer than the schema of the other cases
   struct Str config = { 0 };
@@ -2887,17 +3044,18 @@ static bool hclAttempt(const struct Options * options, int attempt,
   snprintf(name, sizeof(name), "hcl-%d.serial.log", attempt);
   outPath(options, name, logPath, sizeof(logPath));
 
-  bool     started = false, located = false, gpu = false, ran = false;
-  uint64_t gpa = 0;
+  enum HclResult result = HCL_REFUSED;
+  bool     located = !region, gpu = false;
+  uint64_t gpa     = 0;
   if (vmCreate(&vm, config.data, report, logPath) && vmStart(&vm, report))
   {
-    started = true;
     printf("  The HCS created and started the VM\n");
     if (options->gpu[0])
       gpu = vmGpu(&vm, options->gpu, report);
-    located = vmRegion(&vm, report, &gpa);
+    if (region)
+      located = vmRegion(&vm, report, &gpa);
 
-    // whether the VM keeps running, or its paravisor stops it
+    // whether the VM keeps running, or its firmware fails and resets it
     char reply[512];
     const DWORD begin = GetTickCount();
     while (!aborted && !vm.stopped && GetTickCount() - begin < HCL_RUN_MS)
@@ -2909,33 +3067,34 @@ static bool hclAttempt(const struct Options * options, int attempt,
       if (!vm.stopped)
         Sleep(500);
     }
-    ran = !vm.stopped && !aborted;
-    printf("  %s\n", ran ? "The VM kept running" :
-        vm.stopped ? "The VM stopped by itself" : "The probe was stopped");
+
+    if (vm.stopped)
+      result = HCL_STOPPED;
+    else if (!aborted)
+      result = located && (!options->gpu[0] || gpu) ? HCL_RAN : HCL_PARTIAL;
+    printf("  %s\n", vm.stopped ? "The VM stopped by itself" :
+        aborted ? "The probe was stopped" : "The VM kept running");
   }
-  jsonBool(report, "started", started);
-  jsonBool(report, "kept_running", ran);
+  jsonBool(report, "started", result != HCL_REFUSED);
+  jsonBool(report, "kept_running", result >= HCL_PARTIAL);
 
   if (vm.system)
     vmStop(&vm, report);
   vmDestroy(&vm, report);
   free(config.data);
+  if (stateType)
+    hclGuestStateDone(vm.id, vmgs, report);
 
-  if (vmgsMade)
-  {
-    jsonResult(report, "revoke_guest_state", api.revokeVmAccess(wid, wvmgs));
-    DeleteFileW(wvmgs);
-  }
-  free(wid);
-  free(wvmgs);
-
-  const bool passed = ran && located && (!options->gpu[0] || gpu);
-  jsonBool(report, "passed", passed);
-  return passed;
+  jsonBool(report, "passed", result == HCL_RAN);
+  return result;
 }
 
 // --hcl: whether the HCS runs a VM with its paravisor setting and a
-// SharedMemory region, which Limiar's VMs would need together
+// SharedMemory region, which Limiar's VMs would need together. A VM that
+// the HCS starts but that stops is tried again without the region, which
+// tells whether the region stops it. With --windows-disk, the Windows guest
+// then boots with the first settings that kept a VM running, and must find
+// the region
 static bool runHcl(const struct Options * options, struct Json * report)
 {
   jsonOpen(report, NULL, '{');
@@ -2960,7 +3119,7 @@ static bool runHcl(const struct Options * options, struct Json * report)
   }
 
   // auto tries every type, default none; without the HCS's function for
-  // an empty guest state file, the kinds of file make no difference
+  // an empty guest state file, only VMs without one
   const bool all = strcmp(options->hcl, "auto") == 0;
   const char * const only = strcmp(options->hcl, "default") == 0 ? "" :
     options->hcl;
@@ -2968,19 +3127,56 @@ static bool runHcl(const struct Options * options, struct Json * report)
   const size_t states = api.createEmptyGuestStateFile ?
     sizeof(guestStateTypes) / sizeof(guestStateTypes[0]) : 1;
 
-  bool passed  = false;
+  // the first settings that kept a VM running, with everything it was
+  // given if any did
+  bool passed  = false, kept = false;
   int  attempt = 0;
+  const char * ranType  = NULL;
+  const char * ranState = NULL;
   jsonOpen(report, "attempts", '[');
   for(size_t t = 0; t < types && !aborted; ++t)
     for(size_t g = 0; g < states && !aborted; ++g)
     {
+      const char * type  = all ? hclTypes[t] : only;
+      const char * state = guestStateTypes[g];
       jsonOpen(report, NULL, '{');
-      if (hclAttempt(options, ++attempt, all ? hclTypes[t] : only,
-            guestStateTypes[g], configName, report))
-        passed = true;
+      const enum HclResult result = hclAttempt(options, ++attempt, type,
+          state, true, configName, report);
       jsonClose(report, '}');
+
+      if ((result == HCL_RAN && !passed) || (result == HCL_PARTIAL && !kept))
+      {
+        passed   = passed || result == HCL_RAN;
+        kept     = true;
+        ranType  = type;
+        ranState = state;
+      }
+      else if (result == HCL_STOPPED && !aborted)
+      {
+        jsonOpen(report, NULL, '{');
+        hclAttempt(options, ++attempt, type, state, false, configName,
+            report);
+        jsonClose(report, '}');
+      }
     }
   jsonClose(report, ']');
+
+  // the Windows guest, which the windows case has set up, with those
+  // settings
+  bool windows = false;
+  if (options->windowsDisk[0] && kept && !aborted)
+  {
+    printf("[hcl] The Windows guest with HclEnabled, isolation type %s, "
+        "%s\n", *ranType ? ranType : "left to the HCS",
+        ranState ? ranState : "no guest state file");
+    const DWORD timeoutMs = min(options->bootTimeoutMs, HCL_WINDOWS_MS);
+    jsonOpen(report, "windows", '{');
+    windows = windowsStart(options, 1, timeoutMs, configName, &section, 0,
+        ranType, ranState, report) == WINDOWS_PASSED;
+    jsonBool(report, "passed", windows);
+    jsonClose(report, '}');
+  }
+  jsonBool(report, "windows_found_region", windows);
   sectionClose(&section);
 
   jsonBool(report, "passed", passed);
@@ -3057,10 +3253,13 @@ static void usage(void)
     "  --hcl TYPE      boot VMs without a disk that have the HCS's paravisor\n"
     "                  setting (HclEnabled), with the isolation type TYPE,\n"
     "                  each type that the probe knows (auto) or none\n"
-    "                  (default), and the shared memory, after the Windows\n"
-    "                  guest with --windows-disk, and report what the HCS\n"
-    "                  does. This only reports: it does not count for the\n"
-    "                  exit code.\n");
+    "                  (default), each kind of guest state file, and the\n"
+    "                  shared memory, and report what the HCS does. A VM\n"
+    "                  that stops is tried again without the shared memory.\n"
+    "                  With --windows-disk, the Windows guest then boots with\n"
+    "                  the first settings that kept a VM running, and must\n"
+    "                  find the region. This only reports: it does not count\n"
+    "                  for the exit code.\n");
 }
 
 static void parseOptions(int argc, char ** argv, struct Options * options)

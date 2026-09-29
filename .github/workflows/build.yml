@@ -317,6 +317,41 @@ jobs:
         python windows-client\hcs_probe_smoke.py `
           windows-client\build\lg-windows-client-hcs-probe.exe `
           --hcl auto --output hcs-probe-hcl
+    - name: List the driver packages of a GPU for the Windows guest's disk
+      run: |
+        # the runner has no GPU to partition, so its display adapter stands
+        # in for one, by a device interface of the form that
+        # Get-VMHostPartitionableGpu shows; the disk script must list its
+        # driver's packages, or say that the driver is not in the DriverStore.
+        # Windows PowerShell runs it, as on a PC
+        $adapter = Get-PnpDevice -Class Display -PresentOnly |
+          Select-Object -First 1
+        if (-not $adapter) {
+          'This runner has no display adapter, nothing to check'
+          exit 0
+        }
+        $interface = '\\?\' + ($adapter.InstanceId -replace '\\', '#') +
+          '#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}'
+        "$($adapter.FriendlyName): $interface"
+        $run = Start-Process powershell.exe -Wait -PassThru -NoNewWindow `
+          -RedirectStandardOutput gpu-packages.out `
+          -RedirectStandardError gpu-packages.err -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            'windows-client\hcs_probe_windows_disk.ps1', '-GpuPv',
+            $interface, '-ListGpuPackages')
+        $out = (Get-Content -Raw gpu-packages.out, gpu-packages.err) -join ''
+        $out
+        # Windows PowerShell may break its lines where it likes
+        if ($run.ExitCode -eq 0 -and
+            $out -match '-GpuPv\s+would\s+copy\s+[1-9]') {
+          exit 0
+        }
+        if ($run.ExitCode -ne 0 -and
+            $out -match 'is\s+not\s+in\s+the\s+DriverStore') {
+          'The script refused the driver, which is not in the DriverStore'
+          exit 0
+        }
+        exit 1
     - name: Show the Hyper-V events from the HCS probe's VMs
       if: always()
       run: |
@@ -568,6 +603,139 @@ jobs:
           hcs-probe-windows/*.serial.log
           hcs-probe-windows/client-command.log
           hcs-probe-idd-client/
+        if-no-files-found: ignore
+
+  windows-client-pc-test-bundle:
+    # what hcs_probe_pc.ps1 runs on a PC with a GPU, in one folder
+    needs: idd
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        submodules: recursive
+    - name: Install the MinGW-w64 cross compiler
+      run: |
+        sudo apt-get update
+        sudo apt-get install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+        # the win32 thread model, which links no winpthreads
+        sudo update-alternatives --set x86_64-w64-mingw32-gcc \
+          /usr/bin/x86_64-w64-mingw32-gcc-win32
+        sudo update-alternatives --set x86_64-w64-mingw32-g++ \
+          /usr/bin/x86_64-w64-mingw32-g++-win32
+    - name: Cross-compile the client with test capture
+      run: |
+        mkdir client/build-windows
+        cd client/build-windows
+        cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake \
+          -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON \
+          -DOPTIMIZE_FOR_NATIVE=OFF ..
+        make -j$(nproc)
+    - name: Cross-compile the HCS probe and lg-hyperv-ivshmem
+      run: |
+        mkdir windows-client/build
+        cd windows-client/build
+        cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake \
+          -DCMAKE_BUILD_TYPE=Release -DOPTIMIZE_FOR_NATIVE=OFF ..
+        make -j$(nproc) lg-windows-client-hcs-probe lg-hyperv-ivshmem
+    - name: Get the Looking Glass IDD's driver package
+      uses: actions/download-artifact@v6
+      with:
+        name: idd-package
+        path: idd-package
+    - name: Bundle the PC test
+      run: |
+        python3 windows-client/package_pc_test.py \
+          client/build-windows/looking-glass-client.exe \
+          --hcs-probe windows-client/build/lg-windows-client-hcs-probe.exe \
+          --ivshmem-tool windows-client/build/lg-hyperv-ivshmem.exe \
+          --idd idd-package --commit "$GITHUB_SHA" --output lg-pc-test \
+          --notice mingw-w64-runtime=/usr/share/doc/mingw-w64-x86-64-dev/copyright \
+          --notice gcc-runtime=/usr/share/doc/gcc-mingw-w64-x86-64-win32/copyright
+    - uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-pc-test
+        path: lg-pc-test/
+        if-no-files-found: error
+
+  windows-client-pc-test:
+    # the bundle's hcs_probe_pc.ps1, run as on a PC but without a GPU, which
+    # the runner does not have
+    needs: windows-client-pc-test-bundle
+    runs-on: windows-2025
+    steps:
+    - name: Get the PC test's bundle
+      uses: actions/download-artifact@v6
+      with:
+        name: windows-client-pc-test
+        path: ${{ runner.temp }}/lg-pc-test
+    - name: Install Mesa with MSYS2
+      id: msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: mingw-w64-x86_64-mesa
+    - name: Check that Windows PowerShell parses the PC test's scripts
+      shell: powershell
+      run: |
+        foreach ($script in 'hcs_probe_pc.ps1', 'hcs_probe_windows_disk.ps1') {
+          $errors = $null
+          [Management.Automation.Language.Parser]::ParseFile(
+            "$env:RUNNER_TEMP\lg-pc-test\$script", [ref] $null,
+            [ref] $errors) | Out-Null
+          if ($errors) {
+            $errors | Format-List
+            exit 1
+          }
+        }
+    - name: Run the PC test without a GPU
+      shell: cmd
+      env:
+        MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+      run: |
+        rem the runner has no GPU, so the client uses Mesa's software OpenGL
+        copy "%MSYS2_LOCATION%\mingw64\bin\opengl32.dll" ^
+          "%RUNNER_TEMP%\lg-pc-test\client" || exit /b 1
+        set "PATH=%MSYS2_LOCATION%\mingw64\bin;%PATH%"
+        set GALLIUM_DRIVER=llvmpipe
+        rem as the bundle's README says to run it
+        powershell -NoProfile -ExecutionPolicy Bypass ^
+          -File "%RUNNER_TEMP%\lg-pc-test\hcs_probe_pc.ps1" -NoGpu ^
+          -WorkDir "%RUNNER_TEMP%\pc-test"
+    - name: Check the PC test's zip
+      if: always()
+      run: |
+        $zip = @(Get-ChildItem "$env:RUNNER_TEMP\pc-test\lg-pc-test-*.zip")
+        if ($zip.Count -ne 1) {
+          'The test did not leave one zip'
+          exit 1
+        }
+        $unpacked = "$env:RUNNER_TEMP\pc-test-zip"
+        Expand-Archive $zip[0].FullName $unpacked
+        Get-ChildItem -Recurse $unpacked | Format-Table FullName, Length
+        '== summary.txt'
+        Get-Content "$unpacked\summary.txt"
+        '== hyperv-events.txt'
+        Get-Content "$unpacked\hyperv-events.txt" -Tail 60
+        foreach ($file in 'pc-test.log', 'summary.txt', 'guest-logs.txt',
+            'hyperv-events.txt', 'probe\report.json', 'guest.lgcapture') {
+          if (-not (Test-Path "$unpacked\$file")) {
+            "The zip has no $file"
+            exit 1
+          }
+        }
+        # LG_TestCaptureHeader's magic
+        $capture = [IO.File]::ReadAllBytes("$unpacked\guest.lgcapture")
+        if ([BitConverter]::ToUInt64($capture, 0) -ne 0x4c47434150545552) {
+          'guest.lgcapture is not a capture of the client'
+          exit 1
+        }
+    - name: Upload the PC test's zip
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-pc-test-results
+        path: ${{ runner.temp }}/pc-test/lg-pc-test-*.zip
         if-no-files-found: ignore
 
   windows-client-display:

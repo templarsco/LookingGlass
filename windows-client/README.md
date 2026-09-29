@@ -192,6 +192,36 @@ and passes if it exits with 0, such as
 [client_smoke_test.py](client_smoke_test.py) `--section {section}`, which
 passes once the client composes a frame that the IDD served.
 
+`--gpu INTERFACE` gives the Windows guest a partition of the PC's GPU
+(GPU-PV) too, by the Name that `Get-VMHostPartitionableGpu` shows: the
+probe asks the HCS for it with a modify request on
+`VirtualMachine/ComputeTopology/Gpu` as soon as the VM runs, since the HCS
+refuses it before (0x80041001). The guest's `lg-hyperv-ivshmem adapters`
+then lists its display adapters and whether Direct3D 11 makes a device on
+each, and the GPU counts once Direct3D works on an adapter that is not
+Microsoft's. The guest loads the GPU's user-mode driver from its
+`HostDriverStore`, where the disk script's `-GpuPv INTERFACE` copies the
+driver packages of that GPU from the PC's DriverStore: the package of the
+driver's service, and the packages of its OpenGL libraries, which may be
+another one. It resolves each file within the DriverStore only, refuses
+links, and checks every copy's size and SHA-256 against the PC's file.
+`-ListGpuPackages` only lists what it would copy.
+
+`--hcl TYPE` tries VMs with the HCS's paravisor setting,
+`SecuritySettings.Isolation.HclEnabled`, and the shared memory, which
+Limiar's VMs would need together. The VMs boot no disk, so their firmware
+only waits for one, and a reset stops them. `auto` tries each isolation
+type that the probe knows, `GuestStateOnly`, `VirtualizationBasedSecurity`
+and none, each without a guest state file and with an empty one of each
+kind the HCS makes (`HcsCreateEmptyGuestStateFile`), `BlockStorage` and
+`FileMode`. A VM that the HCS starts but that stops is tried again without
+the region, which tells whether the region stops it. With
+`--windows-disk`, the Windows guest then boots with the first settings
+that kept a VM running, and must find the region. The HCS has no
+documented setting for a paravisor image of one's own, such as an OpenHCL
+build: `HclEnabled` loads Windows' own. This case only reports; it does
+not count for the exit code.
+
 The init is built for x86_64 Linux, with the host's GCC when
 cross-compiling from Linux or with Clang and LLD on Windows; CMake skips the
 probe when it finds neither. CI boots the init under QEMU with QEMU's own
@@ -269,8 +299,42 @@ On those runners, Windows 10.0.26100, on September 28 and 29, 2026:
   physically backed (`AllowOvercommit` false) instead of by the worker's
   virtual memory, the HCS does not create a VM with the region at all: the
   Dynamic Memory Controller fails to initialize (0x80070032).
+- `--hcl auto`, on September 29: the HCS refuses a VM with
+  `VirtualizationBasedSecurity` ("Failed to create partition: The
+  parameter is incorrect") and one with no isolation type (the virtual
+  BIOS fails to initialize, 0x80070057). It creates and starts one with
+  `GuestStateOnly` and the region, puts the region at 0x108000000 as
+  without the paravisor, and logs that it loads the IGVM file from the
+  default location. About 3 ms after the start, the firmware reports a
+  fatal error (event 18610, error codes 0x1A, 0x2, 0x0, 0x4), the virtual
+  processor triple faults, and the VM fails to reset and stops, with an
+  empty guest state file of either kind.
 
 The probe has not run on a PC with Limiar's VM yet.
+
+### PC Test
+
+[hcs_probe_pc.ps1](hcs_probe_pc.ps1) runs the whole check on a PC with
+Hyper-V and a GPU that Hyper-V can partition, in an elevated Windows
+PowerShell. It downloads Microsoft's evaluation ISO of Windows 11
+Enterprise LTSC and the IVSHMEM driver, makes a new disk with the disk
+script and `-GpuPv`, and runs the probe with `--windows-disk`, `--gpu`,
+`--hcl auto` and a `--client` command that shows the guest's display in a
+window and saves its first frame. Then it collects the guest's logs from
+the disk, the Hyper-V events about the probe's VMs only, and a summary,
+and zips them with the report. It changes nothing on the PC but its work
+folder: no other VM, no certificate, no boot setting and no driver of the
+PC. `-Watch` leaves the client running until its window is closed,
+`-Reuse` boots the last disk again, and `-NoGpu` runs without a GPU.
+
+The `windows-client-pc-test-bundle` job cross-compiles the client with
+test capture, the probe and `lg-hyperv-ivshmem`, and bundles them with the
+IDD's package, the scripts, the README from
+[release/PC-TEST.md](release/PC-TEST.md) and the licenses
+([package_pc_test.py](package_pc_test.py)) as the
+`windows-client-pc-test` artifact. The `windows-client-pc-test` job runs
+the bundle's script with `-NoGpu` on a Windows runner, as the README says
+to run it, and checks the zip it leaves.
 
 ### IVSHMEM Device for Hyper-V Guests
 
@@ -297,7 +361,9 @@ INF is the IVSHMEM driver's INF. The guest finds the region by itself: the
 HCS puts it right after the VM's memory, and Hyper-V's firmware reports it
 as reserved memory, which Windows keeps as Loader Reserved, so it is the
 reserved range that starts where the highest range of RAM ends. `find`
-shows that range, whose last page becomes the registers.
+shows that range, whose last page becomes the registers. `adapters` shows
+the display adapters, as Windows' devices and as DXGI adapters, and
+whether Direct3D 11 makes a device on each.
 `install REGISTERS MEMORY SIZE INF` takes the ranges instead: REGISTERS is
 the guest physical address of the zeroed page, and MEMORY and SIZE are the
 shared memory's. `status` shows the device and its resources, `memory` the

@@ -147,16 +147,20 @@ def check_hcl(args):
       f'2.{report["newest_schema_minor"]}')
   print(f'hcl: a VM ran {case["passed"]}, the HCS makes empty guest state '
       f'files {case["guest_state_file_api"]}')
-  for attempt in case['attempts']:
+  # the Windows guest boots only with --windows-disk
+  windows = case.get('windows')
+  for name, attempt in [('attempt', a) for a in case['attempts']] + \
+      ([('windows guest', windows)] if windows else []):
     if attempt.get('still_listed'):
       sys.exit(f'the HCS still lists VM {attempt["vm_id"]}')
-    print('  attempt')
+    print(f'  {name}')
     for key, value in attempt.items():
       if key in QUIET:
         continue
       if key.endswith('_gpa') and isinstance(value, int):
         value = hex(value)
       print_value(key, value, '    ')
+  print(f'hcl: the Windows guest found the region {case["windows_found_region"]}')
 
   left = sorted(path.name for path in args.output.glob('*.vmgs'))
   if left:
