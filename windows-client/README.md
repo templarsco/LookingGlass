@@ -252,6 +252,10 @@ On those runners, Windows 10.0.26100, on September 28 and 29, 2026:
   reserved memory, not as RAM. The driver is attestation-signed; Windows
   Server logs a Code Integrity event about WHQL driver enforcement for it
   (3084) and loads it all the same.
+- In both guests, `lg-hyperv-ivshmem find` finds the region by itself,
+  where the HCS says it put it: the Loader Reserved range that starts where
+  RAM ends, at 0x108000000, 32 MiB in Windows Server and 128 MiB in
+  Windows 11.
 - The Windows guest's VM does not survive Windows restarting itself, which
   setup does once after the first boot: the Dynamic Memory Controller fails
   its post reset (0x8007054F), the VM fails to start after the reset, and

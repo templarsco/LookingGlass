@@ -127,10 +127,13 @@ in [windows-client](windows-client/README.md).
      would have to start its VM again when Windows restarts. With the
      guest's memory physically backed instead of by the VM worker's virtual
      memory, the HCS does not create a VM with the region at all.
-   - Open: how the guest learns where the region is without the probe (the
-     HCS put it right after the VM's memory); whether the HCS gives the
-     region to a VM with GPU-PV and OpenHCL; and the Looking Glass host in
-     such a guest serving frames to the client, which has not run yet.
+   - The guest finds the region by itself, so the PC does not have to
+     tell it where the region is: Windows keeps it as Loader Reserved
+     memory that starts where RAM ends, which `lg-hyperv-ivshmem` looks
+     for. Both guests found it where the HCS said it put it.
+   - Open: whether the HCS gives the region to a VM with GPU-PV and
+     OpenHCL, and the Looking Glass host in such a guest serving frames to
+     the client, which has not run yet.
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.
