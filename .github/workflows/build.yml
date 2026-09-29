@@ -311,6 +311,12 @@ jobs:
           Remove-VM -VM $vm -Force
         }
         exit $code
+    - name: Try VMs with the HCS's paravisor setting and shared memory
+      run: |
+        # what the HCS does with them is printed, not required
+        python windows-client\hcs_probe_smoke.py `
+          windows-client\build\lg-windows-client-hcs-probe.exe `
+          --hcl auto --output hcs-probe-hcl
     - name: Show the Hyper-V events from the HCS probe's VMs
       if: always()
       run: |
@@ -380,6 +386,8 @@ jobs:
           hcs-probe/report.json
           hcs-probe/*.serial.log
           hcs-probe-vm-*/report.json
+          hcs-probe-hcl/report.json
+          hcs-probe-hcl/*.serial.log
         if-no-files-found: ignore
 
   windows-client-guest:

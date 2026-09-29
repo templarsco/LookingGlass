@@ -28,7 +28,9 @@ works there is reported, not required. With --vm, the probe checks an
 existing VM instead, and what the HCS let it do is printed, not required.
 With --windows-disk, it boots a Windows guest from that disk, and the
 guest's IVSHMEM driver must pass the probe's checks; with --client too, the
-Looking Glass IDD must serve the guest's display to that command."""
+Looking Glass IDD must serve the guest's display to that command. With
+--hcl, the probe tries VMs with the HCS's paravisor setting and shared
+memory, and what the HCS did with them is printed, not required."""
 
 import argparse
 import json
@@ -115,6 +117,50 @@ def check_vm(args):
   print('vm:')
   for key, value in cases['vm'].items():
     print_value(key, value, '  ')
+  print('The probe ended cleanly and wrote a well-formed report')
+  return 0
+
+
+def check_hcl(args):
+  """VMs with the HCS's paravisor setting, which only the HCS's answers show,
+  and which must leave neither a VM nor a guest state file behind."""
+  result = run([args.probe, '--hcl', args.hcl, '--out', args.output] +
+      (['--size-mib', str(args.size_mib)] if args.size_mib else []), 900)
+  out = result.stdout + result.stderr
+  if result.returncode == 2 and 'computecore.dll is missing' in out:
+    print('This machine has no Host Compute Service, nothing more to check')
+    return 0
+  if result.returncode != 0:
+    sys.exit(f'the probe exited with {result.returncode}')
+
+  report = json.loads((args.output / 'report.json').read_text('utf-8'))
+  if report['aborted']:
+    sys.exit('the report says the probe was aborted')
+  cases = {case['case']: case for case in report['cases']}
+  if set(cases) != {'hcl'}:
+    sys.exit(f'unexpected cases: {sorted(cases)}')
+
+  case = cases['hcl']
+  if not case['attempts']:
+    sys.exit('the hcl case made no attempt')
+  print(f'Windows {report["windows"]}, newest configuration schema '
+      f'2.{report["newest_schema_minor"]}')
+  print(f'hcl: a VM ran {case["passed"]}, the HCS makes empty guest state '
+      f'files {case["guest_state_file_api"]}')
+  for attempt in case['attempts']:
+    if attempt.get('still_listed'):
+      sys.exit(f'the HCS still lists VM {attempt["vm_id"]}')
+    print('  attempt')
+    for key, value in attempt.items():
+      if key in QUIET:
+        continue
+      if key.endswith('_gpa') and isinstance(value, int):
+        value = hex(value)
+      print_value(key, value, '    ')
+
+  left = sorted(path.name for path in args.output.glob('*.vmgs'))
+  if left:
+    sys.exit(f'the probe left guest state files: {left}')
   print('The probe ended cleanly and wrote a well-formed report')
   return 0
 
@@ -222,13 +268,16 @@ def main():
   parser.add_argument('--vm',
       help='the ID of an existing VM for the probe to check instead')
   parser.add_argument('--size-mib', type=int,
-      help='the size of the shared memory for --vm or --windows-disk')
+      help='the size of the shared memory for --vm, --windows-disk or --hcl')
   parser.add_argument('--windows-disk', type=Path,
       help='a disk with Windows that runs lg-hyperv-ivshmem on COM1, for '
       'the probe to boot instead')
   parser.add_argument('--client',
       help='with --windows-disk, a command for the probe to run once the '
       'guest has installed the Looking Glass IDD, which reads its frames')
+  parser.add_argument('--hcl',
+      help='the isolation type, auto or default, for the probe to try VMs '
+      'with the HCS\'s paravisor setting instead')
   args = parser.parse_args()
   args.probe  = args.probe.resolve()
   args.output = args.output.resolve()
@@ -242,6 +291,8 @@ def main():
   args.output.parent.mkdir(parents=True, exist_ok=True)
   if args.vm:
     return check_vm(args)
+  if args.hcl:
+    return check_hcl(args)
   if args.windows_disk:
     args.windows_disk = args.windows_disk.resolve()
     return check_windows(args)
