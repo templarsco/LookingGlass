@@ -218,6 +218,14 @@ def check_windows(args):
     print(f'\n{client_log.name}:')
     print(client_log.read_text(errors='replace')[-20000:])
 
+  # every start that got that far lists the guest's display adapters, which
+  # must work in a guest without a GPU too
+  for start in starts:
+    adapters = start.get('adapters')
+    if adapters is not None and not (adapters and
+        adapters[-1].startswith('adapters ok')):
+      sys.exit('the guest could not list its display adapters')
+
   if not case['passed']:
     sys.exit('the IVSHMEM driver did not pass the checks in the Windows guest'
         if not args.client else 'the IVSHMEM driver\'s checks or the '

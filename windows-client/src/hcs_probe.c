@@ -2730,16 +2730,18 @@ static bool guestFrames(struct Vm * vm, const struct Section * section,
 #define ADAPTERS_TRIES   4
 #define ADAPTERS_WAIT_MS 15000
 
-// with --gpu: the guest's display adapters, as Windows' devices and as DXGI
-// adapters; true if Direct3D 11 works on one that is not Microsoft's, which
-// is the partition of the GPU with the GPU's driver. The partition may show
-// up a little after the guest answers, so this asks again a few times
-static bool guestAdapters(struct Vm * vm, struct Json * report)
+// the guest's display adapters, as Windows' devices and as DXGI adapters;
+// true if Direct3D 11 works on one that is not Microsoft's, which with
+// --gpu is the partition of the GPU with the GPU's driver. The partition
+// may show up a little after the guest answers, so with --gpu this asks
+// again a few times
+static bool guestAdapters(struct Vm * vm, bool wantGpu, struct Json * report)
 {
   static const char command[] = "adapters\n";
   jsonOpen(report, "adapters", '[');
   bool gpu = false;
-  for(int i = 0; i < ADAPTERS_TRIES && !gpu && !aborted && !vm->stopped; ++i)
+  const int tries = wantGpu ? ADAPTERS_TRIES : 1;
+  for(int i = 0; i < tries && !gpu && !aborted && !vm->stopped; ++i)
   {
     char  reply[512];
     DWORD written;
@@ -2790,8 +2792,10 @@ static bool guestAdapters(struct Vm * vm, struct Json * report)
   }
   jsonClose(report, ']');
   jsonBool(report, "gpu_in_guest", gpu);
-  printf("  %s\n", gpu ? "Direct3D works on the GPU's partition in the guest" :
-      "Direct3D does not work on a GPU in the guest");
+  if (wantGpu)
+    printf("  %s\n", gpu ?
+        "Direct3D works on the GPU's partition in the guest" :
+        "Direct3D does not work on a GPU in the guest");
   return gpu;
 }
 
@@ -2883,9 +2887,11 @@ static enum WindowsStart windowsStart(const struct Options * options,
       "The guest found the region by itself" :
       "The guest did not find the region by itself", reply);
 
-  // with --gpu, the GPU counts once the guest's Direct3D works on it
+  // the guest's display adapters; with --gpu, the GPU counts once the
+  // guest's Direct3D works on it
+  const bool gpuInGuest = guestAdapters(&vm, options->gpu[0], report);
   if (options->gpu[0])
-    gpu = guestAdapters(&vm, report) && gpu;
+    gpu = gpuInGuest && gpu;
 
   // the IVSHMEM driver and the IDD that the windows case installed may use
   // the region already, so the checks would not find the pattern

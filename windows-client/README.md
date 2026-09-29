@@ -184,7 +184,9 @@ Windows ISO. The guest runs [lg-hyperv-ivshmem](#ivshmem-device-for-hyper-v-gues
 on COM1 at every start. The probe tells it where the HCS put the region,
 it installs the IVSHMEM driver on a device over the region, and the checks
 read and write through the driver's mapping, as the Looking Glass host
-does. The guest writes to the disk. With `-Logs`, the script shows what
+does. The guest's `lg-hyperv-ivshmem adapters` also lists its display
+adapters, and whether Direct3D 11 makes a device on each, for the report.
+The guest writes to the disk. With `-Logs`, the script shows what
 the guest logged on the disk. With `--client COMMAND` too, the guest then
 installs the Looking Glass IDD that the script's `-Idd` put on the disk,
 and the probe runs COMMAND with `{section}` replaced by the section's name
@@ -196,16 +198,16 @@ passes once the client composes a frame that the IDD served.
 (GPU-PV) too, by the Name that `Get-VMHostPartitionableGpu` shows: the
 probe asks the HCS for it with a modify request on
 `VirtualMachine/ComputeTopology/Gpu` as soon as the VM runs, since the HCS
-refuses it before (0x80041001). The guest's `lg-hyperv-ivshmem adapters`
-then lists its display adapters and whether Direct3D 11 makes a device on
-each, and the GPU counts once Direct3D works on an adapter that is not
-Microsoft's. The guest loads the GPU's user-mode driver from its
-`HostDriverStore`, where the disk script's `-GpuPv INTERFACE` copies the
-driver packages of that GPU from the PC's DriverStore: the package of the
-driver's service, and the packages of its OpenGL libraries, which may be
-another one. It resolves each file within the DriverStore only, refuses
-links, and checks every copy's size and SHA-256 against the PC's file.
-`-ListGpuPackages` only lists what it would copy.
+refuses it before (0x80041001). The GPU counts once Direct3D 11 works in
+the guest on an adapter that is not Microsoft's, which the probe asks a
+few times, since the partition may show up late. The guest loads the
+GPU's user-mode driver from its `HostDriverStore`, where the disk script's
+`-GpuPv INTERFACE` copies the driver packages of that GPU from the PC's
+DriverStore: the package of the driver's service, and the packages of its
+OpenGL libraries, which may be another one. It resolves each file within
+the DriverStore only, refuses links, and checks every copy's size and
+SHA-256 against the PC's file. `-ListGpuPackages` only lists what it would
+copy.
 
 `--hcl TYPE` tries VMs with the HCS's paravisor setting,
 `SecuritySettings.Isolation.HclEnabled`, and the shared memory, which
