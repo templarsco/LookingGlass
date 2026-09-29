@@ -1103,9 +1103,13 @@ static void vmConfig(struct Vm * vm, struct Str * config, unsigned minor,
         "8250_core.skip_txen_test=1 panic=-1 rdinit=/init");
     strLiteral(&s, "}},");
   }
+  // the Windows guest's memory is physically backed, as in Hyper-V
+  // Manager's VMs: when it was backed by the worker's virtual memory, the
+  // VM could not reset as Windows restarted (the Dynamic Memory
+  // Controller failed its post reset, 0x8007054F)
   strLiteral(&s, "\"ComputeTopology\":{");
-  strPrintf(&s, "\"Memory\":{\"SizeInMB\":%d,\"AllowOvercommit\":true},",
-      windows ? WINDOWS_MEMORY_MB : VM_MEMORY_MB);
+  strPrintf(&s, "\"Memory\":{\"SizeInMB\":%d,\"AllowOvercommit\":%s},",
+      windows ? WINDOWS_MEMORY_MB : VM_MEMORY_MB, windows ? "false" : "true");
   strLiteral(&s, "\"Processor\":{\"Count\":2}},");
   strLiteral(&s, "\"Devices\":{\"ComPorts\":{\"0\":{\"NamedPipe\":");
   strJsonString(&s, vm->pipe);
