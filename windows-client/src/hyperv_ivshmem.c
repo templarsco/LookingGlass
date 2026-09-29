@@ -636,6 +636,33 @@ static void memory(void)
         ranges[i].start + ranges[i].length - 1);
 }
 
+/* The SharedMemory region, which the guest finds without being told: the HCS
+ * maps it right after the VM's memory, and Hyper-V's firmware reports it as
+ * reserved memory, which Windows keeps as Loader Reserved. So it is the
+ * reserved range that starts where the highest range of RAM ends. */
+static bool findRegion(uint64_t * start, uint64_t * length)
+{
+  struct Range ranges[MAX_RANGES];
+  size_t count = ramRanges(ranges, MAX_RANGES);
+  uint64_t top = 0;
+  for(size_t i = 0; i < count; ++i)
+    top = max(top, ranges[i].start + ranges[i].length);
+  if (!top)
+    return false;
+
+  count = resourceMap(RESOURCEMAP L"Loader Reserved", L".Raw", ranges,
+      MAX_RANGES);
+  for(size_t i = 0; i < count; ++i)
+    if (ranges[i].start == top && ranges[i].length >= 2 * PAGE_SIZE &&
+        ranges[i].length % PAGE_SIZE == 0)
+    {
+      *start  = ranges[i].start;
+      *length = ranges[i].length;
+      return true;
+    }
+  return false;
+}
+
 // the HCS probe's commands, as its Linux guest answers them
 static void cmdInfo(void)
 {
@@ -650,6 +677,16 @@ static void cmdInfo(void)
   memory();
   status();
   emit("info end");
+}
+
+// find: where the guest finds the region by itself
+static void cmdFind(void)
+{
+  uint64_t start, length;
+  if (findRegion(&start, &length))
+    emit("find ok start=0x%" PRIx64 " length=0x%" PRIx64, start, length);
+  else
+    emit("find failed step=none error=0x0");
 }
 
 // map ivshmem REGISTERS MEMORY SIZE: the device over the region, mapped
@@ -979,6 +1016,8 @@ static void handle(const char * line, const WCHAR * inf)
     cmdWrite(args);
   else if (command(line, "read", &args))
     cmdRead(args);
+  else if (command(line, "find", &args))
+    cmdFind();
   else if (command(line, "idd", &args))
     cmdIdd();
   else if (command(line, "iddlog", &args))
@@ -1091,10 +1130,17 @@ static void usage(void)
     "IVSHMEM driver on it, for the Looking Glass host. Run it as an\n"
     "administrator.\n"
     "\n"
+    "  install INF\n"
+    "      makes or updates the device over the region that find finds,\n"
+    "      whose last page is the registers, and INF is the IVSHMEM\n"
+    "      driver's INF\n"
     "  install REGISTERS MEMORY SIZE INF\n"
-    "      makes or updates the device: REGISTERS is the guest physical\n"
+    "      the same with the ranges given: REGISTERS is the guest physical\n"
     "      address of a page of the region that the PC keeps zeroed, MEMORY\n"
-    "      and SIZE the shared memory, and INF the IVSHMEM driver's INF\n"
+    "      and SIZE the shared memory\n"
+    "  find\n"
+    "      shows the region: the memory that Windows keeps reserved where\n"
+    "      its RAM ends, where the HCS puts it\n"
     "  remove\n"
     "      removes the device\n"
     "  status\n"
@@ -1130,6 +1176,33 @@ int wmain(int argc, WCHAR ** argv)
       }
     }
     return install(values[0], values[1], values[2], argv[5]) ? 0 : 1;
+  }
+
+  // the region that the guest finds, whose last page is the registers
+  if (_wcsicmp(verb, L"install") == 0 && argc == 3)
+  {
+    uint64_t start, length;
+    if (!findRegion(&start, &length))
+    {
+      emit("install failed step=find error=0x0 no reserved memory starts "
+          "where the RAM ends");
+      return 1;
+    }
+    emit("region 0x%" PRIx64 "-0x%" PRIx64, start, start + length - 1);
+    return install(start + length - PAGE_SIZE, start, length - PAGE_SIZE,
+        argv[2]) ? 0 : 1;
+  }
+
+  if (_wcsicmp(verb, L"find") == 0 && argc == 2)
+  {
+    uint64_t start, length;
+    if (!findRegion(&start, &length))
+    {
+      emit("region none");
+      return 1;
+    }
+    emit("region 0x%" PRIx64 "-0x%" PRIx64, start, start + length - 1);
+    return 0;
   }
 
   if (_wcsicmp(verb, L"remove") == 0 && argc == 2)

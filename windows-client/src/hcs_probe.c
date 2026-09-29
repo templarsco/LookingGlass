@@ -2590,6 +2590,7 @@ static enum WindowsStart windowsStart(const struct Options * options,
   const uint64_t shared = section->size;
   enum WindowsStart result = WINDOWS_FAILED;
   bool     located = false;
+  bool     found   = false;
   bool     mapped  = false;
   uint64_t reported = 0, gpa = 0;
   char     reply[512], command[160];
@@ -2628,6 +2629,21 @@ static enum WindowsStart windowsStart(const struct Options * options,
     goto done;
   }
 
+  // without the probe, the guest has to find the region by itself
+  found = vmCommand(&vm, "find", "find", 30000, reply, sizeof(reply));
+  jsonString(report, "find", reply);
+  {
+    const char * start  = strstr(reply, "start=");
+    const char * length = strstr(reply, "length=");
+    found = found && start && length &&
+      strtoull(start + 6, NULL, 16) == gpa &&
+      strtoull(length + 7, NULL, 16) == options->size;
+  }
+  jsonBool(report, "found_region", found);
+  printf("  %s: %s\n", found ?
+      "The guest found the region by itself" :
+      "The guest did not find the region by itself", reply);
+
   snprintf(command, sizeof(command), "map ivshmem 0x%" PRIx64 " 0x%" PRIx64
       " 0x%" PRIx64, gpa + shared, gpa, shared);
   mapped = vmCommand(&vm, command, "map", 300000, reply, sizeof(reply));
@@ -2636,7 +2652,7 @@ static enum WindowsStart windowsStart(const struct Options * options,
       "The IVSHMEM driver mapped the region" :
       "The IVSHMEM driver did not map the region", reply);
 
-  if (mapped && guestChecks(&vm, section, nonce, report))
+  if (found && mapped && guestChecks(&vm, section, nonce, report))
     result = options->client[0] && !guestFrames(&vm, section, report) ?
       WINDOWS_FAILED : WINDOWS_PASSED;
 

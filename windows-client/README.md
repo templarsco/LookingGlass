@@ -281,17 +281,22 @@ MinGW runtime, and is not in the release package yet.
 Run it as an administrator in the guest:
 
 ```bat
-lg-hyperv-ivshmem.exe install REGISTERS MEMORY SIZE INF
+lg-hyperv-ivshmem.exe install INF
 ```
 
-REGISTERS is the guest physical address of the zeroed page, MEMORY and
-SIZE are the shared memory's, and INF is the IVSHMEM driver's INF. `status`
-shows the device and its resources, `memory` the RAM that Windows uses,
-which the device must stay out of, and `remove` removes the device. The
-guest does not find the region by itself yet: the HCS puts it right after
-the VM's memory and reports where in the VM's `SharedMemoryRegion`
-property, and the probe sends that address over the serial port, which
-`lg-hyperv-ivshmem serial COM1 INF` answers.
+INF is the IVSHMEM driver's INF. The guest finds the region by itself: the
+HCS puts it right after the VM's memory, and Hyper-V's firmware reports it
+as reserved memory, which Windows keeps as Loader Reserved, so it is the
+reserved range that starts where the highest range of RAM ends. `find`
+shows that range, whose last page becomes the registers.
+`install REGISTERS MEMORY SIZE INF` takes the ranges instead: REGISTERS is
+the guest physical address of the zeroed page, and MEMORY and SIZE are the
+shared memory's. `status` shows the device and its resources, `memory` the
+RAM that Windows uses, which the device must stay out of, and `remove`
+removes the device. The probe sends the address that the HCS reports in
+the VM's `SharedMemoryRegion` property over the serial port, which
+`lg-hyperv-ivshmem serial COM1 INF` answers, and checks that the guest
+found the region there by itself.
 
 ### Releases
 
