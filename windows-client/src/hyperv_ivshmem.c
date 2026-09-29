@@ -254,7 +254,8 @@ static void deviceClose(struct Device * d)
   d->set = INVALID_HANDLE_VALUE;
 }
 
-static bool deviceFind(struct Device * d)
+// the root-enumerated device whose first hardware ID is id
+static bool deviceFindId(struct Device * d, const WCHAR * id)
 {
   d->set = SetupDiGetClassDevsW(NULL, L"ROOT", NULL, DIGCF_ALLCLASSES);
   if (d->set == INVALID_HANDLE_VALUE)
@@ -270,12 +271,17 @@ static bool deviceFind(struct Device * d)
     DWORD type;
     if (SetupDiGetDeviceRegistryPropertyW(d->set, &d->data, SPDRP_HARDWAREID,
           &type, (BYTE *)ids, sizeof(ids) - 2 * sizeof(WCHAR), NULL) &&
-        type == REG_MULTI_SZ && _wcsicmp(ids, hardwareIds) == 0)
+        type == REG_MULTI_SZ && _wcsicmp(ids, id) == 0)
       return true;
   }
 
   deviceClose(d);
   return false;
+}
+
+static bool deviceFind(struct Device * d)
+{
+  return deviceFindId(d, hardwareIds);
 }
 
 // a root-enumerated device of the INF's class, as devcon install makes one
@@ -596,6 +602,19 @@ static bool mapIvshmem(uint16_t * peer)
   return true;
 }
 
+static void unmapIvshmem(void)
+{
+  if (ivshmem == INVALID_HANDLE_VALUE)
+    return;
+  if (map)
+    DeviceIoControl(ivshmem, IOCTL_IVSHMEM_RELEASE_MMAP, NULL, 0, NULL, 0,
+        NULL, NULL);
+  CloseHandle(ivshmem);
+  ivshmem = INVALID_HANDLE_VALUE;
+  map     = NULL;
+  mapSize = 0;
+}
+
 // the RAM that Windows uses, and what its loader kept aside
 static void memory(void)
 {
@@ -736,6 +755,181 @@ static void cmdRead(const char * args)
       *pageWord(page, 2));
 }
 
+// emits what a program wrote, a line at a time
+static void emitOutput(const char * prefix, const char * data, size_t len)
+{
+  // the IDD's installer writes UTF-16
+  static char text[65536];
+  size_t n = len;
+  if (len >= 2 && len % 2 == 0 && memchr(data, '\0', len))
+  {
+    const int got = WideCharToMultiByte(CP_UTF8, 0, (const WCHAR *)data,
+        (int)(len / 2), text, sizeof(text) - 1, NULL, NULL);
+    n = got > 0 ? (size_t)got : 0;
+  }
+  else
+    memcpy(text, data, n = min(len, sizeof(text) - 1));
+  text[n] = '\0';
+
+  unsigned lines = 0;
+  for(char * line = strtok(text, "\r\n"); line && lines < 200;
+      line = strtok(NULL, "\r\n"), ++lines)
+    emit("%s %s", prefix, line);
+}
+
+#define IDD_HARDWARE_ID L"Root\\LGIdd"
+#define IDD_TIMEOUT_MS  300000
+
+/* idd: installs the Looking Glass IDD from the idd folder next to this
+ * program, as its installer does. The IDD maps the memory through the
+ * IVSHMEM driver, as the Looking Glass host does, so this lets go of its own
+ * mapping first. */
+static void cmdIdd(void)
+{
+  unmapIvshmem();
+
+  WCHAR dir[MAX_PATH];
+  const DWORD n = GetModuleFileNameW(NULL, dir, MAX_PATH);
+  WCHAR * slash = n && n < MAX_PATH ? wcsrchr(dir, L'\\') : NULL;
+  if (!slash || (size_t)(slash - dir) + 8 >= MAX_PATH)
+  {
+    emit("idd failed step=path error=0x0");
+    return;
+  }
+  wcscpy(slash + 1, L"idd");
+
+  WCHAR command[MAX_PATH + 64];
+  _snwprintf(command, MAX_PATH + 64, L"\"%ls\\LGIddInstall.exe\" install",
+      dir);
+  command[MAX_PATH + 63] = L'\0';
+
+  SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+  HANDLE readEnd, writeEnd;
+  if (!CreatePipe(&readEnd, &writeEnd, &sa, 0))
+  {
+    failed("idd", "pipe", GetLastError());
+    return;
+  }
+  SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+
+  STARTUPINFOW si =
+  {
+    .cb         = sizeof(si),
+    .dwFlags    = STARTF_USESTDHANDLES,
+    .hStdOutput = writeEnd,
+    .hStdError  = writeEnd
+  };
+  PROCESS_INFORMATION pi;
+  const BOOL started = CreateProcessW(NULL, command, NULL, NULL, TRUE,
+      CREATE_NO_WINDOW, NULL, dir, &si, &pi);
+  const DWORD error = GetLastError();
+  CloseHandle(writeEnd);
+  if (!started)
+  {
+    CloseHandle(readEnd);
+    failed("idd", "start", error);
+    return;
+  }
+
+  // reads until the installer exits, or gives up on it
+  static char out[65536];
+  size_t len    = 0;
+  bool   exited = false;
+  const ULONGLONG deadline = GetTickCount64() + IDD_TIMEOUT_MS;
+  for(;;)
+  {
+    exited = WaitForSingleObject(pi.hProcess, 100) == WAIT_OBJECT_0;
+    DWORD avail = 0;
+    while (PeekNamedPipe(readEnd, NULL, 0, NULL, &avail, NULL) && avail)
+    {
+      char  scratch[4096];
+      DWORD got = 0;
+      if (!ReadFile(readEnd, scratch, sizeof(scratch), &got, NULL) || !got)
+        break;
+      const size_t keep = min((size_t)got, sizeof(out) - len);
+      memcpy(out + len, scratch, keep);
+      len += keep;
+    }
+    if (exited || GetTickCount64() > deadline)
+      break;
+  }
+  CloseHandle(readEnd);
+
+  DWORD code = 0;
+  if (!exited)
+    TerminateProcess(pi.hProcess, 1);
+  else
+    GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+  emitOutput("installer", out, len);
+
+  // the display device that the installer made, which Windows starts
+  struct Device d = { .set = INVALID_HANDLE_VALUE };
+  if (deviceFindId(&d, IDD_HARDWARE_ID))
+  {
+    char instance[MAX_DEVICE_ID_LEN * 3];
+    deviceInstance(&d, instance, sizeof(instance));
+    ULONG status, problem;
+    const bool running = deviceStarted(&d, &status, &problem);
+    emit("display instance=%s status=0x%lx problem=0x%lx started=%d",
+        instance, (unsigned long)status, (unsigned long)problem, running);
+    deviceClose(&d);
+  }
+  else
+    emit("display none");
+
+  if (!exited)
+    emit("idd failed step=timeout error=0x0");
+  else if (code)
+    emit("idd failed step=install error=0x%lx", code);
+  else
+    emit("idd ok");
+}
+
+/* iddlog: the end of the Looking Glass IDD's log, which tells how it got on
+ * with the memory and with its display */
+static void cmdIddLog(void)
+{
+  WCHAR path[MAX_PATH];
+  const DWORD n = ExpandEnvironmentStringsW(
+      L"%ProgramData%\\Looking Glass (IDD)\\looking-glass-idd.txt", path,
+      MAX_PATH);
+  if (!n || n > MAX_PATH)
+  {
+    emit("iddlog failed step=path error=0x0");
+    return;
+  }
+
+  HANDLE file = CreateFileW(path, GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (file == INVALID_HANDLE_VALUE)
+  {
+    failed("iddlog", "open", GetLastError());
+    return;
+  }
+
+  // the last lines, as many as the probe keeps
+  static char text[12288];
+  LARGE_INTEGER size, at = { 0 };
+  DWORD got = 0;
+  if (GetFileSizeEx(file, &size) && size.QuadPart > (LONGLONG)sizeof(text))
+    at.QuadPart = size.QuadPart - (LONGLONG)sizeof(text);
+  const bool read = SetFilePointerEx(file, at, NULL, FILE_BEGIN) &&
+    ReadFile(file, text, sizeof(text), &got, NULL);
+  const DWORD error = GetLastError();
+  CloseHandle(file);
+  if (!read)
+  {
+    failed("iddlog", "read", error);
+    return;
+  }
+
+  emitOutput("log", text, got);
+  emit("iddlog ok");
+}
+
 static void powerOff(void)
 {
   HANDLE token;
@@ -785,6 +979,10 @@ static void handle(const char * line, const WCHAR * inf)
     cmdWrite(args);
   else if (command(line, "read", &args))
     cmdRead(args);
+  else if (command(line, "idd", &args))
+    cmdIdd();
+  else if (command(line, "iddlog", &args))
+    cmdIddLog();
   else if (command(line, "off", &args))
   {
     emit("off");

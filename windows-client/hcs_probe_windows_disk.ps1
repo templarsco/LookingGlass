@@ -28,7 +28,8 @@ Applies Windows from an ISO, such as Microsoft's evaluation ISOs of Windows
 Server, whose Server Core it takes, or Windows 11, to a new dynamic VHDX
 that boots with UEFI. Windows sets itself up on its first boot without
 asking anything, and then runs lg-hyperv-ivshmem on COM1 as SYSTEM, then
-and at every start, with the IVSHMEM driver next to it.
+and at every start, with the IVSHMEM driver next to it. With -Idd, the
+Looking Glass IDD's package goes next to it too, for the probe's --client.
 lg-windows-client-hcs-probe --windows-disk boots it. With -Logs, shows the
 tool's log, the driver's installation and Windows' device events from the
 disk once the guest is off. Run this elevated on Windows with Hyper-V's
@@ -41,6 +42,7 @@ param(
   [Parameter(Mandatory)] [string] $Disk,
   [Parameter(Mandatory, ParameterSetName = 'Make')] [string] $Tool,
   [Parameter(Mandatory, ParameterSetName = 'Make')] [string] $Inf,
+  [Parameter(ParameterSetName = 'Make')] [string] $Idd,
   [Parameter(ParameterSetName = 'Make')] [int] $SizeGB = 40,
   [Parameter(Mandatory, ParameterSetName = 'Logs')] [switch] $Logs
 )
@@ -60,33 +62,44 @@ function Show-Logs {
     }
     $w = "$($partition.DriveLetter):"
 
-    foreach ($log in "$w\lgprobe\setup.log", "$w\lgprobe\lg-hyperv-ivshmem.log",
-        "$w\Windows\Panther\setuperr.log") {
+    $idd = @(Get-ChildItem "$w\ProgramData\Looking Glass (IDD)" -Filter *.txt `
+      -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    foreach ($log in @("$w\lgprobe\setup.log",
+        "$w\lgprobe\lg-hyperv-ivshmem.log",
+        "$w\Windows\Panther\setuperr.log") + $idd) {
       Write-Host "== $log"
       if (Test-Path $log) {
         Get-Content $log -Tail 200 | Write-Host
       }
     }
 
-    # the driver's installation, the last ones about the IVSHMEM IDs
+    # the drivers' installation, the last ones about the IVSHMEM and the
+    # IDD's IDs
     $devices = "$w\Windows\INF\setupapi.dev.log"
     Write-Host "== $devices"
     if (Test-Path $devices) {
-      Select-String -Path $devices -Pattern 'VEN_1AF4&DEV_1110' `
-          -Context 0, 40 | Select-Object -Last 3 |
-        Out-String -Width 250 | Write-Host
+      foreach ($id in 'VEN_1AF4&DEV_1110', 'Root\LGIdd') {
+        Select-String -Path $devices -Pattern $id -SimpleMatch `
+            -Context 0, 40 | Select-Object -Last 3 |
+          Out-String -Width 250 | Write-Host
+      }
     }
 
+    # Windows' device and code integrity events, and the errors of the
+    # System and Application logs, such as a user-mode driver's host that
+    # crashed
     $events = "$w\Windows\System32\winevt\Logs"
     foreach ($name in 'Microsoft-Windows-Kernel-PnP%4Configuration',
-        'Microsoft-Windows-CodeIntegrity%4Operational', 'System') {
+        'Microsoft-Windows-CodeIntegrity%4Operational', 'System',
+        'Application') {
       Write-Host "== $name"
       $path = "$events\$name.evtx"
       if (-not (Test-Path $path)) {
         continue
       }
       Get-WinEvent -Path $path -MaxEvents 80 -ErrorAction SilentlyContinue |
-        Where-Object { $name -ne 'System' -or $_.Level -le 3 } |
+        Where-Object { $name -notin 'System', 'Application' -or
+          $_.Level -le 3 } |
         Format-List TimeCreated, ProviderName, Id, LevelDisplayName, Message |
         Out-String -Width 250 | Write-Host
     }
@@ -108,6 +121,9 @@ if ($Logs) {
 $Iso  = (Resolve-Path $Iso).Path
 $Tool = (Resolve-Path $Tool).Path
 $Inf  = (Resolve-Path $Inf).Path
+if ($Idd) {
+  $Idd = (Resolve-Path $Idd).Path
+}
 if (Test-Path $Disk) {
   throw "$Disk exists already"
 }
@@ -202,6 +218,32 @@ try {
       }
     }
 
+    # the Looking Glass IDD, which the tool installs when the probe asks. CI
+    # signs it with the WDK's test certificate, which the guest trusts so
+    # that Windows installs its user-mode drivers without asking
+    $iddTrust = @()
+    if ($Idd) {
+      New-Item -ItemType Directory "$dir\idd" | Out-Null
+      Copy-Item "$Idd\*" "$dir\idd" -Recurse
+      $signers = @(Get-ChildItem "$dir\idd" -Filter *.cat | ForEach-Object {
+          (Get-AuthenticodeSignature $_.FullName).SignerCertificate
+        } | Where-Object { $_ } | Sort-Object Thumbprint -Unique)
+      if (-not $signers) {
+        throw "$Idd has no signed catalog"
+      }
+      $number = 0
+      $iddTrust = foreach ($signer in $signers) {
+        $cer = "idd-$number.cer"
+        $number += 1
+        [IO.File]::WriteAllBytes("$dir\$cer", $signer.Export('Cert'))
+        Write-Host "The IDD is signed by $($signer.Subject)"
+        foreach ($store in 'Root', 'TrustedPublisher') {
+          "certutil -addstore $store C:\lgprobe\$cer >> " +
+            'C:\lgprobe\setup.log 2>&1'
+        }
+      }
+    }
+
     # Windows sets itself up without asking anything, with passwords that
     # nobody needs; Windows 11 also wants an account of its own, and its
     # online and privacy pages hidden
@@ -257,6 +299,7 @@ try {
     @(
       '@echo off'
       $trust
+      $iddTrust
       "schtasks /create /f /tn $task /ru SYSTEM /rl HIGHEST /sc onstart " +
         "/tr `"$exe serial COM1 $guestInf`" >> C:\lgprobe\setup.log 2>&1"
       "schtasks /run /tn $task >> C:\lgprobe\setup.log 2>&1"
