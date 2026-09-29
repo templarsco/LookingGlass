@@ -225,18 +225,18 @@ try {
     if ($Idd) {
       New-Item -ItemType Directory "$dir\idd" | Out-Null
       Copy-Item "$Idd\*" "$dir\idd" -Recurse
-      $signers = @(Get-ChildItem "$dir\idd" -Filter *.cat | ForEach-Object {
+      $iddSigners = @(Get-ChildItem "$dir\idd" -Filter *.cat |
+        ForEach-Object {
           (Get-AuthenticodeSignature $_.FullName).SignerCertificate
         } | Where-Object { $_ } | Sort-Object Thumbprint -Unique)
-      if (-not $signers) {
+      if (-not $iddSigners) {
         throw "$Idd has no signed catalog"
       }
-      $number = 0
-      $iddTrust = foreach ($signer in $signers) {
-        $cer = "idd-$number.cer"
-        $number += 1
-        [IO.File]::WriteAllBytes("$dir\$cer", $signer.Export('Cert'))
-        Write-Host "The IDD is signed by $($signer.Subject)"
+      # each certificate in a file named by its thumbprint
+      $iddTrust = foreach ($iddSigner in $iddSigners) {
+        $cer = "idd-$($iddSigner.Thumbprint).cer"
+        [IO.File]::WriteAllBytes("$dir\$cer", $iddSigner.Export('Cert'))
+        Write-Host "The IDD is signed by $($iddSigner.Subject)"
         foreach ($store in 'Root', 'TrustedPublisher') {
           "certutil -addstore $store C:\lgprobe\$cer >> " +
             'C:\lgprobe\setup.log 2>&1'
@@ -306,7 +306,11 @@ try {
     ) | Where-Object { $_ } |
       Set-Content -Path "$scripts\SetupComplete.cmd" -Encoding ASCII
 
-    # the firmware boots from the EFI system partition
+    # the firmware boots from the EFI system partition. This changes a
+    # partition's type, so first make sure that the disk is still the VHD's
+    if ((Get-VHD -Path $Disk).DiskNumber -ne $number) {
+      throw "Disk $number is not $Disk"
+    }
     Set-Partition -DiskNumber $number -PartitionNumber $system.PartitionNumber `
       -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
   } finally {
