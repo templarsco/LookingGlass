@@ -18,10 +18,13 @@ that accounts other than yours can open.
 
 ## What does not work yet
 
-- It cannot show a virtual machine. Nothing maps the shared memory section
-  into a Hyper-V virtual machine yet, so the client starts on its built-in
-  test transport, which draws a moving test pattern. There is no SPICE on
-  Windows.
+- It cannot show a virtual machine on your PC yet. In CI it showed a
+  Windows 11 virtual machine's display, which the Looking Glass IDD served
+  over a Host Compute Service shared memory region, but that VM was one
+  that a test created; nothing in this package sets up such a VM, and the
+  guest's side, `lg-hyperv-ivshmem`, is not in it. So the client starts on
+  its built-in test transport, which draws a moving test pattern. There is
+  no SPICE on Windows.
 - Frames are copied through the CPU; there is no zero-copy path on Windows.
 - There is no audio, clipboard or file transfer.
 - It has run on Windows only in CI, with Mesa's software OpenGL, and under

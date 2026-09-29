@@ -835,6 +835,9 @@ struct Options
   // a disk with Windows to boot instead
   char     windowsDisk[MAX_PATH * 3];
 
+  // with it, a command that reads frames from the Looking Glass IDD
+  char     client[4096];
+
   // the newest 2.x configuration schema the HCS supports
   unsigned schemaMinor;
 };
@@ -2448,6 +2451,114 @@ enum WindowsStart
   WINDOWS_STOPPED // before the guest answered
 };
 
+#define IDD_TIMEOUT_MS    360000
+#define CLIENT_TIMEOUT_MS 600000
+
+// runs --client's command with {section} replaced by the section's name,
+// while the guest's lines keep going to its log; true if it exits with 0
+static bool clientCommand(struct Vm * vm, const struct Section * section,
+    struct Json * report)
+{
+  struct Str command = { 0 };
+  const char * const token = "{section}";
+  for(const char * p = vm->options->client; *p;)
+  {
+    const char * at = strstr(p, token);
+    const size_t len = at ? (size_t)(at - p) : strlen(p);
+    strAdd(&command, p, len);
+    if (!at)
+      break;
+    strAdd(&command, section->name, strlen(section->name));
+    p = at + strlen(token);
+  }
+  jsonString(report, "client_command", command.data);
+
+  char logPath[MAX_PATH * 3];
+  outPath(vm->options, "client-command.log", logPath, sizeof(logPath));
+  SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+  HANDLE log = CreateFileA(logPath, GENERIC_WRITE, FILE_SHARE_READ, &sa,
+      CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+  STARTUPINFOA si =
+  {
+    .cb         = sizeof(si),
+    .dwFlags    = STARTF_USESTDHANDLES,
+    .hStdOutput = log,
+    .hStdError  = log
+  };
+  PROCESS_INFORMATION pi;
+  const bool started = log != INVALID_HANDLE_VALUE &&
+    CreateProcessA(NULL, command.data, NULL, NULL, TRUE, 0, NULL, NULL, &si,
+        &pi);
+  const DWORD error = GetLastError();
+  if (log != INVALID_HANDLE_VALUE)
+    CloseHandle(log);
+  free(command.data);
+  if (!started)
+  {
+    jsonResult(report, "client_start", HRESULT_FROM_WIN32(error));
+    printf("  Cannot run the client command: error %lu\n", error);
+    return false;
+  }
+
+  printf("  Running the client command, its output goes to %s\n", logPath);
+  const DWORD begin = GetTickCount();
+  bool gaveUp = false;
+  char reply[512];
+  while (WaitForSingleObject(pi.hProcess, 200) == WAIT_TIMEOUT)
+  {
+    vmPump(vm);
+    while (vmNextReply(vm, reply, sizeof(reply)))
+      ;
+    if (GetTickCount() - vm->lastPoll > 500)
+      vmPollState(vm);
+
+    if (aborted || vm->stopped ||
+        GetTickCount() - begin > CLIENT_TIMEOUT_MS)
+    {
+      TerminateProcess(pi.hProcess, 1);
+      WaitForSingleObject(pi.hProcess, 10000);
+      gaveUp = true;
+      break;
+    }
+  }
+
+  DWORD code = 1;
+  GetExitCodeProcess(pi.hProcess, &code);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+
+  jsonNumber(report, "client_exit", code);
+  jsonBool(report, "client_stopped", gaveUp);
+  printf("  The client command %s (exit %lu)\n", gaveUp ?
+      "was stopped" : code == 0 ? "passed" : "failed", (unsigned long)code);
+  return !gaveUp && code == 0;
+}
+
+// with --client: the guest installs the Looking Glass IDD, which serves the
+// guest's display on the shared memory, and the command reads it on this PC
+static bool guestFrames(struct Vm * vm, const struct Section * section,
+    struct Json * report)
+{
+  char reply[512];
+  const bool installed = vmCommand(vm, "idd", "idd", IDD_TIMEOUT_MS, reply,
+      sizeof(reply));
+  jsonString(report, "idd", reply);
+  printf("  %s: %s\n", installed ?
+      "The guest installed the Looking Glass IDD" :
+      "The guest did not install the Looking Glass IDD", reply);
+
+  const bool passed = installed && clientCommand(vm, section, report);
+
+  // how the IDD got on, in its own log, which goes to the guest's lines
+  const bool logged = vmCommand(vm, "iddlog", "iddlog", 30000, reply,
+      sizeof(reply));
+  jsonString(report, "idd_log", reply);
+  if (!logged)
+    printf("  The guest did not show the IDD's log: %s\n", reply);
+  return passed;
+}
+
 // one start of the Windows guest's VM, which ends when the checks ran or
 // the VM stopped before the guest answered
 static enum WindowsStart windowsStart(const struct Options * options,
@@ -2526,7 +2637,8 @@ static enum WindowsStart windowsStart(const struct Options * options,
       "The IVSHMEM driver did not map the region", reply);
 
   if (mapped && guestChecks(&vm, section, nonce, report))
-    result = WINDOWS_PASSED;
+    result = options->client[0] && !guestFrames(&vm, section, report) ?
+      WINDOWS_FAILED : WINDOWS_PASSED;
 
 done:
   jsonNumber(report, "serial_reopened", vm.serialReopened);
@@ -2653,7 +2765,13 @@ static void usage(void)
     "                  boot a disposable Windows guest from this disk\n"
     "                  instead, which runs lg-hyperv-ivshmem on COM1, and\n"
     "                  check the IVSHMEM driver over a SharedMemory region.\n"
-    "                  The guest writes to the disk.\n");
+    "                  The guest writes to the disk.\n"
+    "  --client COMMAND\n"
+    "                  with --windows-disk, then install the Looking Glass\n"
+    "                  IDD from the disk in the guest and run COMMAND here,\n"
+    "                  with {section} replaced by the shared memory's name,\n"
+    "                  such as the client reading the guest's frames. It\n"
+    "                  passes if COMMAND exits with 0.\n");
 }
 
 static void parseOptions(int argc, char ** argv, struct Options * options)
@@ -2716,6 +2834,12 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
     else if (strcmp(arg, "--windows-disk") == 0)
       snprintf(options->windowsDisk, sizeof(options->windowsDisk), "%s",
           value);
+    else if (strcmp(arg, "--client") == 0)
+    {
+      if (strlen(value) >= sizeof(options->client))
+        fail("--client takes a command of up to 4095 characters");
+      snprintf(options->client, sizeof(options->client), "%s", value);
+    }
     else if (strcmp(arg, "--timeout") == 0)
     {
       const unsigned long seconds = strtoul(value, NULL, 10);
@@ -2748,6 +2872,8 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
     if (!timeout)
       options->bootTimeoutMs = 1800000;
   }
+  else if (options->client[0])
+    fail("--client goes with --windows-disk");
 }
 
 static void windowsVersion(char * text, size_t size)

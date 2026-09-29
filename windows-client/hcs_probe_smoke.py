@@ -26,8 +26,9 @@ real kernel where the runner can run them, and the report's findings, the
 guests' replies and their kernels' messages about devices are printed; what
 works there is reported, not required. With --vm, the probe checks an
 existing VM instead, and what the HCS let it do is printed, not required.
-With --windows-disk, it boots a Windows guest from that disk, and what the
-guest's IVSHMEM driver did is printed, not required."""
+With --windows-disk, it boots a Windows guest from that disk, and the
+guest's IVSHMEM driver must pass the probe's checks; with --client too, the
+Looking Glass IDD must serve the guest's display to that command."""
 
 import argparse
 import json
@@ -122,7 +123,9 @@ def check_windows(args):
   """The probe's Windows guest, which may take many minutes to set itself up
   on its first boot."""
   result = run([args.probe, '--windows-disk', args.windows_disk, '--out',
-      args.output], 3600)
+      args.output] +
+      (['--size-mib', str(args.size_mib)] if args.size_mib else []) +
+      (['--client', args.client] if args.client else []), 3600)
   out = result.stdout + result.stderr
   if result.returncode == 2 and 'computecore.dll is missing' in out:
     print('This machine has no Host Compute Service, nothing more to check')
@@ -156,11 +159,21 @@ def check_windows(args):
       if key.endswith('_gpa') and isinstance(value, int):
         value = hex(value)
       print_value(key, value, '    ')
-    for line in (start.get('guest') or '').splitlines()[:200]:
+    for line in (start.get('guest') or '').splitlines()[:400]:
       print(f'    guest: {line}')
+  client_log = args.output / 'client-command.log'
+  if client_log.exists():
+    print(f'\n{client_log.name}:')
+    print(client_log.read_text(errors='replace')[-20000:])
+
   if not case['passed']:
-    sys.exit('the IVSHMEM driver did not pass the checks in the Windows guest')
+    sys.exit('the IVSHMEM driver did not pass the checks in the Windows guest'
+        if not args.client else 'the IVSHMEM driver\'s checks or the '
+        'client\'s frames failed in the Windows guest')
   print('The IVSHMEM driver passed the checks in the Windows guest')
+  if args.client:
+    print('The client read frames that the Looking Glass IDD served from the '
+        'Windows guest')
   return 0
 
 
@@ -209,10 +222,13 @@ def main():
   parser.add_argument('--vm',
       help='the ID of an existing VM for the probe to check instead')
   parser.add_argument('--size-mib', type=int,
-      help='the size of the shared memory for --vm')
+      help='the size of the shared memory for --vm or --windows-disk')
   parser.add_argument('--windows-disk', type=Path,
       help='a disk with Windows that runs lg-hyperv-ivshmem on COM1, for '
       'the probe to boot instead')
+  parser.add_argument('--client',
+      help='with --windows-disk, a command for the probe to run once the '
+      'guest has installed the Looking Glass IDD, which reads its frames')
   args = parser.parse_args()
   args.probe  = args.probe.resolve()
   args.output = args.output.resolve()
