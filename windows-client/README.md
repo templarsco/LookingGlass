@@ -185,7 +185,12 @@ on COM1 at every start. The probe tells it where the HCS put the region,
 it installs the IVSHMEM driver on a device over the region, and the checks
 read and write through the driver's mapping, as the Looking Glass host
 does. The guest writes to the disk. With `-Logs`, the script shows what
-the guest logged on the disk.
+the guest logged on the disk. With `--client COMMAND` too, the guest then
+installs the Looking Glass IDD that the script's `-Idd` put on the disk,
+and the probe runs COMMAND with `{section}` replaced by the section's name
+and passes if it exits with 0, such as
+[client_smoke_test.py](client_smoke_test.py) `--section {section}`, which
+passes once the client composes a frame that the IDD served.
 
 The init is built for x86_64 Linux, with the host's GCC when
 cross-compiling from Linux or with Clang and LLD on Windows; CMake skips the
@@ -206,7 +211,10 @@ Hyper-V events and, when a VM worker process crashes, the functions on its
 stack. Its `windows-client-guest` job makes disks from Microsoft's
 evaluation ISOs of Windows Server 2025 and Windows 11 Enterprise LTSC and
 runs `--windows-disk` on each, with the IVSHMEM driver that Looking Glass's
-host installer bundles, and fails unless the checks pass.
+host installer bundles, and fails unless the checks pass. The Windows 11
+guest then installs the IDD that the `idd` job builds and signs with the
+WDK's test certificate, which the guest trusts, and the client on the
+runner must compose a frame from it.
 
 On those runners, Windows 10.0.26100, on September 28 and 29, 2026:
 
