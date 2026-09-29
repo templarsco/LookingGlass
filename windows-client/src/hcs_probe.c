@@ -36,6 +36,12 @@
  * With --vm it instead checks a VM that something else created, such as
  * Hyper-V Manager: whether the HCS opens it and lets this PC add a
  * SharedMemory region to it, which the probe removes again.
+ *
+ * With --windows-disk it boots a disposable Windows guest from a disk whose
+ * lg-hyperv-ivshmem answers on the serial port (hyperv_ivshmem.c): the tool
+ * gives the unchanged IVSHMEM driver a device over a SharedMemory region,
+ * and the checks go through the driver's mapping, as the Looking Glass
+ * host's would.
  */
 
 #include <windows.h>
@@ -826,6 +832,9 @@ struct Options
   // an existing VM to check instead
   char     vm[40];
 
+  // a disk with Windows to boot instead
+  char     windowsDisk[MAX_PATH * 3];
+
   // the newest 2.x configuration schema the HCS supports
   unsigned schemaMinor;
 };
@@ -833,8 +842,13 @@ struct Options
 // the configuration schema of Limiar's HCS probe VMs, 2.2
 #define SCHEMA_MINOR 2
 
-// the memory of the probe's VMs
-#define VM_MEMORY_MB 512
+// the memory of the probe's VMs, and of its Windows guest, which is what
+// Windows 11 asks for
+#define VM_MEMORY_MB      512
+#define WINDOWS_MEMORY_MB 4096
+
+// the Microsoft Windows template of Hyper-V Manager's generation 2 VMs
+#define WINDOWS_SECURE_BOOT "1734c6e8-3154-4dda-ba5f-a874cc483422"
 
 // room that prepare() leaves after the output folder's path for file names
 #define OUT_NAME_MAX 64
@@ -861,6 +875,11 @@ struct Vm
   struct Str  transcript;
   int         replies;
   bool        ready, panicked, disconnected, stopped;
+
+  // a Windows guest restarts while it sets itself up, which closes the
+  // serial port until the VM opens it again
+  bool        reopenSerial;
+  int         serialReopened;
   char        exitType[32];
   DWORD       lastPoll;
   const struct Options * options;
@@ -888,18 +907,52 @@ static void vmPollState(struct Vm * vm)
   vm->lastPoll = GetTickCount();
 }
 
-// reads what the serial port has; false once it is gone
-static bool vmPump(struct Vm * vm)
+// opens the VM's serial port, which the HCS makes as the VM starts
+static bool vmOpenSerial(struct Vm * vm, DWORD * error)
 {
-  if (!vm->serial || vm->disconnected)
+  WCHAR * wpipe = widen(vm->pipe);
+  const HANDLE serial = CreateFileW(wpipe, GENERIC_READ | GENERIC_WRITE, 0,
+      NULL, OPEN_EXISTING, 0, NULL);
+  *error = GetLastError();
+  free(wpipe);
+  if (serial == INVALID_HANDLE_VALUE)
     return false;
 
-  DWORD available = 0;
-  if (!PeekNamedPipe(vm->serial, NULL, 0, NULL, &available, NULL))
+  vm->serial = serial;
+  return true;
+}
+
+// the serial port closed; false unless the VM may open it again
+static bool vmSerialClosed(struct Vm * vm)
+{
+  if (!vm->reopenSerial)
   {
     vm->disconnected = true;
     return false;
   }
+
+  CloseHandle(vm->serial);
+  vm->serial = NULL;
+  return true;
+}
+
+// reads what the serial port has; false once it is gone
+static bool vmPump(struct Vm * vm)
+{
+  if (vm->disconnected)
+    return false;
+
+  if (!vm->serial)
+  {
+    DWORD error;
+    if (!vm->reopenSerial || !vmOpenSerial(vm, &error))
+      return vm->reopenSerial;
+    ++vm->serialReopened;
+  }
+
+  DWORD available = 0;
+  if (!PeekNamedPipe(vm->serial, NULL, 0, NULL, &available, NULL))
+    return vmSerialClosed(vm);
 
   while (available)
   {
@@ -907,10 +960,7 @@ static bool vmPump(struct Vm * vm)
     DWORD got = 0;
     if (!ReadFile(vm->serial, buf, min(available, (DWORD)sizeof(buf)), &got,
           NULL) || !got)
-    {
-      vm->disconnected = true;
-      return false;
-    }
+      return vmSerialClosed(vm);
     available -= got;
 
     if (vm->log)
@@ -1010,7 +1060,7 @@ static bool vmCommand(struct Vm * vm, const char * command,
   char  line[256];
   DWORD written;
   const int len = snprintf(line, sizeof(line), "%s\n", command);
-  if (!WriteFile(vm->serial, line, len, &written, NULL) ||
+  if (!vm->serial || !WriteFile(vm->serial, line, len, &written, NULL) ||
       written != (DWORD)len)
   {
     snprintf(reply, size, "cannot write to the serial port");
@@ -1027,25 +1077,53 @@ static bool vmCommand(struct Vm * vm, const char * command,
 static void vmConfig(struct Vm * vm, struct Str * config, unsigned minor,
     const char * devices)
 {
+  const bool windows = vm->options->windowsDisk[0];
   struct Str s = { 0 };
   strPrintf(&s, "{\"SchemaVersion\":{\"Major\":2,\"Minor\":%u},", minor);
   strLiteral(&s, "\"Owner\":\"LookingGlass.HcsProbe\",");
   strLiteral(&s, "\"ShouldTerminateOnLastHandleClosed\":true,");
-  strLiteral(&s, "\"VirtualMachine\":{\"StopOnReset\":true,");
-  strLiteral(&s, "\"Chipset\":{\"LinuxKernelDirect\":{\"KernelFilePath\":");
-  strJsonString(&s, vm->options->kernel);
-  strLiteral(&s, ",\"InitRdPath\":");
-  strJsonString(&s, vm->options->initrd);
-  strLiteral(&s, ",\"KernelCmdLine\":");
-  strJsonString(&s, "console=ttyS0,115200 8250_core.nr_uarts=1 "
-      "8250_core.skip_txen_test=1 panic=-1 rdinit=/init");
-  strLiteral(&s, "}},\"ComputeTopology\":{");
+  if (windows)
+  {
+    // Windows restarts as it sets itself up, and boots from its disk with
+    // Secure Boot, as in Hyper-V Manager's generation 2 VMs
+    strLiteral(&s, "\"VirtualMachine\":{\"Chipset\":{\"Uefi\":{"
+        "\"ApplySecureBootTemplate\":\"Apply\",\"SecureBootTemplateId\":\""
+        WINDOWS_SECURE_BOOT "\"}},");
+  }
+  else
+  {
+    strLiteral(&s, "\"VirtualMachine\":{\"StopOnReset\":true,");
+    strLiteral(&s, "\"Chipset\":{\"LinuxKernelDirect\":{"
+        "\"KernelFilePath\":");
+    strJsonString(&s, vm->options->kernel);
+    strLiteral(&s, ",\"InitRdPath\":");
+    strJsonString(&s, vm->options->initrd);
+    strLiteral(&s, ",\"KernelCmdLine\":");
+    strJsonString(&s, "console=ttyS0,115200 8250_core.nr_uarts=1 "
+        "8250_core.skip_txen_test=1 panic=-1 rdinit=/init");
+    strLiteral(&s, "}},");
+  }
+  // the memory is backed by the worker's virtual memory: with physically
+  // backed memory and a SharedMemory region, the Dynamic Memory Controller
+  // does not initialize (0x80070032) and the HCS does not create the VM.
+  // With this memory and a region, the VM fails to reset as a Windows
+  // guest restarts (the controller's post reset fails, 0x8007054F) and
+  // stops, so runWindows starts it again
+  strLiteral(&s, "\"ComputeTopology\":{");
   strPrintf(&s, "\"Memory\":{\"SizeInMB\":%d,\"AllowOvercommit\":true},",
-      VM_MEMORY_MB);
+      windows ? WINDOWS_MEMORY_MB : VM_MEMORY_MB);
   strLiteral(&s, "\"Processor\":{\"Count\":2}},");
   strLiteral(&s, "\"Devices\":{\"ComPorts\":{\"0\":{\"NamedPipe\":");
   strJsonString(&s, vm->pipe);
   strLiteral(&s, "}}");
+  if (windows)
+  {
+    strLiteral(&s, ",\"Scsi\":{\"0\":{\"Attachments\":{\"0\":{"
+        "\"Type\":\"VirtualDisk\",\"Path\":");
+    strJsonString(&s, vm->options->windowsDisk);
+    strLiteral(&s, "}}}},\"VideoMonitor\":{},\"Keyboard\":{},"
+        "\"Mouse\":{}");
+  }
   if (devices)
   {
     strLiteral(&s, ",");
@@ -1066,21 +1144,31 @@ static void vmInit(struct Vm * vm, const struct Options * options)
       vm->id);
 }
 
-// lets the VM worker read the boot files, the probe's own copies
+// lets the VM worker read what it boots: the probe's own copies of the
+// kernel and the initrd, or the Windows guest's disk
 static void vmAccess(struct Vm * vm, bool grant, struct Json * report)
 {
-  const struct
+  struct File
   {
     const char * path, * granted, * revoked;
-  }
-  files[] =
+  };
+
+  const struct File bootFiles[] =
   {
     { vm->options->kernel, "grant_kernel", "revoke_kernel" },
     { vm->options->initrd, "grant_initrd", "revoke_initrd" }
   };
+  const struct File diskFiles[] =
+  {
+    { vm->options->windowsDisk, "grant_disk", "revoke_disk" }
+  };
+
+  const bool windows = vm->options->windowsDisk[0];
+  const struct File * files = windows ? diskFiles : bootFiles;
+  const size_t count = windows ? 1 : 2;
 
   WCHAR * id = widen(vm->id);
-  for(size_t i = 0; i < sizeof(files) / sizeof(files[0]); ++i)
+  for(size_t i = 0; i < count; ++i)
   {
     WCHAR * path = widen(files[i].path);
     const HRESULT hr = grant ?
@@ -1167,15 +1255,10 @@ static bool vmStart(struct Vm * vm, struct Json * report)
   const DWORD start = GetTickCount();
   for(;;)
   {
-    WCHAR * wpipe = widen(vm->pipe);
-    vm->serial = CreateFileW(wpipe, GENERIC_READ | GENERIC_WRITE, 0, NULL,
-        OPEN_EXISTING, 0, NULL);
-    free(wpipe);
-    if (vm->serial != INVALID_HANDLE_VALUE)
+    DWORD error;
+    if (vmOpenSerial(vm, &error))
       break;
 
-    vm->serial = NULL;
-    const DWORD error = GetLastError();
     if ((error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY) ||
         GetTickCount() - start > 10000)
     {
@@ -1335,11 +1418,11 @@ static bool guestChecks(struct Vm * vm, struct Section * section,
   return guestWrite && hostWrite;
 }
 
-static bool guestReady(struct Vm * vm, struct Json * report)
+static bool guestReadyWithin(struct Vm * vm, struct Json * report,
+    DWORD timeoutMs)
 {
   char reply[512];
-  const bool ready = vmWait(vm, "ready", vm->options->bootTimeoutMs, reply,
-      sizeof(reply));
+  const bool ready = vmWait(vm, "ready", timeoutMs, reply, sizeof(reply));
   jsonBool(report, "guest_ready", ready);
   if (!ready)
   {
@@ -1350,6 +1433,11 @@ static bool guestReady(struct Vm * vm, struct Json * report)
   vm->ready = true;
   vmCommand(vm, "info", "info end", 20000, reply, sizeof(reply));
   return true;
+}
+
+static bool guestReady(struct Vm * vm, struct Json * report)
+{
+  return guestReadyWithin(vm, report, vm->options->bootTimeoutMs);
 }
 
 // the emulated IVSHMEM device, as QEMU's ivshmem-plain: BAR0 holds the
@@ -2348,6 +2436,169 @@ done:
   return added && removed;
 }
 
+// how often the probe starts the Windows guest's VM: Windows restarts
+// while it sets itself up, and when the VM stops instead, the probe starts
+// it again, as Limiar would
+#define WINDOWS_STARTS 4
+
+enum WindowsStart
+{
+  WINDOWS_PASSED,
+  WINDOWS_FAILED,
+  WINDOWS_STOPPED // before the guest answered
+};
+
+// one start of the Windows guest's VM, which ends when the checks ran or
+// the VM stopped before the guest answered
+static enum WindowsStart windowsStart(const struct Options * options,
+    int start, DWORD timeoutMs, const char * configName,
+    struct Section * section, uint64_t nonce, struct Json * report)
+{
+  struct Vm vm;
+  vmInit(&vm, options);
+  vm.reopenSerial = true;
+  printf("[windows] VM %s boots %s\n", vm.id, options->windowsDisk);
+
+  struct Str devices = { 0 };
+  strLiteral(&devices, "\"SharedMemory\":{\"Regions\":[");
+  regionSettings(&devices, configName, options->size, false);
+  strLiteral(&devices, "]}");
+
+  struct Str config = { 0 };
+  vmConfig(&vm, &config, SCHEMA_MINOR, devices.data);
+  free(devices.data);
+
+  char logName[40], logPath[MAX_PATH * 3];
+  if (start == 1)
+    snprintf(logName, sizeof(logName), "windows.serial.log");
+  else
+    snprintf(logName, sizeof(logName), "windows-%d.serial.log", start);
+  outPath(options, logName, logPath, sizeof(logPath));
+
+  // the register page follows the shared memory
+  const uint64_t shared = section->size;
+  enum WindowsStart result = WINDOWS_FAILED;
+  bool     located = false;
+  bool     mapped  = false;
+  uint64_t reported = 0, gpa = 0;
+  char     reply[512], command[160];
+  char   * doc = NULL;
+  HRESULT  hr;
+
+  if (!vmCreate(&vm, config.data, report, logPath) || !vmStart(&vm, report))
+    goto done;
+
+  hr = hcsCall(vm.system, api.getComputeSystemProperties,
+      "{\"PropertyTypes\":[\"SharedMemoryRegion\"]}", 10000, &doc);
+  jsonResult(report, "region_query", hr);
+  jsonRaw(report, "region_info", SUCCEEDED(hr) ? doc : NULL);
+  located = SUCCEEDED(hr) &&
+    jsonGetUInt64(doc, "GuestPhysicalAddress", &reported);
+  free(doc);
+  if (!located)
+  {
+    printf("  The HCS did not report where it mapped the section: 0x%08lx\n",
+        (unsigned long)hr);
+    goto done;
+  }
+
+  // Windows 10.0.26100 reports a page number, and an address would be past
+  // the VM's memory
+  gpa = reported < ((uint64_t)WINDOWS_MEMORY_MB << 20) ?
+    reported * PAGE : reported;
+  jsonNumber(report, "region_gpa", gpa);
+  printf("  The HCS reports the region at guest physical 0x%" PRIx64 "\n"
+      "  Waiting for Windows to set itself up and answer\n", gpa);
+
+  if (!guestReadyWithin(&vm, report, timeoutMs))
+  {
+    if (vm.stopped && !aborted)
+      result = WINDOWS_STOPPED;
+    goto done;
+  }
+
+  snprintf(command, sizeof(command), "map ivshmem 0x%" PRIx64 " 0x%" PRIx64
+      " 0x%" PRIx64, gpa + shared, gpa, shared);
+  mapped = vmCommand(&vm, command, "map", 300000, reply, sizeof(reply));
+  jsonString(report, "map", reply);
+  printf("  %s: %s\n", mapped ?
+      "The IVSHMEM driver mapped the region" :
+      "The IVSHMEM driver did not map the region", reply);
+
+  if (mapped && guestChecks(&vm, section, nonce, report))
+    result = WINDOWS_PASSED;
+
+done:
+  jsonNumber(report, "serial_reopened", vm.serialReopened);
+  if (vm.system)
+    vmStop(&vm, report);
+  vmDestroy(&vm, report);
+  free(config.data);
+  return result;
+}
+
+// a disposable Windows guest from --windows-disk, whose lg-hyperv-ivshmem
+// answers on the serial port: it gives the IVSHMEM driver a device over a
+// SharedMemory region, and the checks read and write through the driver's
+// mapping, as the Looking Glass host does
+static bool runWindows(const struct Options * options, struct Json * report)
+{
+  jsonOpen(report, NULL, '{');
+  jsonString(report, "case", "windows");
+  jsonString(report, "disk", options->windowsDisk);
+
+  GUID guid;
+  char name[48], sectionName[96], configName[96];
+  newGuid(&guid, name, sizeof(name));
+  snprintf(sectionName, sizeof(sectionName), "Global\\lg-hcs-probe-%s",
+      name);
+  snprintf(configName, sizeof(configName),
+      "\\BaseNamedObjects\\lg-hcs-probe-%s", name);
+
+  // the shared memory, then a page for the device's registers that stays
+  // zeroed, which reads as an ivshmem-plain without interrupts that is peer
+  // 0; the region keeps the size that the shm case checks
+  struct Section section;
+  if (!sectionCreate(&section, sectionName, options->size))
+  {
+    jsonBool(report, "passed", false);
+    jsonClose(report, '}');
+    return false;
+  }
+
+  // the pattern and the checks cover the shared memory alone
+  section.size = options->size - PAGE;
+  const uint64_t nonce = random64();
+  sectionFill(&section, nonce);
+
+  // every start shares the boot timeout
+  const DWORD begin = GetTickCount();
+  enum WindowsStart result = WINDOWS_FAILED;
+  jsonOpen(report, "starts", '[');
+  for(int start = 1; start <= WINDOWS_STARTS; ++start)
+  {
+    const DWORD spent = GetTickCount() - begin;
+    const DWORD left  = spent < options->bootTimeoutMs ?
+      options->bootTimeoutMs - spent : 0;
+
+    jsonOpen(report, NULL, '{');
+    result = windowsStart(options, start, left, configName, &section, nonce,
+        report);
+    jsonClose(report, '}');
+    if (result != WINDOWS_STOPPED)
+      break;
+    if (start < WINDOWS_STARTS)
+      printf("  The VM stopped before Windows answered, starting it again\n");
+  }
+  jsonClose(report, ']');
+  sectionClose(&section);
+
+  const bool passed = result == WINDOWS_PASSED;
+  jsonBool(report, "passed", passed);
+  jsonClose(report, '}');
+  return passed;
+}
+
 // the newest 2.x configuration schema in the HCS's service properties
 static unsigned newestSchema(const char * doc)
 {
@@ -2391,12 +2642,18 @@ static void usage(void)
     "                  shm (SharedMemory region) case\n"
     "  --out DIR       where to write the report and serial logs\n"
     "                  (default: a new folder next to this program)\n"
-    "  --timeout S     how long a VM may take to boot (default: 90)\n"
+    "  --timeout S     how long a VM may take to boot (default: 90, or\n"
+    "                  1800 with --windows-disk)\n"
     "  --vm ID         check an existing VM instead, such as one of Hyper-V\n"
     "                  Manager, by its ID ((Get-VM NAME).Id): whether the\n"
     "                  HCS opens it and lets this PC add shared memory to\n"
     "                  it, which the probe removes again. The VM keeps\n"
-    "                  running.\n");
+    "                  running.\n"
+    "  --windows-disk PATH\n"
+    "                  boot a disposable Windows guest from this disk\n"
+    "                  instead, which runs lg-hyperv-ivshmem on COM1, and\n"
+    "                  check the IVSHMEM driver over a SharedMemory region.\n"
+    "                  The guest writes to the disk.\n");
 }
 
 static void parseOptions(int argc, char ** argv, struct Options * options)
@@ -2406,7 +2663,7 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
   options->bootTimeoutMs = 90000;
   options->hdv           = true;
   options->shm           = true;
-  bool only = false;
+  bool only = false, timeout = false;
 
   for(int i = 1; i < argc; i += 2)
   {
@@ -2456,12 +2713,16 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
         fail("--vm takes the VM's ID, such as (Get-VM NAME).Id");
       snprintf(options->vm, sizeof(options->vm), "%s", value);
     }
+    else if (strcmp(arg, "--windows-disk") == 0)
+      snprintf(options->windowsDisk, sizeof(options->windowsDisk), "%s",
+          value);
     else if (strcmp(arg, "--timeout") == 0)
     {
       const unsigned long seconds = strtoul(value, NULL, 10);
-      if (!seconds || seconds > 600)
-        fail("--timeout takes 1 to 600 seconds");
+      if (!seconds || seconds > 3600)
+        fail("--timeout takes 1 to 3600 seconds");
       options->bootTimeoutMs = seconds * 1000;
+      timeout = true;
     }
     else
     {
@@ -2475,6 +2736,17 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
     if (only)
       fail("--vm and --only do not go together");
     options->hdv = options->shm = false;
+  }
+
+  if (options->windowsDisk[0])
+  {
+    if (only || options->vm[0])
+      fail("--windows-disk goes with neither --only nor --vm");
+    options->hdv = options->shm = false;
+
+    // Windows sets itself up on its first boot
+    if (!timeout)
+      options->bootTimeoutMs = 1800000;
   }
 }
 
@@ -2495,6 +2767,19 @@ static void windowsVersion(char * text, size_t size)
 // the output folder, and what the probe's VMs boot when it boots any
 static bool prepare(struct Options * options)
 {
+  if (options->windowsDisk[0])
+  {
+    char * disk = fullPath(options->windowsDisk);
+    if (!disk || !fileExists(disk))
+    {
+      printf("The disk %s does not exist\n", options->windowsDisk);
+      free(disk);
+      return false;
+    }
+    snprintf(options->windowsDisk, sizeof(options->windowsDisk), "%s", disk);
+    free(disk);
+  }
+
   const bool bootsVms = options->hdv || options->shm;
   if (bootsVms && !options->kernelSource[0])
   {
@@ -2629,8 +2914,10 @@ int main(int argc, char ** argv)
   char version[32];
   windowsVersion(version, sizeof(version));
   printf("Windows %s, %s %s, %" PRIu64 " MiB of shared memory\n"
-      "Writing the report to %s\n", version, options.vm[0] ? "VM" :
-      "kernel", options.vm[0] ? options.vm : options.kernelSource,
+      "Writing the report to %s\n", version,
+      options.vm[0] ? "VM" : options.windowsDisk[0] ? "disk" : "kernel",
+      options.vm[0] ? options.vm : options.windowsDisk[0] ?
+        options.windowsDisk : options.kernelSource,
       options.size >> 20, options.out);
 
   struct Json report = { 0 };
@@ -2638,7 +2925,10 @@ int main(int argc, char ** argv)
   jsonString(&report, "probe", "lg-windows-client-hcs-probe");
   jsonNumber(&report, "report_version", 1);
   jsonString(&report, "windows", version);
-  jsonString(&report, "kernel", options.vm[0] ? NULL : options.kernelSource);
+  jsonString(&report, "kernel", options.vm[0] || options.windowsDisk[0] ?
+      NULL : options.kernelSource);
+  jsonString(&report, "windows_disk", options.windowsDisk[0] ?
+      options.windowsDisk : NULL);
   jsonNumber(&report, "shared_memory_size", options.size);
 
   // what the HCS runs already, such as WSL or VMs of Hyper-V Manager
@@ -2667,13 +2957,16 @@ int main(int argc, char ** argv)
   jsonNumber(&report, "newest_schema_minor", options.schemaMinor);
 
   jsonOpen(&report, "cases", '[');
-  bool hdvPassed = false, shmPassed = false, vmPassed = false;
+  bool hdvPassed = false, shmPassed = false, vmPassed = false,
+    windowsPassed = false;
   if (options.hdv && !aborted)
     hdvPassed = runHdv(&options, &report);
   if (options.shm && !aborted)
     shmPassed = runShm(&options, &report);
   if (options.vm[0] && !aborted)
     vmPassed = runVm(&options, SUCCEEDED(hr) ? systems : NULL, &report);
+  if (options.windowsDisk[0] && !aborted)
+    windowsPassed = runWindows(&options, &report);
   free(systems);
   jsonClose(&report, ']');
   jsonBool(&report, "aborted", aborted);
@@ -2696,10 +2989,14 @@ int main(int argc, char ** argv)
   if (options.vm[0])
     printf("  vm, SharedMemory region added to the VM and removed: %s\n",
         vmPassed ? "yes" : "no");
+  if (options.windowsDisk[0])
+    printf("  windows, IVSHMEM driver over a SharedMemory region: %s\n",
+        windowsPassed ? "works" : "does not work");
   printf("Report: %s\n", reportPath);
 
   if (aborted)
     return 1;
   return (!options.hdv || hdvPassed) && (!options.shm || shmPassed) &&
-    (!options.vm[0] || vmPassed) ? 0 : 1;
+    (!options.vm[0] || vmPassed) &&
+    (!options.windowsDisk[0] || windowsPassed) ? 0 : 1;
 }

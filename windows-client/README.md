@@ -16,12 +16,14 @@ Three steps of that plan exist so far:
   section on the PC, the Windows counterpart of the KVMFR device on Linux.
   It refuses a section that accounts other than the user's can open.
 
-The client cannot show a guest yet, because nothing maps the section into a
-virtual machine yet. That is step 5, IVSHMEM on Hyper-V. Until then the
-client starts on the `test` transport, which generates frames inside the
-client, and the LGMP path is exercised with the test producer in this
-directory. The [HCS probe](#hcs-shared-memory-probe) checks on a Hyper-V PC
-whether a VM can get the section at all.
+The client cannot show a guest yet. That is step 5, IVSHMEM on Hyper-V,
+which is under way: the [HCS probe](#hcs-shared-memory-probe) checks on a
+Hyper-V PC whether a VM can get a section of the PC, and a Windows guest's
+IVSHMEM driver maps it through
+[lg-hyperv-ivshmem](#ivshmem-device-for-hyper-v-guests), but no Looking
+Glass host has served frames that way yet. Until then the client starts on
+the `test` transport, which generates frames inside the client, and the
+LGMP path is exercised with the test producer in this directory.
 
 ## Win32 Client
 
@@ -175,6 +177,16 @@ host for it, and whether it lets the probe add a `SharedMemory` region,
 which the probe removes again. The VM keeps running, and nothing in it
 checks the region.
 
+`--windows-disk PATH` boots a disposable Windows guest instead, with a
+`SharedMemory` region, from a disk that
+[hcs_probe_windows_disk.ps1](hcs_probe_windows_disk.ps1) makes from a
+Windows ISO. The guest runs [lg-hyperv-ivshmem](#ivshmem-device-for-hyper-v-guests)
+on COM1 at every start. The probe tells it where the HCS put the region,
+it installs the IVSHMEM driver on a device over the region, and the checks
+read and write through the driver's mapping, as the Looking Glass host
+does. The guest writes to the disk. With `-Logs`, the script shows what
+the guest logged on the disk.
+
 The init is built for x86_64 Linux, with the host's GCC when
 cross-compiling from Linux or with Clang and LLD on Windows; CMake skips the
 probe when it finds neither. CI boots the init under QEMU with QEMU's own
@@ -191,9 +203,12 @@ WSL's kernel on GitHub's Windows Server 2025 runners, where Hyper-V runs
 nested, and runs `--vm` on a disposable Hyper-V Manager VM without a disk.
 It prints the report, the guests' kernel messages about devices, the
 Hyper-V events and, when a VM worker process crashes, the functions on its
-stack.
+stack. Its `windows-client-guest` job makes disks from Microsoft's
+evaluation ISOs of Windows Server 2025 and Windows 11 Enterprise LTSC and
+runs `--windows-disk` on each, with the IVSHMEM driver that Looking Glass's
+host installer bundles, and fails unless the checks pass.
 
-On those runners, Windows 10.0.26100, on September 28, 2026:
+On those runners, Windows 10.0.26100, on September 28 and 29, 2026:
 
 - `shm` works. The HCS takes the section by its NT name,
   `\BaseNamedObjects\<name>`; the Win32 name, `Global\<name>`, fails when
@@ -220,8 +235,55 @@ On those runners, Windows 10.0.26100, on September 28, 2026:
   opens it and creates a device host for it, but refuses to add the region,
   of 32 MiB or of 1 GiB (0x8004102B), and logs that the memory's virtual
   quantity, limit and reservation are below their minimums.
+- `--windows-disk`, with Windows Server 2025's Server Core and Windows 11
+  Enterprise LTSC, both 10.0.26100, and a 32 MiB region: the IVSHMEM
+  driver installs unchanged on the device that `lg-hyperv-ivshmem` makes,
+  starts, gets the forced ranges, and maps the shared memory write-combined
+  as peer 0. Through that mapping the guest reads the PC's pattern on every
+  page, and each side sees the other's write. Windows lists the region as
+  reserved memory, not as RAM. The driver is attestation-signed; Windows
+  Server logs a Code Integrity event about WHQL driver enforcement for it
+  (3084) and loads it all the same.
+- The Windows guest's VM does not survive Windows restarting itself, which
+  setup does once after the first boot: the Dynamic Memory Controller fails
+  its post reset (0x8007054F), the VM fails to start after the reset, and
+  the HCS reports a `ResetFailed` exit. The probe then starts a new VM with
+  the same section and disk, which passes. With the guest's memory
+  physically backed (`AllowOvercommit` false) instead of by the worker's
+  virtual memory, the HCS does not create a VM with the region at all: the
+  Dynamic Memory Controller fails to initialize (0x80070032).
 
 The probe has not run on a PC with Limiar's VM yet.
+
+### IVSHMEM Device for Hyper-V Guests
+
+`lg-hyperv-ivshmem` ([hyperv_ivshmem.c](src/hyperv_ivshmem.c)) runs in a
+Windows guest of Hyper-V and gives it an IVSHMEM device over the memory
+that the PC shares with the VM through a HCS `SharedMemory` region, so that
+the IVSHMEM driver and the Looking Glass host run unchanged, as they do
+under QEMU. The IVSHMEM driver does not look at the PCI bus: it takes its
+device's first memory resource, 256 bytes, as the registers of QEMU's
+ivshmem-plain, and the next one as the shared memory. So the tool makes a
+root-enumerated device with the IVSHMEM hardware IDs and a forced
+configuration of two ranges of the region: a page that the PC keeps
+zeroed, which reads as an ivshmem-plain without interrupts that is peer 0,
+and the shared memory. It is linked statically, since the guest has no
+MinGW runtime, and is not in the release package yet.
+
+Run it as an administrator in the guest:
+
+```bat
+lg-hyperv-ivshmem.exe install REGISTERS MEMORY SIZE INF
+```
+
+REGISTERS is the guest physical address of the zeroed page, MEMORY and
+SIZE are the shared memory's, and INF is the IVSHMEM driver's INF. `status`
+shows the device and its resources, `memory` the RAM that Windows uses,
+which the device must stay out of, and `remove` removes the device. The
+guest does not find the region by itself yet: the HCS puts it right after
+the VM's memory and reports where in the VM's `SharedMemoryRegion`
+property, and the probe sends that address over the serial port, which
+`lg-hyperv-ivshmem serial COM1 INF` answers.
 
 ### Releases
 
@@ -299,7 +361,8 @@ keeps the shared code covered there.
 
 - No guest frame reaches the window. Nothing maps the shared memory section
   into Limiar's VM yet; that is step 5. The HCS probe has run only on
-  GitHub's runners, not on a PC with Limiar's VM.
+  GitHub's runners, not on a PC with Limiar's VM, and the Looking Glass
+  host has not run in a Hyper-V guest yet.
 - The LGMP path copies each frame through the CPU into an OpenGL texture.
   There is no zero-copy import on Windows; DMA-BUF is Linux only.
 - Resizing by dragging the window border has no automated test. The
