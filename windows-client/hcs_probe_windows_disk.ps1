@@ -169,11 +169,15 @@ function Get-GpuPackages([string] $interface) {
 
   $service = (Get-PnpDeviceProperty -InstanceId $instance `
     -KeyName DEVPKEY_Device_Service).Data
-  $image = (Get-ItemProperty `
-    "HKLM:\SYSTEM\CurrentControlSet\Services\$service").ImagePath
-  $main = Get-Package $image
+  $image = $null
+  if ($service) {
+    $image = (Get-ItemProperty -ErrorAction Ignore `
+      "HKLM:\SYSTEM\CurrentControlSet\Services\$service").ImagePath
+  }
+  $main = if ($image) { Get-Package $image }
   if (-not $main) {
-    throw "The driver of $instance, $image, is not in the DriverStore"
+    throw "The driver of $instance, service '$service' with image " +
+      "'$image', is not in the DriverStore"
   }
   $names = @($main)
 

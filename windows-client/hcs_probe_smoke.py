@@ -160,7 +160,9 @@ def check_hcl(args):
       if key.endswith('_gpa') and isinstance(value, int):
         value = hex(value)
       print_value(key, value, '    ')
-  print(f'hcl: the Windows guest found the region {case["windows_found_region"]}')
+  if windows:
+    print('hcl: the Windows guest found the region '
+        f'{case["windows_found_region"]}')
 
   left = sorted(path.name for path in args.output.glob('*.vmgs'))
   if left:

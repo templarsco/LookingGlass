@@ -32,7 +32,9 @@ whether the Looking Glass client on the PC then shows the VM's display.
    memory, and `client\looking-glass-client.exe` shows it in a window on
    the PC and saves its first frame.
 4. The probe then tries VMs with the HCS's paravisor setting (HclEnabled)
-   and the shared memory, and boots the guest in one if any runs.
+   and the shared memory, tries one that stops again without the shared
+   memory, and boots the guest with the paravisor setting if a VM with it
+   and the shared memory keeps running.
 5. The results, the guest's logs and the Hyper-V events about the probe's
    VMs go to a zip in the work folder.
 
@@ -73,7 +75,8 @@ Deleting the work folder removes everything the test made.
 The HCS has no documented setting for a paravisor image of your own, such
 as an OpenHCL build: its HclEnabled setting loads Windows' own. On GitHub's
 Windows Server 2025 runners, the HCS created and started such a VM with the
-shared memory region, and its firmware stopped with an error right away.
+shared memory region, and its firmware stopped with an error right away;
+the same VM without the region kept running.
 
 ## License and source code
 

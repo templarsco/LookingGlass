@@ -301,14 +301,18 @@ On those runners, Windows 10.0.26100, on September 28 and 29, 2026:
   Dynamic Memory Controller fails to initialize (0x80070032).
 - `--hcl auto`, on September 29: the HCS refuses a VM with
   `VirtualizationBasedSecurity` ("Failed to create partition: The
-  parameter is incorrect") and one with no isolation type (the virtual
-  BIOS fails to initialize, 0x80070057). It creates and starts one with
-  `GuestStateOnly` and the region, puts the region at 0x108000000 as
-  without the paravisor, and logs that it loads the IGVM file from the
-  default location. About 3 ms after the start, the firmware reports a
-  fatal error (event 18610, error codes 0x1A, 0x2, 0x0, 0x4), the virtual
-  processor triple faults, and the VM fails to reset and stops, with an
-  empty guest state file of either kind.
+  parameter is incorrect"), one with no isolation type (the virtual BIOS
+  fails to initialize), and one with `GuestStateOnly` but no guest state
+  file, all with 0x80070057. With `GuestStateOnly` and an empty guest
+  state file of either kind, it creates and starts the VM, puts the region
+  at 0x108000000 as without the paravisor, and logs that it loads the IGVM
+  file from the default location. A few milliseconds after the start, the
+  firmware reports a fatal error (event 18610, error codes 0x1A, 0x2, 0x0,
+  0x4), the virtual processor triple faults, and the VM fails to reset and
+  stops. The same VM without the region keeps running: the paravisor's
+  firmware sets up its first boot, finds no bootable device and waits. So
+  the region and Windows' paravisor stop the VM together, while each runs
+  without the other.
 
 The probe has not run on a PC with Limiar's VM yet.
 

@@ -58,7 +58,11 @@ def main():
 
   if not re.fullmatch(r'[0-9a-f]{7,40}', args.commit):
     sys.exit(f'invalid commit: {args.commit}')
-  missing = [name for name in IDD_FILES if not (args.idd / name).is_file()]
+  if not args.idd.is_dir():
+    sys.exit(f'{args.idd} is not a folder')
+  # Windows ignores the case of the names, and the build may lower it
+  names = {path.name.lower() for path in args.idd.iterdir() if path.is_file()}
+  missing = [name for name in IDD_FILES if name.lower() not in names]
   if missing:
     sys.exit(f'the IDD package in {args.idd} lacks {", ".join(missing)}')
   if args.output.exists():

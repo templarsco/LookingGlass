@@ -46,9 +46,10 @@ folder whose path has no spaces, such as C:\lg-pc-test:
 
 -Gpu picks the GPU by the Name that Get-VMHostPartitionableGpu shows, when
 there are several, and -NoGpu tests without one, as CI does. -Iso takes a
-Windows ISO already on this PC instead of downloading one. -Watch leaves the client showing the guest's display until
-you close it, or for ten minutes. -Reuse boots the disk of the last run
-again instead of making a new one.
+Windows ISO already on this PC instead of downloading one. -Watch leaves
+the client showing the guest's display until you close it, or for ten
+minutes. -Reuse boots the disk of the last run again instead of making a
+new one.
 #>
 
 [CmdletBinding()]

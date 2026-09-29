@@ -137,9 +137,11 @@ in [windows-client](windows-client/README.md).
    - The HCS's paravisor setting (`HclEnabled`) loads Windows' own
      paravisor image; the HCS has no documented setting for one's own,
      such as an OpenHCL build. On the runners it creates and starts a VM
-     with `GuestStateOnly` isolation and the region, and puts the region
-     where it does without the paravisor, but the VM's firmware stops with
-     a fatal error right after the start.
+     with `GuestStateOnly` isolation, a guest state file and the region,
+     and puts the region where it does without the paravisor, but the VM's
+     firmware stops with a fatal error right after the start. The same VM
+     without the region keeps running, so the region and Windows'
+     paravisor do not go together there.
    - Open: whether the HCS gives the region to a VM with GPU-PV and
      OpenHCL, and the IDD in such a guest rendering on the GPU. The runners
      have no GPU, so this needs a PC:
