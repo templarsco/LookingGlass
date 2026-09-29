@@ -337,13 +337,17 @@ try {
       foreach ($start in $case.starts) {
         $keys = $start.PSObject.Properties.Name
         $line = '  start:'
-        foreach ($key in 'found_region', 'gpu', 'gpu_in_guest', 'idd',
-            'client_exit') {
+        foreach ($key in 'guest_ready', 'found_region', 'gpu', 'gpu_in_guest',
+            'idd', 'client_exit') {
           if ($keys -contains $key) {
             $line += " $key=$($start.$key)"
           }
         }
         $summary += $line
+        # the end of the guest's list of its display adapters
+        if ($keys -contains 'adapters' -and @($start.adapters).Count) {
+          $summary += "    $(@($start.adapters)[-1])"
+        }
       }
     } elseif ($case.case -eq 'hcl') {
       $summary += "Paravisor setting (HclEnabled) with shared memory: " +
@@ -351,7 +355,10 @@ try {
         ", the Windows guest found the region: $($case.windows_found_region)"
       foreach ($attempt in $case.attempts) {
         $summary += ('  {0}, {1}, {2}: started={3} kept_running={4}' -f
-          $attempt.isolation_type, $attempt.guest_state_type,
+          $(if ($attempt.isolation_type) { $attempt.isolation_type } else {
+            'isolation type left to the HCS' }),
+          $(if ($attempt.guest_state_type) { $attempt.guest_state_type }
+            else { 'no guest state file' }),
           $(if ($attempt.region) { 'shared memory' } else { 'no memory' }),
           $attempt.started, $attempt.kept_running)
       }
