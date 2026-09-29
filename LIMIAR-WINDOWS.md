@@ -3,9 +3,11 @@
 This is Limiar's development fork of Looking Glass. Its goal is a native
 Windows viewer on the physical PC, not just the Windows guest capturer.
 The Windows client shows its own synthetic test frames, or frames that a
-test producer serves on a shared memory section of the PC. Nothing maps that
-section into a VM yet, so it cannot display a guest. Creating this fork is
-not a claim of working guest display, GPU sharing, or 240 Hz performance.
+test producer serves on a shared memory section of the PC. Such a section
+has reached disposable test VMs so far, not Limiar's VM, and no guest has
+served frames on one, so the client cannot display a guest. Creating this
+fork is not a claim of working guest display, GPU sharing, or 240 Hz
+performance.
 
 Upstream starting revision:
 `236efcb155f952f5d7d9fcd5891a3060ad254e68`.
@@ -72,8 +74,9 @@ in [windows-client](windows-client/README.md).
    - Second route: the HCS `SharedMemory` device maps a named section into
      guest memory (schema 2.1: `SharedMemoryRegion` with `SectionName`,
      `StartOffset`, `Length` and `AllowGuestWrite`), and the guest physical
-     address can be queried as `SharedMemoryRegionInfo`. Something in the VM,
-     such as OpenHCL, would then have to present that memory as a device.
+     address can be queried as `SharedMemoryRegionInfo`. Something in the VM
+     then has to present that memory as a device; in a Windows guest,
+     `lg-hyperv-ivshmem` does (see the status below).
    - Both routes need a VM that the HCS created or can open. Whether
      Limiar's native Hyper-V VM qualifies is open. Neither route is tested
      with GPU-PV or OpenHCL.
@@ -102,7 +105,32 @@ in [windows-client](windows-client/README.md).
      service (VMMS) runs it, not the HCS directly. On the runners, the HCS
      lists and opens such a VM and creates a device host for it, but
      refuses to add the region to it (0x8004102B). So the second route
-     needs a VM that the HCS creates with the region in its configuration.
+     needs a VM that the HCS creates with the region in its configuration,
+     which is how Limiar will create its VM.
+   Status, September 29, 2026: the second route reaches the unchanged
+   IVSHMEM driver in Windows guests. `lg-hyperv-ivshmem` runs in the guest
+   and makes a root-enumerated device with the IVSHMEM hardware IDs and a
+   forced configuration over the region: a page that the PC keeps zeroed
+   as the registers, which reads as an ivshmem-plain without interrupts
+   that is peer 0, and the rest as the shared memory; see
+   [windows-client](windows-client/README.md#ivshmem-device-for-hyper-v-guests).
+   The probe's `--windows-disk` mode checks it on the runners in disposable
+   Windows Server 2025 and Windows 11 Enterprise LTSC (24H2) guests with a
+   32 MiB region:
+   - The IVSHMEM driver that Looking Glass's host installer bundles installs
+     on the device unchanged, starts and maps the shared memory as peer 0.
+     Through its mapping, the guest reads the pattern that the PC wrote on
+     every page, and each side sees the other's write. Windows lists the
+     region as reserved memory, not as RAM.
+   - The VM does not survive Windows restarting itself: it fails to reset
+     and stops. A new VM with the same section and disk passes, so Limiar
+     would have to start its VM again when Windows restarts. With the
+     guest's memory physically backed instead of by the VM worker's virtual
+     memory, the HCS does not create a VM with the region at all.
+   - Open: how the guest learns where the region is without the probe (the
+     HCS put it right after the VM's memory); whether the HCS gives the
+     region to a VM with GPU-PV and OpenHCL; and the Looking Glass host in
+     such a guest serving frames to the client, which has not run yet.
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.
