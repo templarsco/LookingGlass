@@ -116,7 +116,7 @@ in [windows-client](windows-client/README.md).
    [windows-client](windows-client/README.md#ivshmem-device-for-hyper-v-guests).
    The probe's `--windows-disk` mode checks it on the runners in disposable
    Windows Server 2025 and Windows 11 Enterprise LTSC (24H2) guests with a
-   32 MiB region:
+   32 MiB region, and 128 MiB for the IDD:
    - The IVSHMEM driver that Looking Glass's host installer bundles installs
      on the device unchanged, starts and maps the shared memory as peer 0.
      Through its mapping, the guest reads the pattern that the PC wrote on
@@ -127,10 +127,13 @@ in [windows-client](windows-client/README.md).
      would have to start its VM again when Windows restarts. With the
      guest's memory physically backed instead of by the VM worker's virtual
      memory, the HCS does not create a VM with the region at all.
+   - The Looking Glass IDD serves the Windows 11 guest's display over the
+     region: it installs, opens the IVSHMEM device, renders in software for
+     want of a GPU, and the client on the PC composes its 1920x1080 frames.
    - Open: how the guest learns where the region is without the probe (the
      HCS put it right after the VM's memory); whether the HCS gives the
-     region to a VM with GPU-PV and OpenHCL; and the Looking Glass host in
-     such a guest serving frames to the client, which has not run yet.
+     region to a VM with GPU-PV and OpenHCL; and the IDD in such a guest
+     rendering on the GPU.
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.

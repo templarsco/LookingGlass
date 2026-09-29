@@ -252,6 +252,11 @@ On those runners, Windows 10.0.26100, on September 28 and 29, 2026:
   reserved memory, not as RAM. The driver is attestation-signed; Windows
   Server logs a Code Integrity event about WHQL driver enforcement for it
   (3084) and loads it all the same.
+- With a 128 MiB region, the Windows 11 guest then installs the Looking
+  Glass IDD, which the guest trusts without test signing. The IDD opens the
+  IVSHMEM device, finds no hardware render adapter and renders in software,
+  and serves a 1920x1080 display over LGMP. The client on the runner opens
+  the section and composes the IDD's frames in its window.
 - The Windows guest's VM does not survive Windows restarting itself, which
   setup does once after the first boot: the Dynamic Memory Controller fails
   its post reset (0x8007054F), the VM fails to start after the reset, and
