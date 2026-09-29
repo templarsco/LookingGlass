@@ -416,8 +416,12 @@ jobs:
       run: |
         # relative paths, as Git's GNU tar takes D: for a host
         cd $env:RUNNER_TEMP
-        Invoke-WebRequest https://dl.quantum2.xyz/ivshmem.tar.gz `
-          -OutFile ivshmem.tar.gz
+        # retried, as the host sometimes does not answer the connection
+        curl.exe -L --fail --retry 4 --retry-all-errors --silent --show-error `
+          -o ivshmem.tar.gz https://dl.quantum2.xyz/ivshmem.tar.gz
+        if ($LASTEXITCODE) {
+          exit $LASTEXITCODE
+        }
         New-Item -ItemType Directory ivshmem-driver | Out-Null
         tar -xzf ivshmem.tar.gz -C ivshmem-driver
         $dir = "$env:RUNNER_TEMP\ivshmem-driver"

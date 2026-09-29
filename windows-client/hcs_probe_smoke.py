@@ -158,7 +158,9 @@ def check_windows(args):
       print_value(key, value, '    ')
     for line in (start.get('guest') or '').splitlines()[:200]:
       print(f'    guest: {line}')
-  print('The probe ended cleanly and wrote a well-formed report')
+  if not case['passed']:
+    sys.exit('the IVSHMEM driver did not pass the checks in the Windows guest')
+  print('The IVSHMEM driver passed the checks in the Windows guest')
   return 0
 
 
