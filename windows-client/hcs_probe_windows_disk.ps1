@@ -73,14 +73,15 @@ function Show-Logs {
       }
     }
 
-    # the drivers' installation, the last ones about the IVSHMEM and the
-    # IDD's IDs
+    # the drivers' installation: the last entries about the IVSHMEM's and
+    # the IDD's devices, and about staging and installing the IDD's packages
     $devices = "$w\Windows\INF\setupapi.dev.log"
     Write-Host "== $devices"
     if (Test-Path $devices) {
-      foreach ($id in 'VEN_1AF4&DEV_1110', 'Root\LGIdd') {
+      foreach ($id in 'VEN_1AF4&DEV_1110', 'Root\LGIdd', 'Root\LGInput',
+          'LGIdd.inf]', 'LGInput.inf]') {
         Select-String -Path $devices -Pattern $id -SimpleMatch `
-            -Context 0, 40 | Select-Object -Last 3 |
+            -Context 0, 60 | Select-Object -Last 3 |
           Out-String -Width 250 | Write-Host
       }
     }
@@ -205,7 +206,9 @@ try {
     $exe = 'C:\lgprobe\' + (Split-Path $Tool -Leaf)
     $guestInf = 'C:\lgprobe\ivshmem\' + (Split-Path $Inf -Leaf)
 
-    # the driver's publisher, trusted so that installing it asks nothing
+    # the driver's publisher, trusted so that installing it asks nothing.
+    # certutil needs -f for Trusted Publishers, which a new installation
+    # does not have yet
     $trust = $null
     $catalog = Get-ChildItem "$dir\ivshmem" -Filter *.cat |
       Select-Object -First 1
@@ -213,7 +216,7 @@ try {
       $signer = (Get-AuthenticodeSignature $catalog.FullName).SignerCertificate
       if ($signer) {
         [IO.File]::WriteAllBytes("$dir\publisher.cer", $signer.Export('Cert'))
-        $trust = 'certutil -addstore TrustedPublisher ' +
+        $trust = 'certutil -f -addstore TrustedPublisher ' +
           'C:\lgprobe\publisher.cer >> C:\lgprobe\setup.log 2>&1'
       }
     }
@@ -238,7 +241,7 @@ try {
         [IO.File]::WriteAllBytes("$dir\$cer", $iddSigner.Export('Cert'))
         Write-Host "The IDD is signed by $($iddSigner.Subject)"
         foreach ($store in 'Root', 'TrustedPublisher') {
-          "certutil -addstore $store C:\lgprobe\$cer >> " +
+          "certutil -f -addstore $store C:\lgprobe\$cer >> " +
             'C:\lgprobe\setup.log 2>&1'
         }
       }
