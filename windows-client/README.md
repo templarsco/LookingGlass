@@ -252,6 +252,10 @@ On those runners, Windows 10.0.26100, on September 28 and 29, 2026:
   reserved memory, not as RAM. The driver is attestation-signed; Windows
   Server logs a Code Integrity event about WHQL driver enforcement for it
   (3084) and loads it all the same.
+- In both guests, `lg-hyperv-ivshmem find` finds the region by itself,
+  where the HCS says it put it: the Loader Reserved range that starts where
+  RAM ends, at 0x108000000, 32 MiB in Windows Server and 128 MiB in
+  Windows 11.
 - With a 128 MiB region, the Windows 11 guest then installs the Looking
   Glass IDD, which the guest trusts without test signing. The IDD opens the
   IVSHMEM device, finds no hardware render adapter and renders in software,
@@ -286,17 +290,22 @@ MinGW runtime, and is not in the release package yet.
 Run it as an administrator in the guest:
 
 ```bat
-lg-hyperv-ivshmem.exe install REGISTERS MEMORY SIZE INF
+lg-hyperv-ivshmem.exe install INF
 ```
 
-REGISTERS is the guest physical address of the zeroed page, MEMORY and
-SIZE are the shared memory's, and INF is the IVSHMEM driver's INF. `status`
-shows the device and its resources, `memory` the RAM that Windows uses,
-which the device must stay out of, and `remove` removes the device. The
-guest does not find the region by itself yet: the HCS puts it right after
-the VM's memory and reports where in the VM's `SharedMemoryRegion`
-property, and the probe sends that address over the serial port, which
-`lg-hyperv-ivshmem serial COM1 INF` answers.
+INF is the IVSHMEM driver's INF. The guest finds the region by itself: the
+HCS puts it right after the VM's memory, and Hyper-V's firmware reports it
+as reserved memory, which Windows keeps as Loader Reserved, so it is the
+reserved range that starts where the highest range of RAM ends. `find`
+shows that range, whose last page becomes the registers.
+`install REGISTERS MEMORY SIZE INF` takes the ranges instead: REGISTERS is
+the guest physical address of the zeroed page, and MEMORY and SIZE are the
+shared memory's. `status` shows the device and its resources, `memory` the
+RAM that Windows uses, which the device must stay out of, and `remove`
+removes the device. The probe sends the address that the HCS reports in
+the VM's `SharedMemoryRegion` property over the serial port, which
+`lg-hyperv-ivshmem serial COM1 INF` answers, and checks that the guest
+found the region there by itself.
 
 ### Releases
 

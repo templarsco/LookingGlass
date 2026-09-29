@@ -130,10 +130,12 @@ in [windows-client](windows-client/README.md).
    - The Looking Glass IDD serves the Windows 11 guest's display over the
      region: it installs, opens the IVSHMEM device, renders in software for
      want of a GPU, and the client on the PC composes its 1920x1080 frames.
-   - Open: how the guest learns where the region is without the probe (the
-     HCS put it right after the VM's memory); whether the HCS gives the
-     region to a VM with GPU-PV and OpenHCL; and the IDD in such a guest
-     rendering on the GPU.
+   - The guest finds the region by itself, so the PC does not have to
+     tell it where the region is: Windows keeps it as Loader Reserved
+     memory that starts where RAM ends, which `lg-hyperv-ivshmem` looks
+     for. Both guests found it where the HCS said it put it.
+   - Open: whether the HCS gives the region to a VM with GPU-PV and
+     OpenHCL, and the IDD in such a guest rendering on the GPU.
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.
