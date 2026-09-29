@@ -1103,13 +1103,15 @@ static void vmConfig(struct Vm * vm, struct Str * config, unsigned minor,
         "8250_core.skip_txen_test=1 panic=-1 rdinit=/init");
     strLiteral(&s, "}},");
   }
-  // the Windows guest's memory is physically backed, as in Hyper-V
-  // Manager's VMs: when it was backed by the worker's virtual memory, the
-  // VM could not reset as Windows restarted (the Dynamic Memory
-  // Controller failed its post reset, 0x8007054F)
+  // the memory is backed by the worker's virtual memory: with physically
+  // backed memory and a SharedMemory region, the Dynamic Memory Controller
+  // does not initialize (0x80070032) and the HCS does not create the VM.
+  // With this memory and a region, the VM fails to reset as a Windows
+  // guest restarts (the controller's post reset fails, 0x8007054F) and
+  // stops, so runWindows starts it again
   strLiteral(&s, "\"ComputeTopology\":{");
-  strPrintf(&s, "\"Memory\":{\"SizeInMB\":%d,\"AllowOvercommit\":%s},",
-      windows ? WINDOWS_MEMORY_MB : VM_MEMORY_MB, windows ? "false" : "true");
+  strPrintf(&s, "\"Memory\":{\"SizeInMB\":%d,\"AllowOvercommit\":true},",
+      windows ? WINDOWS_MEMORY_MB : VM_MEMORY_MB);
   strLiteral(&s, "\"Processor\":{\"Count\":2}},");
   strLiteral(&s, "\"Devices\":{\"ComPorts\":{\"0\":{\"NamedPipe\":");
   strJsonString(&s, vm->pipe);
