@@ -74,6 +74,16 @@ if(WIN32)
   set_target_properties(lg-windows-client-producer PROPERTIES
     LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
 
+  # what a display offers a client that renders in step with it
+  add_executable(lg-windows-client-vblank-probe src/vblank_probe.c)
+  target_link_libraries(lg-windows-client-vblank-probe
+    dwmapi
+    gdi32
+    user32
+  )
+  set_target_properties(lg-windows-client-vblank-probe PROPERTIES
+    LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+
   # runs in a Windows guest, which has no MinGW runtime
   add_executable(lg-hyperv-ivshmem src/hyperv_ivshmem.c)
   target_include_directories(lg-hyperv-ivshmem PRIVATE
