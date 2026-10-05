@@ -18,18 +18,27 @@
 # with this program; if not, write to the Free Software Foundation, Inc., 59
 # Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
-"""Runs the Windows client on the synthetic test transport and compares the
-framebuffer it composed in its window with the generated test frame.
+"""Runs the Windows client and compares the framebuffer it composed in its
+window with test frame 4.
+
+By default the frame comes from the client's synthetic test transport. With
+--producer, it comes over the LGMP transport from lg-windows-client-producer,
+which serves it on a named shared memory section. Adding --world makes the
+producer let every account open the section, and the test then passes only
+if the client refuses it.
 
 The client must be built with ENABLE_TESTS, which adds the framebuffer
 capture. Under Wine, pass --runner wine64."""
 
 import argparse
+import os
+import queue
 import shlex
 import struct
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 WIDTH  = 256
@@ -64,11 +73,13 @@ def expected_color(x, y):
   return r, g, b
 
 
-def run_client(args, capture, log):
-  command = shlex.split(args.runner) + [
-    args.client,
+# the refusal ivshmemOpenDev() logs for a section others can open
+REFUSAL = 'only this user and the VM may have access'
+
+
+def test_transport():
+  return [
     'app:transport=test',
-    'app:renderer=OpenGL',
     f'test:width={WIDTH}',
     f'test:height={HEIGHT}',
     'test:format=bgra',
@@ -77,6 +88,60 @@ def run_client(args, capture, log):
     f'test:frameCount={SERIAL}',
     'test:holdLastFrame=yes',
     'test:realtime=no',
+  ]
+
+
+class Producer:
+  """lg-windows-client-producer serving frames 1 to SERIAL on a section."""
+
+  def __init__(self, args, name, log):
+    self.log   = log
+    self.lines = queue.Queue()
+    command = shlex.split(args.runner) + [
+      args.producer,
+      f'--size={WIDTH}x{HEIGHT}',
+      f'--frames={SERIAL}',
+      f'--timeout={int(args.timeout) + 60}',
+      name,
+    ] + (['--world'] if args.world else [])
+    self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        errors='replace')
+    self.reader = threading.Thread(target=self._read, daemon=True)
+    self.reader.start()
+
+  def _read(self):
+    with open(self.log, 'w') as output:
+      for line in self.process.stdout:
+        output.write(line)
+        output.flush()
+        self.lines.put(line)
+    self.lines.put(None)
+
+  def wait_ready(self, timeout):
+    """Waits for the producer to report that the section is ready."""
+    try:
+      while (line := self.lines.get(timeout=timeout)) is not None:
+        if line.startswith('Serving '):
+          return True
+    except queue.Empty:
+      pass
+    return False
+
+  def stop(self):
+    if self.process.poll() is None:
+      self.process.terminate()
+    try:
+      self.process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+      self.process.kill()
+      self.process.wait()
+    self.reader.join(timeout=10)
+
+
+def run_client(args, transport, capture, log):
+  command = shlex.split(args.runner) + [args.client] + transport + [
+    'app:renderer=OpenGL',
     f'test:captureFile={capture}',
     f'test:captureFrame={SERIAL}',
     'test:captureDelay=1',
@@ -146,43 +211,85 @@ def check_capture(path):
   return errors
 
 
+def run(args, output, capture, log):
+  if not args.producer:
+    return run_client(args, test_transport(), capture, log)
+
+  # a fresh name, as the producer refuses a section that already exists
+  name     = f'Local\\lg-smoke-{os.getpid()}'
+  producer = Producer(args, name, output / 'producer.log')
+  try:
+    if not producer.wait_ready(args.timeout):
+      producer.stop()
+      print((output / 'producer.log').read_text(errors='replace'))
+      print('the producer did not start serving frames')
+      return None
+
+    return run_client(args,
+        ['app:transport=lgmp', f'lgmp:shmDevice={name}'], capture, log)
+  finally:
+    producer.stop()
+
+
 def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument('client', help='path to looking-glass-client.exe')
+  parser.add_argument('--producer',
+      help='path to lg-windows-client-producer.exe, to use LGMP')
+  parser.add_argument('--world', action='store_true',
+      help='check that the client refuses a section every account can open')
   parser.add_argument('--runner', default='',
       help='command that runs Windows programs, such as wine64')
-  parser.add_argument('--output', help='keep the capture and log here')
+  parser.add_argument('--output', help='keep the capture and logs here')
   parser.add_argument('--timeout', type=float, default=60)
   parser.add_argument('client_args', nargs='*',
       help='extra client options, after --')
   args = parser.parse_args()
+  if args.world and not args.producer:
+    parser.error('--world needs --producer')
 
   output = Path(args.output or tempfile.mkdtemp(prefix='lg-win-smoke-'))
   output.mkdir(parents=True, exist_ok=True)
   capture = output / 'capture.lgcapture'
   log     = output / 'client.log'
   capture.unlink(missing_ok=True)
+  log.unlink(missing_ok=True)
 
-  status = run_client(args, capture, log)
+  status = run(args, output, capture, log)
+  text   = log.read_text(errors='replace') if log.exists() else ''
+
+  if args.world:
+    if status is None or status == 0 or REFUSAL not in text or \
+        capture.exists():
+      print(text)
+      print('the client did not refuse a section every account can open')
+      return 1
+
+    print('The client refused a shared memory section every account can '
+        'open')
+    return 0
+
   if status != 0:
-    print(log.read_text(errors='replace'))
+    print(text)
     print('the client timed out' if status is None else
         f'the client exited with status {status}')
     return 1
 
   if not capture.exists():
-    print(log.read_text(errors='replace'))
+    print(text)
     print('the client did not write a capture')
     return 1
 
   errors = check_capture(capture)
   if errors:
-    print(log.read_text(errors='replace'))
+    print(text)
     print('\n'.join(errors))
     return 1
 
-  print(f'The client composed the {WIDTH}x{HEIGHT} test frame {SERIAL} in '
-      'its window with the expected pixels')
+  source = 'from a shared memory section over LGMP' if args.producer else \
+    'from the test transport'
+  print(f'The client composed the {WIDTH}x{HEIGHT} test frame {SERIAL} '
+      f'{source} in its window with the expected pixels')
   return 0
 
 

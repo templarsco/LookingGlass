@@ -97,7 +97,8 @@ static struct Option options[] =
     .description    = "Transport backend to use",
     .type           = OPTION_TYPE_STRING,
 #ifdef _WIN32
-    // the Windows client has no guest transport yet, see LIMIAR-WINDOWS.md
+    // nothing maps the LGMP section into a VM on Windows yet, see
+    // LIMIAR-WINDOWS.md
     .value.x_string = "test",
 #else
     .value.x_string = "lgmp",

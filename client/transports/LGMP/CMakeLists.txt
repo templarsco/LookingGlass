@@ -15,3 +15,7 @@ target_link_libraries(transport_LGMP
   lg_common
   lgmp
 )
+
+if(WIN32)
+  target_link_libraries(transport_LGMP bcrypt)
+endif()

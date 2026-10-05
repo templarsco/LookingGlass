@@ -34,6 +34,8 @@
  * test exposes no endpoint to other processes.
  */
 
+#include "session.h"
+
 #include "common/debug.h"
 #include "common/framebuffer.h"
 #include "common/sysinfo.h"
@@ -79,12 +81,6 @@ struct SharedRegion
 #ifdef _WIN32
   HANDLE   mapping;
 #endif
-};
-
-struct SessionData
-{
-  uint8_t  data[512];
-  uint32_t size;
 };
 
 struct Producer
@@ -182,86 +178,6 @@ static void alignedFree(void * ptr)
 #else
   free(ptr);
 #endif
-}
-
-static bool sessionAppend(struct SessionData * session, const void * src,
-    size_t size)
-{
-  if (size > sizeof(session->data) - session->size)
-  {
-    DEBUG_ERROR("Session data overflow");
-    return false;
-  }
-
-  memcpy(session->data + session->size, src, size);
-  session->size += (uint32_t)size;
-  return true;
-}
-
-/* the same session layout as newKVMFRData() in host/src/app.c */
-static bool sessionBuild(struct SessionData * session)
-{
-  _Static_assert(sizeof(TEST_HOSTVER) <= sizeof(((KVMFR *)0)->hostver),
-      "TEST_HOSTVER does not fit in KVMFR.hostver");
-
-  session->size = 0;
-
-  KVMFR kvmfr =
-  {
-    .version  = KVMFR_VERSION,
-    .features = 0
-  };
-  memcpy(kvmfr.magic, KVMFR_MAGIC, sizeof(kvmfr.magic));
-  memcpy(kvmfr.hostver, TEST_HOSTVER, sizeof(TEST_HOSTVER));
-  if (!sessionAppend(session, &kvmfr, sizeof(kvmfr)))
-    return false;
-
-  {
-    static const char model[] = "Limiar loopback";
-    KVMFRRecord_VMInfo vmInfo =
-    {
-      .cpus    = 1,
-      .cores   = 1,
-      .sockets = 1
-    };
-    memcpy(vmInfo.capture, "loopback", sizeof("loopback"));
-
-    const KVMFRRecord record =
-    {
-      .type = KVMFR_RECORD_VMINFO,
-      .size = sizeof(vmInfo) + sizeof(model)
-    };
-
-    if (!sessionAppend(session, &record, sizeof(record)) ||
-        !sessionAppend(session, &vmInfo, sizeof(vmInfo)) ||
-        !sessionAppend(session, model  , sizeof(model )))
-      return false;
-  }
-
-  {
-    static const char osName[] = "Limiar loopback";
-    KVMFRRecord_OSInfo osInfo =
-    {
-#ifdef _WIN32
-      .os = KVMFR_OS_WINDOWS
-#else
-      .os = KVMFR_OS_LINUX
-#endif
-    };
-
-    const KVMFRRecord record =
-    {
-      .type = KVMFR_RECORD_OSINFO,
-      .size = sizeof(osInfo) + sizeof(osName)
-    };
-
-    if (!sessionAppend(session, &record, sizeof(record)) ||
-        !sessionAppend(session, &osInfo, sizeof(osInfo)) ||
-        !sessionAppend(session, osName , sizeof(osName)))
-      return false;
-  }
-
-  return true;
 }
 
 /* the same checks as lgmp_parseSession() in client/transports/LGMP/lgmp.c */
@@ -543,7 +459,8 @@ int main(void)
   }
   const uint32_t alignSize = (uint32_t)pageSize;
 
-  if (!regionCreate(&region, TEST_SHM_SIZE) || !sessionBuild(&session))
+  if (!regionCreate(&region, TEST_SHM_SIZE) ||
+      !sessionBuild(&session, TEST_HOSTVER, "loopback", "Limiar loopback"))
     goto out;
 
   /* producer: the guest capture host */
