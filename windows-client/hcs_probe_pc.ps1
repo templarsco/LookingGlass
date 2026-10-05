@@ -44,12 +44,30 @@ folder whose path has no spaces, such as C:\lg-pc-test:
 
   powershell -ExecutionPolicy Bypass -File C:\lg-pc-test\hcs_probe_pc.ps1
 
+-Plan only says what a run would do, and changes nothing: it downloads
+nothing, makes no folder and starts no virtual machine, and it needs no
+elevation. Run it first.
+
 -Gpu picks the GPU by the Name that Get-VMHostPartitionableGpu shows, when
 there are several, and -NoGpu tests without one, as CI does. -Iso takes a
 Windows ISO already on this PC instead of downloading one. -Watch leaves
 the client showing the guest's display until you close it, or for ten
 minutes. -Reuse boots the disk of the last run again instead of making a
 new one.
+
+The IVSHMEM driver goes into the guest, and nothing here knows its hash in
+advance, so the script shows the SHA-256 of what it downloaded and of the
+ISO, and stops unless the catalog of every driver package has a valid
+signature. -IvshmemSha256 and -IsoSha256 stop it unless the files match
+the hashes you give, which is how to pin a run to files that you checked
+before; -AllowUnverifiedDriver accepts a driver whose signature is not
+valid.
+
+The zip has the log of the run and the probe's report. The report names no
+virtual machine of this PC, only how many the HCS lists and their type,
+owner and state, and the script hides the user and machine names in the
+text files that it zips. Read pc-test.log before sending it anywhere: it
+has this PC's Windows version, its processor and the device path of the GPU.
 #>
 
 [CmdletBinding()]
@@ -60,7 +78,11 @@ param(
   [switch] $NoGpu,
   [switch] $Watch,
   [switch] $Reuse,
-  [switch] $NoHcl
+  [switch] $NoHcl,
+  [switch] $Plan,
+  [string] $IvshmemSha256,
+  [string] $IsoSha256,
+  [switch] $AllowUnverifiedDriver
 )
 
 $ErrorActionPreference = 'Stop'
@@ -91,9 +113,50 @@ function Invoke-Native([scriptblock] $command) {
 
 $principal = New-Object Security.Principal.WindowsPrincipal(
   [Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole(
+if (-not $Plan -and -not $principal.IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  throw 'Run this in an elevated Windows PowerShell (Run as administrator)'
+  throw ('Run this in an elevated Windows PowerShell (Run as ' +
+    'administrator); -Plan needs no elevation')
+}
+
+# a SHA-256 as the hex text that Get-FileHash returns, or an error
+function Test-Sha256([string] $name, [string] $value) {
+  if ($value -and $value -notmatch '^[0-9a-fA-F]{64}$') {
+    throw "$name must be 64 hexadecimal digits"
+  }
+}
+Test-Sha256 '-IvshmemSha256' $IvshmemSha256
+Test-Sha256 '-IsoSha256' $IsoSha256
+
+# shows a file's SHA-256, and stops if it is not the one that was asked for
+function Confirm-Sha256([string] $what, [string] $path, [string] $expected) {
+  $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+  Write-Host "$what SHA-256: $actual"
+  if ($expected -and $actual -ne $expected) {
+    throw "$what is not the file that was asked for: its SHA-256 is " +
+      "$actual, and not $expected"
+  }
+}
+
+# the user's and the machine's names, in the text files that go to the zip. A
+# transcript starts with both, and a path may have the first
+function Hide-Identity([string] $folder) {
+  $names = @($env:USERNAME, $env:COMPUTERNAME) |
+    Where-Object { $_ -and $_.Length -ge 3 }
+  $files = Get-ChildItem -LiteralPath $folder -Recurse -File `
+    -Include *.log, *.txt, *.json
+  foreach ($file in $files) {
+    $text = [IO.File]::ReadAllText($file.FullName)
+    $text = $text -replace '(?m)^(Username|RunAs User|Machine):[^\r\n]*',
+      '$1: (hidden)'
+    foreach ($name in $names) {
+      $text = $text -replace
+        "(?i)(?<![A-Za-z0-9])$([regex]::Escape($name))(?![A-Za-z0-9])",
+        '(hidden)'
+    }
+    [IO.File]::WriteAllText($file.FullName, $text,
+      (New-Object Text.UTF8Encoding($false)))
+  }
 }
 
 # the probe takes the client's command line as one argument, which Windows
@@ -116,11 +179,6 @@ if (-not (Get-Command Get-VMHostPartitionableGpu -ErrorAction Ignore)) {
   throw "Hyper-V's PowerShell module is missing: turn on Hyper-V with its " +
     'management tools'
 }
-
-# the bundle came from the internet; what it copies into the guest should
-# not carry that mark there
-Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -File |
-  Where-Object FullName -notlike "$WorkDir\*" | Unblock-File
 
 # the GPU to partition, which must be named if there are several
 $gpus   = @()
@@ -151,12 +209,93 @@ if ($NoGpu) {
 $disk = "$WorkDir\disk\windows.vhdx"
 $fresh = -not ($Reuse -and (Test-Path -LiteralPath $disk))
 $needed = if ($fresh) { 30GB } else { 5GB }
-New-Item -ItemType Directory -Force $WorkDir | Out-Null
-$drive = (Get-Item -LiteralPath $WorkDir).PSDrive
+
+# the drive of the work folder, which may not exist yet
+$drive = Get-PSDrive -PSProvider FileSystem |
+  Where-Object { $WorkDir.StartsWith($_.Root, 'OrdinalIgnoreCase') } |
+  Sort-Object { $_.Root.Length } -Descending | Select-Object -First 1
+if (-not $drive) {
+  throw "$WorkDir is not on a drive of this PC"
+}
 if ($drive.Free -lt $needed) {
   throw ('{0} has {1:N0} GiB free, and the test needs {2:N0} GiB' -f
     $drive.Root, ($drive.Free / 1GB), ($needed / 1GB))
 }
+
+if ($Plan) {
+  function Get-State([string] $path) {
+    if (Test-Path -LiteralPath $path) { 'already in the work folder' }
+    else { 'to download' }
+  }
+  $downloads  = Join-Path $WorkDir 'downloads'
+  $isoPath    = Join-Path $downloads 'windows11-enterprise-ltsc-eval.iso'
+  $driverPath = Join-Path $downloads 'ivshmem.tar.gz'
+
+  $gpuText = if ($chosen) { $chosen.Name } else { 'none (-NoGpu)' }
+  $isoText = if ($Iso) { "$Iso, yours" }
+    elseif (-not $fresh) {
+      'not needed: the disk of the last run is booted again' }
+    else { "$isoUrl, about 5 GB, $(Get-State $isoPath)" }
+  $isoPin = if ($IsoSha256) { 'pinned' } else {
+    'not pinned, its SHA-256 is shown' }
+  $driverPin = if ($IvshmemSha256) { 'pinned' } else {
+    'not pinned, its SHA-256 is shown' }
+  $signature = if ($AllowUnverifiedDriver) {
+    'a driver whose catalog is not validly signed is accepted'
+  } else {
+    'a driver whose catalog is not validly signed stops the run'
+  }
+
+  $diskText = if ($fresh) {
+    "a new 40 GB dynamic disk, $disk, that is mounted to put Windows from " +
+      'the ISO on it, with the IVSHMEM driver, the Looking Glass IDD and ' +
+      'lg-hyperv-ivshmem'
+  } else {
+    "the disk $disk, which is booted again"
+  }
+  if ($fresh -and $chosen) {
+    $diskText += ", and the driver packages of the GPU in the guest's " +
+      'HostDriverStore'
+  }
+  $vmText = 'virtual machines that the Host Compute Service makes for the ' +
+    'probe, each with 128 MiB of memory shared with this PC'
+  if ($chosen) { $vmText += ' and a partition of the GPU' }
+  if (-not $NoHcl) { $vmText += ', and then ones with the paravisor setting' }
+  $clientText = if ($Watch) { 'show the guest until you close it' } else {
+    'save the first frame of the guest' }
+
+  Write-Host '== What a run would do. Nothing was changed.'
+  $folderText = 'Work folder      : {0}, on {1}, which has {2:N0} GiB free; ' +
+    'the test needs {3:N0}'
+  Write-Host ($folderText -f $WorkDir, $drive.Root, ($drive.Free / 1GB),
+    ($needed / 1GB))
+  Write-Host "GPU to partition : $gpuText"
+  Write-Host "Windows ISO      : $isoText ($isoPin)"
+  Write-Host ("IVSHMEM driver   : $driverUrl, $(Get-State $driverPath) " +
+    "($driverPin)")
+  Write-Host "Driver signature : $signature"
+  Write-Host ''
+  Write-Host 'In the work folder, with an elevated PowerShell, it would make:'
+  Write-Host "  - $diskText"
+  Write-Host "  - $vmText; they go away when the probe ends"
+  Write-Host ("  - a window of the Looking Glass client on this PC, to " +
+    $clientText)
+  Write-Host "  - a zip of the log and the probe's report"
+  Write-Host ''
+  Write-Host ('Nothing else on this PC changes: no other virtual machine, no ' +
+    'certificate, no boot setting and no driver of this PC. The disk is a ' +
+    'new file that is mounted for a while, and Windows gives its volumes ' +
+    'drive letters until it is dismounted. Other virtual machines keep ' +
+    "running, and share the GPU with the probe's.")
+  exit 0
+}
+
+# the bundle came from the internet; what it copies into the guest should
+# not carry that mark there
+Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -File |
+  Where-Object FullName -notlike "$WorkDir\*" | Unblock-File
+
+New-Item -ItemType Directory -Force $WorkDir | Out-Null
 
 $stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
 $results = "$WorkDir\results-$stamp"
@@ -206,6 +345,8 @@ try {
   $driverDir = "$WorkDir\ivshmem-driver"
   if (-not (Test-Path -LiteralPath $driverDir)) {
     Get-Download $driverUrl "$downloads\ivshmem.tar.gz"
+    Confirm-Sha256 'The IVSHMEM driver archive' "$downloads\ivshmem.tar.gz" `
+      $IvshmemSha256
     New-Item -ItemType Directory "$driverDir.part" -Force | Out-Null
     $code = Invoke-Native {
       & "$env:SystemRoot\System32\tar.exe" -xzf `
@@ -215,11 +356,34 @@ try {
       throw "tar.exe could not unpack the IVSHMEM driver (exit $code)"
     }
     Move-Item -LiteralPath "$driverDir.part" -Destination $driverDir
+  } elseif ($IvshmemSha256) {
+    # the folder came from an earlier run, so the archive has to be there to
+    # show that it is the one that was asked for
+    if (-not (Test-Path -LiteralPath "$downloads\ivshmem.tar.gz")) {
+      throw "$driverDir is from an earlier run, and $downloads\ivshmem.tar.gz " +
+        'is not here to check against -IvshmemSha256: delete the folder'
+    }
+    Confirm-Sha256 'The IVSHMEM driver archive' "$downloads\ivshmem.tar.gz" `
+      $IvshmemSha256
   }
-  Get-ChildItem -LiteralPath $driverDir -Recurse -File -Include *.cat, *.sys |
-    Get-AuthenticodeSignature | Format-List Path, Status,
+  $signatures = @(Get-ChildItem -LiteralPath $driverDir -Recurse -File `
+      -Include *.cat, *.sys | Get-AuthenticodeSignature)
+  $signatures | Format-List Path, Status,
       @{ n = 'Signer'; e = { $_.SignerCertificate.Subject } } |
     Out-String -Width 250 | Write-Host
+
+  # a driver's signature is its catalog's, and the guest is going to load
+  # this one: the catalog has to be valid, and there has to be one
+  $catalogs = @($signatures | Where-Object { $_.Path -like '*.cat' })
+  $invalid  = @($catalogs | Where-Object Status -ne 'Valid')
+  if ((-not $catalogs -or $invalid) -and -not $AllowUnverifiedDriver) {
+    $what = if ($invalid) {
+      "$($invalid.Count) of its $($catalogs.Count) catalogs are not validly " +
+        'signed'
+    } else { 'it has no catalog' }
+    throw ("The IVSHMEM driver in $driverDir is not validly signed ($what). " +
+      'Check where it came from, or run again with -AllowUnverifiedDriver')
+  }
   $infs = @(Get-ChildItem -LiteralPath $driverDir -Recurse -Filter *.inf)
   $inf = $null
   foreach ($os in 'w11', 'win11', '2k25', '2k22', 'w10', 'win10', '') {
@@ -246,6 +410,7 @@ try {
     $Iso = [IO.Path]::GetFullPath($Iso)
     Get-Item -LiteralPath $Iso | Format-List FullName, Length |
       Out-String | Write-Host
+    Confirm-Sha256 'The Windows ISO' $Iso $IsoSha256
     if (Test-Path -LiteralPath $disk) {
       Dismount-VHD -Path $disk -ErrorAction Ignore
       Remove-Item -LiteralPath $disk
@@ -381,9 +546,15 @@ $summary += "The probe exited with $probeExit"
 $summary | Set-Content -LiteralPath "$results\summary.txt"
 $summary | Write-Host
 
+Hide-Identity $results
+
 $zip = "$WorkDir\lg-pc-test-$stamp.zip"
 Compress-Archive -Path "$results\*" -DestinationPath $zip -Force
 Write-Host ''
+Write-Host ('The user and machine names are hidden in the text files of the ' +
+  'zip, which has no name or id of this PC''s virtual machines. Read ' +
+  "$results\pc-test.log before sending it: it has this PC's Windows " +
+  'version, its processor and the device path of the GPU.')
 Write-Host "Send this file back: $zip"
 Write-Host ("The disk stays in $WorkDir\disk for -Reuse; delete $WorkDir " +
   'to remove everything the test made')

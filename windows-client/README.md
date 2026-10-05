@@ -331,8 +331,19 @@ window and saves its first frame. Then it collects the guest's logs from
 the disk, the Hyper-V events about the probe's VMs only, and a summary,
 and zips them with the report. It changes nothing on the PC but its work
 folder: no other VM, no certificate, no boot setting and no driver of the
-PC. `-Watch` leaves the client running until its window is closed,
-`-Reuse` boots the last disk again, and `-NoGpu` runs without a GPU.
+PC. `-Plan` says what a run would do and changes nothing, with no
+elevation, `-Watch` leaves the client running until its window is closed,
+`-Reuse` boots the last disk again, and `-NoGpu` runs without a GPU, while
+`-Gpu` names the one to partition on a PC that has several.
+
+The IVSHMEM driver is a download that goes into the guest, so the script shows
+its SHA-256 and the ISO's, takes `-IvshmemSha256` and `-IsoSha256` to stop
+unless they match, and stops unless every driver catalog is validly signed
+(`-AllowUnverifiedDriver` accepts one that is not). The report lists the HCS's
+compute systems as a count with each one's type, owner and state, as
+[hcs_systems.c](src/hcs_systems.c) summarizes them, because it names no VM of
+the PC; the script also hides the user and machine names in the text files
+that it zips.
 
 The `windows-client-pc-test-bundle` job cross-compiles the client with
 test capture, the probe and `lg-hyperv-ivshmem`, and bundles them with the
