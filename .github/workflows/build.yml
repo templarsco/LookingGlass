@@ -262,12 +262,20 @@ jobs:
         cp /mingw64/bin/opengl32.dll client/build/
         GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
           --output smoke client/build/looking-glass-client.exe
+    - name: Check frame formats, strides and upload paths in a Windows window
+      run: |
+        # Mesa has no GL_AMD_pinned_memory, so this only covers the ordinary
+        # upload path. A PC with an AMD GPU runs it with --require-pinned.
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_format_test.py \
+          --output formats client/build/looking-glass-client.exe
     - name: Upload Windows client smoke test output
       if: failure()
       uses: actions/upload-artifact@v6
       with:
         name: windows-client-smoke
-        path: smoke/
+        path: |
+          smoke/
+          formats/
 
   idd:
     runs-on: windows-2022

@@ -82,6 +82,33 @@ Options can also go in `%APPDATA%\looking-glass\client.ini`.
 
   Under Wine, add `--runner wine64`. The Wine prefix needs a monospace
   font, passed after `--`, such as `-- "win:uiFont=DejaVu Sans Mono"`.
+- [client_format_test.py](client_format_test.py) makes the same check for a
+  matrix of formats, sizes, strides and upload paths: packed and padded
+  strides, odd sizes, the 24-bit formats, a 1080p frame, and sequences that
+  cycle the renderer's upload buffers, each with `opengl:amdPinnedMem` on
+  and off. Every case runs with its own empty configuration directory, so
+  the user's `client.ini` cannot change what is tested. HDR formats are not
+  covered, as the OpenGL renderer has no HDR-to-SDR path.
+
+  ```sh
+  python windows-client/client_format_test.py client/build/looking-glass-client.exe
+  ```
+
+  CI runs it with Mesa's software OpenGL, which has no
+  `GL_AMD_pinned_memory`, so the pinned cases only exercise the ordinary
+  upload path there, and the test says so. That is not enough, because the
+  pinned path once failed only on hardware: on an RX 9070 XT (OpenGL 4.6
+  Compatibility Profile Context 26.9.1.260826), the renderer's
+  `glBufferSubData` into the buffer that the driver pins left it black,
+  without a GL error, so the client showed black frames by default. The
+  renderer now writes to the pinned memory directly, and a PC with an AMD
+  GPU should run the test with `--require-pinned`, which fails a case that
+  asked for the pinned path and did not get it:
+
+  ```sh
+  python windows-client/client_format_test.py --require-pinned \
+    client/build/looking-glass-client.exe
+  ```
 
 Focus changes, pointer capture, the keyboard grab, DPI scaling, fullscreen
 and reconnects were checked by hand under Wine with Xvfb, not by an
