@@ -53,6 +53,7 @@
 #include <bcrypt.h>
 #include <objbase.h>
 #include <sddl.h>
+#include <shellapi.h>
 
 #include <ctype.h>
 #include <inttypes.h>
@@ -3622,11 +3623,34 @@ static bool prepare(struct Options * options)
   return true;
 }
 
+// the command line as UTF-8, which is what everything here takes and widen()
+// turns to UTF-16: the arguments of main are in the ANSI code page, so a name
+// with an accent would reach widen() as bytes that are not UTF-8, and the
+// disk or the command would not be found
+static char ** utf8Args(int * argc)
+{
+  int count = 0;
+  WCHAR ** wide = CommandLineToArgvW(GetCommandLineW(), &count);
+  if (!wide)
+    fail("Cannot read the command line");
+
+  char ** args = calloc((size_t)count + 1, sizeof(*args));
+  if (!args)
+    fail("Out of memory");
+  for(int i = 0; i < count; ++i)
+    args[i] = narrow(wide[i]);
+
+  LocalFree(wide);
+  *argc = count;
+  return args;
+}
+
 int main(int argc, char ** argv)
 {
   // progress shows as it happens, also through a pipe
   setvbuf(stdout, NULL, _IONBF, 0);
 
+  argv = utf8Args(&argc);
   struct Options options;
   parseOptions(argc, argv, &options);
 

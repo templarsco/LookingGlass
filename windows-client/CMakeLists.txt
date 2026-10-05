@@ -133,6 +133,7 @@ if(WIN32)
       advapi32
       bcrypt
       ole32
+      shell32
     )
     set_target_properties(lg-windows-client-hcs-probe PROPERTIES
       LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
