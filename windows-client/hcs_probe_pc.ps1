@@ -439,6 +439,10 @@ try {
   }
   $probeArgs = @('--windows-disk', $disk, '--size-mib', '128', '--client',
     $client, '--out', "$results\probe")
+  if ($Watch) {
+    # a window that is left open is how this ends, and not a failure
+    $probeArgs += '--watch'
+  }
   if ($chosen) {
     $probeArgs += '--gpu', $chosen.Name
   }

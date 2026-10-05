@@ -875,6 +875,10 @@ struct Options
   // with it, a command that reads frames from the Looking Glass IDD
   char     client[4096];
 
+  // the command is for looking at the guest, so it is not a test: it passes
+  // if it was still running when its time was up
+  bool     watch;
+
   // and a partition of this PC's GPU for the guest, by its device
   // interface, as Get-VMHostPartitionableGpu names it
   char     gpu[2048];
@@ -2881,7 +2885,7 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
 
   printf("  Running the client command, its output goes to %s\n", logPath);
   const DWORD begin = GetTickCount();
-  bool gaveUp = false;
+  bool gaveUp = false, timedOut = false;
   char reply[512];
   while (WaitForSingleObject(pi.hProcess, 200) == WAIT_TIMEOUT)
   {
@@ -2891,8 +2895,8 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
     if (GetTickCount() - vm->lastPoll > 500)
       vmPollState(vm);
 
-    if (aborted || vm->stopped ||
-        GetTickCount() - begin > CLIENT_TIMEOUT_MS)
+    timedOut = GetTickCount() - begin > CLIENT_TIMEOUT_MS;
+    if (aborted || vm->stopped || timedOut)
     {
       if (job)
         TerminateJobObject(job, 1);
@@ -2913,11 +2917,18 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
   if (job)
     CloseHandle(job);
 
+  // a command that is for looking runs until it is closed, and its time being
+  // up with the VM still running is how it was meant to end
+  const bool watched = vm->options->watch && timedOut && !aborted &&
+    !vm->stopped;
   jsonNumber(report, "client_exit", code);
   jsonBool(report, "client_stopped", gaveUp);
-  printf("  The client command %s (exit %lu)\n", gaveUp ?
-      "was stopped" : code == 0 ? "passed" : "failed", (unsigned long)code);
-  return !gaveUp && code == 0;
+  jsonBool(report, "client_watched", watched);
+  printf("  The client command %s (exit %lu)\n", watched ?
+      "ran until its time was up, as one for watching does" :
+      gaveUp ? "was stopped" : code == 0 ? "passed" : "failed",
+      (unsigned long)code);
+  return watched || (!gaveUp && code == 0);
 }
 
 // with --client: the guest installs the Looking Glass IDD, which serves the
@@ -3481,7 +3492,11 @@ static void usage(void)
     "                  IDD from the disk in the guest and run COMMAND here,\n"
     "                  with {section} replaced by the shared memory's name,\n"
     "                  such as the client reading the guest's frames. It\n"
-    "                  passes if COMMAND exits with 0.\n"
+    "                  passes if COMMAND exits with 0, and it is ended after\n"
+    "                  ten minutes.\n"
+    "  --watch         with --client, COMMAND is for looking at the guest and\n"
+    "                  not a test: it also passes if it is still running when\n"
+    "                  its ten minutes are up.\n"
     "  --gpu INTERFACE\n"
     "                  with --windows-disk or --hcl, also give the VMs a\n"
     "                  partition of this GPU (GPU-PV), by the Name that\n"
@@ -3538,6 +3553,11 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
     if (strcmp(arg, "--allow-foreign-disk") == 0)
     {
       options->foreignDisk = true;
+      continue;
+    }
+    if (strcmp(arg, "--watch") == 0)
+    {
+      options->watch = true;
       continue;
     }
 
@@ -3658,6 +3678,9 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
   }
   else if (options->client[0])
     fail("--client goes with --windows-disk");
+
+  if (options->watch && !options->client[0])
+    fail("--watch goes with --client");
 
   // the paravisor's VMs boot nothing of the probe's
   if (options->hcl[0])
