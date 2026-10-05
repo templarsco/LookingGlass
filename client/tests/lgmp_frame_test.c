@@ -27,12 +27,13 @@
 
 #include <lgmp/host.h>
 
+#include "shm_test.h"
+
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <unistd.h>
 
 #define TEST_SHM_SIZE       (2U * 1024U * 1024U)
@@ -53,10 +54,7 @@ TestFrame;
 
 typedef struct TestState
 {
-  int                 fd;
-  char                path[64];
-  bool                pathExists;
-  void              * hostMemory;
+  struct TestShm      shm;
   PLGMPHost           host;
   PLGMPHostQueue      queues[TEST_FRAME_QUEUES];
   PLGMPMemory         allocations[TEST_MAX_ALLOCS];
@@ -535,25 +533,14 @@ static bool testDMAUnavailable(TestState * state)
 static bool stateInit(TestState * state)
 {
   memset(state, 0, sizeof(*state));
-  state->fd         = -1;
-  state->hostMemory = MAP_FAILED;
-  memcpy(state->path, "/tmp/lgmp-frame-test-XXXXXX",
-      sizeof("/tmp/lgmp-frame-test-XXXXXX"));
-
-  state->fd = mkstemp(state->path);
-  CHECK(state->fd >= 0);
-  state->pathExists = true;
-  CHECK(ftruncate(state->fd, TEST_SHM_SIZE) == 0);
-  state->hostMemory = mmap(NULL, TEST_SHM_SIZE,
-      PROT_READ | PROT_WRITE, MAP_SHARED, state->fd, 0);
-  CHECK(state->hostMemory != MAP_FAILED);
+  CHECK(testShm_create(&state->shm, "lgmp-frame-test", TEST_SHM_SIZE));
 
   KVMFR session = { 0 };
   memcpy(session.magic, KVMFR_MAGIC, sizeof(session.magic));
   session.version  = KVMFR_VERSION;
   session.features = KVMFR_FEATURE_FRAME_SCHEDULE;
   memcpy(session.hostver, "frame-test", sizeof("frame-test"));
-  CHECK(lgmpHostInit(state->hostMemory, TEST_SHM_SIZE, &state->host,
+  CHECK(lgmpHostInit(state->shm.memory, TEST_SHM_SIZE, &state->host,
         sizeof(session), (uint8_t *)&session) == LGMP_OK);
 
   for (unsigned i = 0; i < TEST_FRAME_QUEUES; ++i)
@@ -568,14 +555,13 @@ static bool stateInit(TestState * state)
   }
 
   LGT_LGMP.setup();
-  option_set_string("lgmp", "shmDevice", state->path);
+  option_set_string("lgmp", "shmDevice", state->shm.device);
   option_set_bool("lgmp", "allowDMA", true);
   option_set_int("lgmp", "framePollInterval", 0);
   option_set_int("lgmp", "cursorPollInterval", 0);
   CHECK(LGT_LGMP.create(&state->transport));
 
-  CHECK(unlink(state->path) == 0);
-  state->pathExists = false;
+  CHECK(testShm_unname(&state->shm));
   usleep(300000);
   CHECK(lgmpHostProcess(state->host) == LGMP_OK);
 
@@ -598,12 +584,7 @@ static void stateFree(TestState * state)
   for (unsigned i = 0; i < state->allocationCount; ++i)
     lgmpHostMemFree(&state->allocations[i]);
   lgmpHostFree(&state->host);
-  if (state->hostMemory != MAP_FAILED)
-    munmap(state->hostMemory, TEST_SHM_SIZE);
-  if (state->fd >= 0)
-    close(state->fd);
-  if (state->pathExists)
-    unlink(state->path);
+  testShm_destroy(&state->shm);
 }
 
 typedef bool (*TestFn)(TestState * state);
