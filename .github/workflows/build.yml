@@ -758,15 +758,20 @@ jobs:
           mingw-w64-x86_64-gcc
           mingw-w64-x86_64-mesa
           mingw-w64-x86_64-python
-    - name: Configure Windows client with test capture
+    - name: Configure Windows client with test capture and unit tests
       run: |
         mkdir client/build
         cd client/build
-        cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DOPTIMIZE_FOR_NATIVE=OFF ..
+        cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DENABLE_UNIT_TESTS=ON \
+          -DOPTIMIZE_FOR_NATIVE=OFF ..
     - name: Build Windows client
       run: |
         cd client/build
         make -j$(nproc)
+    - name: Run the client's unit tests
+      run: |
+        cd client/build
+        ctest --output-on-failure -j$(nproc)
     - name: Build the test frame producer
       run: |
         mkdir windows-client/build
@@ -794,7 +799,9 @@ jobs:
       uses: actions/upload-artifact@v6
       with:
         name: windows-client-smoke
-        path: smoke/
+        path: |
+          smoke/
+          client/build/Testing/
 
   idd:
     runs-on: windows-2022

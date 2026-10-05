@@ -58,6 +58,16 @@ if(ENABLE_TESTS)
   add_definitions(-D ENABLE_TESTS)
 endif()
 
+# ENABLE_TESTS builds the unit tests on Linux. On Windows it adds the
+# framebuffer capture to the test transport, which the packaged client needs
+# too, so the unit tests are a separate choice there.
+option(ENABLE_UNIT_TESTS "Build the unit tests on Windows too" OFF)
+add_feature_info(ENABLE_UNIT_TESTS ENABLE_UNIT_TESTS
+  "Client unit tests on Windows, with ENABLE_TESTS.")
+if(ENABLE_UNIT_TESTS AND NOT ENABLE_TESTS)
+  message(FATAL_ERROR "ENABLE_UNIT_TESTS requires ENABLE_TESTS")
+endif()
+
 option(ENABLE_BACKTRACE "Enable backtrace support on crash" ON)
 add_feature_info(ENABLE_BACKTRACE ENABLE_BACKTRACE "Backtrace support.")
 
@@ -337,9 +347,7 @@ if(WIN32)
   )
 endif()
 
-# the unit tests are Linux only; Windows builds use ENABLE_TESTS for the
-# framebuffer capture support of the test transport
-if(ENABLE_TESTS AND NOT WIN32)
+if(ENABLE_TESTS AND (NOT WIN32 OR ENABLE_UNIT_TESTS))
   include(CTest)
   enable_testing()
   add_subdirectory(tests)
