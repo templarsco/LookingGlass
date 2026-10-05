@@ -1,5 +1,8 @@
 name: build
 on: [push, pull_request]
+# no job writes to the repository: the token only reads it
+permissions:
+  contents: read
 jobs:
   client:
     runs-on: ubuntu-latest
@@ -286,10 +289,14 @@ jobs:
         Set-ItemProperty $key -Name DumpType -Value 1 -Type DWord
         Set-ItemProperty $key -Name DumpCount -Value 8 -Type DWord
     - name: Check shared memory with Hyper-V VMs that boot WSL's kernel
+      env:
+        # through the environment, as a file name can hold what a step takes
+        # for an expression
+        KERNEL: ${{ steps.wsl-kernel.outputs.kernel }}
       run: |
         python windows-client\hcs_probe_smoke.py `
           windows-client\build\lg-windows-client-hcs-probe.exe `
-          --kernel "${{ steps.wsl-kernel.outputs.kernel }}" --output hcs-probe
+          --kernel $env:KERNEL --output hcs-probe
     - name: Check shared memory with a VM of Hyper-V Manager
       run: |
         # a disposable VM without a disk, which waits in its firmware
@@ -450,7 +457,7 @@ jobs:
     - name: Install MinGW-w64, CMake and Mesa with MSYS2
       if: matrix.idd
       id: msys2
-      uses: msys2/setup-msys2@v2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
       with:
         msystem: MINGW64
         update: true
@@ -543,6 +550,9 @@ jobs:
       shell: powershell
       env:
         IDD: ${{ matrix.idd }}
+        # through the environment, as a file name in the archive can hold what
+        # a step takes for an expression
+        INF: ${{ steps.driver.outputs.inf }}
       run: |
         $idd = @{}
         if ($env:IDD -eq 'true') {
@@ -552,7 +562,7 @@ jobs:
           -Iso "$env:RUNNER_TEMP\windows.iso" `
           -Disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
           -Tool windows-client\build\lg-hyperv-ivshmem.exe `
-          -Inf "${{ steps.driver.outputs.inf }}" @idd
+          -Inf $env:INF @idd
         Remove-Item "$env:RUNNER_TEMP\windows.iso"
     - name: Check the IVSHMEM driver over shared memory in a Windows guest
       env:
@@ -676,7 +686,7 @@ jobs:
         path: ${{ runner.temp }}/lg-pc-test
     - name: Install Mesa with MSYS2
       id: msys2
-      uses: msys2/setup-msys2@v2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
       with:
         msystem: MINGW64
         update: true
@@ -754,7 +764,7 @@ jobs:
       with:
         submodules: recursive
     - name: Install MinGW-w64, CMake and Mesa with MSYS2
-      uses: msys2/setup-msys2@v2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
       with:
         msystem: MINGW64
         update: true
@@ -809,7 +819,7 @@ jobs:
       with:
         submodules: recursive
     - name: Add msbuild to PATH
-      uses: microsoft/setup-msbuild@v3
+      uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
       with:
         msbuild-architecture: x64
     - name: Install NuGet packages
