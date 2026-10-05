@@ -93,6 +93,7 @@ set(LGMP_INPUT_CASES
   restart
   pressure
   idle
+  disconnect
 )
 foreach(name IN LISTS LGMP_INPUT_CASES)
   add_test(NAME lgmp-input-${name}
