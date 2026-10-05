@@ -59,9 +59,32 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
+# whether a file of the guest's disk is there, and neither it nor a folder
+# above it is a link: the guest could make one to a file of this PC, and what
+# is shown goes into a log that people send back
+function Test-GuestFile([string] $path) {
+  $item = Get-Item -LiteralPath $path -Force -ErrorAction Ignore
+  if (-not $item) {
+    return $false
+  }
+  while ($item) {
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+      return $false
+    }
+    $item = if ($item -is [IO.DirectoryInfo]) { $item.Parent } else {
+      $item.Directory
+    }
+  }
+  return $true
+}
+
 function Show-Logs {
-  $number = (Mount-VHD -Path $Disk -Passthru | Get-Disk).Number
+  # not read only: the guest's last writes are in the file system's log, which
+  # only a read-write mount replays. The VHD is attached before the try, but
+  # nothing that can fail is between them
+  $mounted = Mount-VHD -Path $Disk -Passthru
   try {
+    $number = ($mounted | Get-Disk).Number
     $partition = Get-Partition -DiskNumber $number |
       Sort-Object Size -Descending | Select-Object -First 1
     if (-not $partition.DriveLetter) {
@@ -77,8 +100,8 @@ function Show-Logs {
         "$w\lgprobe\lg-hyperv-ivshmem.log",
         "$w\Windows\Panther\setuperr.log") + $idd) {
       Write-Host "== $log"
-      if (Test-Path $log) {
-        Get-Content $log -Tail 200 | Write-Host
+      if (Test-GuestFile $log) {
+        Get-Content -LiteralPath $log -Tail 200 | Write-Host
       }
     }
 
@@ -86,7 +109,7 @@ function Show-Logs {
     # the IDD's devices, and about staging and installing the IDD's packages
     $devices = "$w\Windows\INF\setupapi.dev.log"
     Write-Host "== $devices"
-    if (Test-Path $devices) {
+    if (Test-GuestFile $devices) {
       foreach ($id in 'VEN_1AF4&DEV_1110', 'Root\LGIdd', 'Root\LGInput',
           'LGIdd.inf]', 'LGInput.inf]') {
         Select-String -Path $devices -Pattern $id -SimpleMatch `
@@ -112,7 +135,7 @@ function Show-Logs {
     foreach ($name in $names) {
       Write-Host "== $name"
       $path = "$events\$name.evtx"
-      if (-not (Test-Path $path)) {
+      if (-not (Test-GuestFile $path)) {
         continue
       }
       Get-WinEvent -Path $path -MaxEvents 80 -ErrorAction SilentlyContinue |
@@ -241,9 +264,17 @@ if ($ListGpuPackages) {
   exit 0
 }
 
-$Disk = [IO.Path]::GetFullPath($Disk)
+# before anything is mounted: this fails at the first disk call otherwise
+$principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  throw 'Run this in an elevated PowerShell, as it mounts disks'
+}
+
+# from the shell's folder, which an elevated shell does not start in, and not
+# as a pattern, which a path with brackets would be
+$Disk = $PSCmdlet.GetUnresolvedProviderPathFromPSPath($Disk)
 if ($Logs) {
-  if (Test-Path $Disk) {
+  if (Test-Path -LiteralPath $Disk) {
     Show-Logs
   } else {
     Write-Host "There is no $Disk"
@@ -251,21 +282,37 @@ if ($Logs) {
   exit 0
 }
 
-$Iso  = (Resolve-Path $Iso).Path
-$Tool = (Resolve-Path $Tool).Path
-$Inf  = (Resolve-Path $Inf).Path
+$Iso  = (Resolve-Path -LiteralPath $Iso).Path
+$Tool = (Resolve-Path -LiteralPath $Tool).Path
+$Inf  = (Resolve-Path -LiteralPath $Inf).Path
 if ($Idd) {
-  $Idd = (Resolve-Path $Idd).Path
+  $Idd = (Resolve-Path -LiteralPath $Idd).Path
 }
-if (Test-Path $Disk) {
+if (Test-Path -LiteralPath $Disk) {
   throw "$Disk exists already"
+}
+
+# the guest runs them by a command line that quotes nothing, and the driver's
+# folder goes to the guest as it is
+foreach ($leaf in (Split-Path $Tool -Leaf), (Split-Path $Inf -Leaf)) {
+  if ($leaf -notmatch '^[A-Za-z0-9._-]+$') {
+    throw "$leaf has a space or another character that is not a letter, " +
+      'a digit, a dot, an underscore or a hyphen'
+  }
+}
+if ([IO.Path]::GetPathRoot($Inf) -eq (Split-Path $Inf)) {
+  throw "$Inf is in the root of a drive: put the driver in a folder of its own"
 }
 $gpu = @()
 if ($GpuPv) {
   $gpu = @(Get-GpuPackages $GpuPv)
 }
 
+# an ISO that was mounted already is left mounted
+$isoWasMounted = (Get-DiskImage -ImagePath $Iso).Attached
 $image = Mount-DiskImage -ImagePath $Iso -PassThru
+$made  = $false
+$done  = $false
 try {
   $source = ($image | Get-Volume).DriveLetter + ':'
   $wim = "$source\sources\install.wim"
@@ -297,22 +344,43 @@ try {
 
   New-Item -ItemType Directory -Force (Split-Path $Disk) | Out-Null
   New-VHD -Path $Disk -SizeBytes ($SizeGB * 1GB) -Dynamic | Out-Null
-  $number = (Mount-VHD -Path $Disk -Passthru | Get-Disk).Number
+  $made = $true
+  $mounted = Mount-VHD -Path $Disk -Passthru
   try {
+    $number = ($mounted | Get-Disk).Number
+
+    # the number is only the number that the disk has now: a VHD that is
+    # detached hands it to another disk, and these calls format what they are
+    # given. So each one is for the VHD's disk, or it does not happen
+    function Assert-VhdDisk {
+      $vhd = Get-VHD -Path $Disk
+      if ($vhd.DiskNumber -ne $number) {
+        throw "Disk $number is not $Disk"
+      }
+      $disk = Get-Disk -Number $number
+      if ($disk.IsBoot -or $disk.IsSystem) {
+        throw "Disk $number is a boot or system disk of this PC, not $Disk"
+      }
+    }
+
+    Assert-VhdDisk
     Initialize-Disk -Number $number -PartitionStyle GPT
 
     # the EFI system partition, made as a data partition to format it and
     # retyped at the end, Microsoft's reserved partition unless initializing
     # the disk made one, and Windows'
+    Assert-VhdDisk
     $system = New-Partition -DiskNumber $number -Size 260MB -AssignDriveLetter
     Format-Volume -Partition $system -FileSystem FAT32 `
       -NewFileSystemLabel System -Confirm:$false | Out-Null
     $reserved = '{e3c9e316-0b5c-4db8-817d-f92df00215ae}'
+    Assert-VhdDisk
     if (-not (Get-Partition -DiskNumber $number |
         Where-Object GptType -eq $reserved)) {
       New-Partition -DiskNumber $number -Size 16MB -GptType $reserved |
         Out-Null
     }
+    Assert-VhdDisk
     $windows = New-Partition -DiskNumber $number -UseMaximumSize `
       -AssignDriveLetter
     Format-Volume -Partition $windows -FileSystem NTFS `
@@ -329,13 +397,26 @@ try {
     if ($LASTEXITCODE) {
       throw "dism /Apply-Image failed with $LASTEXITCODE"
     }
-    & bcdboot.exe "$w\Windows" /s $s /f UEFI | Write-Host
+    # bcdboot may also update the boot entries in the firmware of this PC for
+    # a UEFI disk, which this disk is not for: /nofirmwaresync keeps it to the
+    # files of the VHD's system partition
+    & bcdboot.exe "$w\Windows" /s $s /f UEFI /nofirmwaresync | Write-Host
     if ($LASTEXITCODE) {
       throw "bcdboot failed with $LASTEXITCODE"
     }
 
-    # the tool and the driver, in C:\lgprobe of the guest
+    # the tool and the driver, in C:\lgprobe of the guest. The guest runs the
+    # tool, and installs the drivers, as SYSTEM, and a folder made in the root
+    # of C: lets every user of the guest change what is in it, so only SYSTEM
+    # and the Administrators may. This is before anything is put in it, which
+    # is how the files get the same
     $dir = "$w\lgprobe"
+    New-Item -ItemType Directory $dir | Out-Null
+    & icacls.exe $dir /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' `
+      '*S-1-5-32-544:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE) {
+      throw "icacls failed with $LASTEXITCODE"
+    }
     New-Item -ItemType Directory "$dir\ivshmem" | Out-Null
     Copy-Item $Tool $dir
     Copy-Item "$(Split-Path $Inf)\*" "$dir\ivshmem" -Recurse
@@ -474,16 +555,23 @@ try {
 
     # the firmware boots from the EFI system partition. This changes a
     # partition's type, so first make sure that the disk is still the VHD's
-    if ((Get-VHD -Path $Disk).DiskNumber -ne $number) {
-      throw "Disk $number is not $Disk"
-    }
+    Assert-VhdDisk
     Set-Partition -DiskNumber $number -PartitionNumber $system.PartitionNumber `
       -GptType '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}'
+    $done = $true
   } finally {
     Dismount-VHD -Path $Disk
   }
 } finally {
-  Dismount-DiskImage -ImagePath $Iso | Out-Null
+  if (-not $isoWasMounted) {
+    Dismount-DiskImage -ImagePath $Iso | Out-Null
+  }
+
+  # a disk that was not finished is not a guest, and would be booted as one
+  # the next time. This made it, and it did not exist before
+  if ($made -and -not $done) {
+    Remove-Item -LiteralPath $Disk -Force -ErrorAction Ignore
+  }
 }
 
 Get-Item $Disk | Format-List FullName, Length | Out-String | Write-Host
