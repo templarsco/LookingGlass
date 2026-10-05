@@ -89,7 +89,7 @@ def run_client(args, capture, log):
     'win:noScreensaver=no',
     'opengl:mipmap=no',
     'opengl:vsync=no',
-    'opengl:amdPinnedMem=no',
+    f'opengl:amdPinnedMem={args.amd_pinned_mem}',
     'opengl:preventBuffer=yes',
   ] + args.client_args
 
@@ -153,6 +153,8 @@ def main():
       help='command that runs Windows programs, such as wine64')
   parser.add_argument('--output', help='keep the capture and log here')
   parser.add_argument('--timeout', type=float, default=60)
+  parser.add_argument('--amd-pinned-mem', choices=('yes', 'no'), default='yes',
+      help='exercise the default pinned-memory path when the GPU supports it')
   parser.add_argument('client_args', nargs='*',
       help='extra client options, after --')
   args = parser.parse_args()
