@@ -794,6 +794,11 @@ jobs:
         GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
           --producer windows-client/build/lg-windows-client-producer.exe \
           --world --output smoke/world client/build/looking-glass-client.exe
+    - name: Run the client paced by the display
+      run: |
+        # the runner has no display to pace by, so this only checks the run
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_pacing_test.py \
+          --seconds 3 --output pacing client/build/looking-glass-client.exe
     - name: Upload Windows client smoke test output
       if: failure()
       uses: actions/upload-artifact@v6
@@ -802,6 +807,7 @@ jobs:
         path: |
           smoke/
           client/build/Testing/
+          pacing/
 
   idd:
     runs-on: windows-2022
