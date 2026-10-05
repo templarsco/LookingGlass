@@ -2646,6 +2646,73 @@ static void hclGuestStateDone(const char * id, const char * vmgs,
 #define IDD_TIMEOUT_MS    360000
 #define CLIENT_TIMEOUT_MS 600000
 
+// starts --client's command with its output going to log, in a job that ends
+// every process that the command started, and the command itself, when the
+// job is closed or ended. The command is often a shell or python, and the
+// client is its child, which ending the command alone leaves running, with
+// its window and the shared memory. It is suspended until it is in the job,
+// so that it cannot start anything first. Without a job, the command is
+// started as it would be, and ended alone.
+static bool startContained(WCHAR * command, HANDLE log,
+    PROCESS_INFORMATION * pi, HANDLE * job, DWORD * error)
+{
+  *job = CreateJobObjectW(NULL, NULL);
+  if (*job)
+  {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = { 0 };
+    limits.BasicLimitInformation.LimitFlags =
+      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(*job, JobObjectExtendedLimitInformation,
+          &limits, sizeof(limits)))
+    {
+      CloseHandle(*job);
+      *job = NULL;
+    }
+  }
+
+  // the log is the only handle that the command inherits, and not every
+  // handle of the probe that can be inherited, such as a VM's serial log
+  SIZE_T listSize = 0;
+  InitializeProcThreadAttributeList(NULL, 1, 0, &listSize);
+  LPPROC_THREAD_ATTRIBUTE_LIST list = malloc(listSize);
+  if (!list || !InitializeProcThreadAttributeList(list, 1, 0, &listSize))
+  {
+    *error = GetLastError();
+    free(list);
+    return false;
+  }
+
+  bool started = false;
+  HANDLE inherit[1] = { log };
+  if (UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        inherit, sizeof(inherit), NULL, NULL))
+  {
+    STARTUPINFOEXW si = { 0 };
+    si.StartupInfo.cb         = sizeof(si);
+    si.StartupInfo.dwFlags    = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdOutput = log;
+    si.StartupInfo.hStdError  = log;
+    si.lpAttributeList        = list;
+
+    started = CreateProcessW(NULL, command, NULL, NULL, TRUE,
+        CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+        &si.StartupInfo, pi);
+  }
+  *error = GetLastError();
+  DeleteProcThreadAttributeList(list);
+  free(list);
+  if (!started)
+    return false;
+
+  if (*job && !AssignProcessToJobObject(*job, pi->hProcess))
+  {
+    CloseHandle(*job);
+    *job = NULL;
+  }
+  ResumeThread(pi->hThread);
+  return true;
+}
+
 // runs --client's command with {section} replaced by the section's name,
 // while the guest's lines keep going to its log; true if it exits with 0
 static bool clientCommand(struct Vm * vm, const struct Section * section,
@@ -2668,23 +2735,21 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
   char logPath[MAX_PATH * 3];
   outPath(vm->options, "client-command.log", logPath, sizeof(logPath));
   SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-  HANDLE log = CreateFileA(logPath, GENERIC_WRITE, FILE_SHARE_READ, &sa,
+  WCHAR * wlog = widen(logPath);
+  HANDLE log = CreateFileW(wlog, GENERIC_WRITE, FILE_SHARE_READ, &sa,
       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  free(wlog);
 
-  STARTUPINFOA si =
-  {
-    .cb         = sizeof(si),
-    .dwFlags    = STARTF_USESTDHANDLES,
-    .hStdOutput = log,
-    .hStdError  = log
-  };
+  // the command line goes in a buffer that CreateProcessW may write to
+  WCHAR * wcommand = widen(command.data);
   PROCESS_INFORMATION pi;
+  HANDLE job = NULL;
+  DWORD error = GetLastError();
   const bool started = log != INVALID_HANDLE_VALUE &&
-    CreateProcessA(NULL, command.data, NULL, NULL, TRUE, 0, NULL, NULL, &si,
-        &pi);
-  const DWORD error = GetLastError();
+    startContained(wcommand, log, &pi, &job, &error);
   if (log != INVALID_HANDLE_VALUE)
     CloseHandle(log);
+  free(wcommand);
   free(command.data);
   if (!started)
   {
@@ -2708,7 +2773,10 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
     if (aborted || vm->stopped ||
         GetTickCount() - begin > CLIENT_TIMEOUT_MS)
     {
-      TerminateProcess(pi.hProcess, 1);
+      if (job)
+        TerminateJobObject(job, 1);
+      else
+        TerminateProcess(pi.hProcess, 1);
       WaitForSingleObject(pi.hProcess, 10000);
       gaveUp = true;
       break;
@@ -2719,6 +2787,10 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
   GetExitCodeProcess(pi.hProcess, &code);
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
+
+  // anything that the command left running goes with the job
+  if (job)
+    CloseHandle(job);
 
   jsonNumber(report, "client_exit", code);
   jsonBool(report, "client_stopped", gaveUp);
