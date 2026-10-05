@@ -772,6 +772,39 @@ foreach(name IN LISTS FRAME_SCHEDULER_CASES)
   )
 endforeach()
 
+add_executable(vblank-tests
+  vblank_test.c
+  ../displayservers/Win32/vblank.c
+)
+target_include_directories(vblank-tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../displayservers/Win32"
+)
+target_link_libraries(vblank-tests
+  ${EXE_FLAGS}
+  lg_common
+)
+set(VBLANK_CASES
+  cadence
+  coalesce
+  interrupt
+  period
+  reset
+  fallback
+  clock
+  submit
+  stall
+  blocked
+  destroy
+)
+foreach(name IN LISTS VBLANK_CASES)
+  add_test(NAME vblank-${name}
+    COMMAND vblank-tests ${name}
+  )
+  set_tests_properties(vblank-${name} PROPERTIES
+    TIMEOUT 30
+  )
+endforeach()
+
 add_executable(frame-timing-tests
   frame_timing_test.c
 )
