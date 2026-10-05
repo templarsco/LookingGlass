@@ -320,6 +320,11 @@ struct Json
   struct Str s;
   int        depth;
   bool       first[16];
+  char       bracket[16];  // how each open scope began
+
+  // told when an array or object of the first few levels is closed, which is
+  // when a case or an attempt has finished
+  void       (*checkpoint)(struct Json *);
 };
 
 static void jsonMember(struct Json * j, const char * key)
@@ -340,12 +345,17 @@ static void jsonOpen(struct Json * j, const char * key, char bracket)
     jsonMember(j, key);
   strAdd(&j->s, &bracket, 1);
   j->first[++j->depth] = true;
+  j->bracket[j->depth] = bracket;
 }
 
 static void jsonClose(struct Json * j, char bracket)
 {
   strAdd(&j->s, &bracket, 1);
   --j->depth;
+
+  // the report, the cases, a case, its attempts, an attempt
+  if (j->checkpoint && j->depth >= 1 && j->depth <= 4)
+    j->checkpoint(j);
 }
 
 static void jsonString(struct Json * j, const char * key, const char * value)
@@ -384,6 +394,22 @@ static void jsonRaw(struct Json * j, const char * key, const char * value)
     strAdd(&j->s, value, strlen(value));
   else
     strAdd(&j->s, "null", 4);
+}
+
+// the report as it stands, as a document of its own: the scopes that are open
+// are closed in a copy, and the root says that it is not complete
+static void jsonSnapshot(const struct Json * j, struct Str * out)
+{
+  if (j->s.len)
+    strAdd(out, j->s.data, j->s.len);
+  for(int d = j->depth; d >= 1; --d)
+  {
+    if (d == 1)
+      strLiteral(out, ",\"complete\":false");
+    const char close = j->bracket[d] == '[' ? ']' : '}';
+    strAdd(out, &close, 1);
+  }
+  strAdd(out, "\n", 1);
 }
 
 static WCHAR * widen(const char * text)
@@ -883,6 +909,50 @@ static void outPath(const struct Options * options, const char * name,
     fail("The output folder's path is too long");
 }
 
+// writes the report where it goes, whole or not at all: to a file next to it,
+// which then replaces it
+static bool reportWrite(const struct Options * options, const char * data,
+    size_t size)
+{
+  char path[MAX_PATH * 3], temp[MAX_PATH * 3 + 8];
+  outPath(options, "report.json", path, sizeof(path));
+  snprintf(temp, sizeof(temp), "%s.tmp", path);
+  if (!writeFile(temp, data, size))
+    return false;
+
+  WCHAR * wtemp = widen(temp);
+  WCHAR * wpath = widen(path);
+  const BOOL moved = MoveFileExW(wtemp, wpath, MOVEFILE_REPLACE_EXISTING);
+  free(wtemp);
+  free(wpath);
+  return moved;
+}
+
+// a copy of the report is written as the probe goes, so that a run that is
+// cut short, as a close of the console or a crash does, still has what it
+// found out: a PC test can take an hour
+static const struct Options * reportOptions;
+
+static void reportCheckpoint(struct Json * report)
+{
+  struct Str doc = { 0 };
+  jsonSnapshot(report, &doc);
+  reportWrite(reportOptions, doc.data, doc.len);
+  free(doc.data);
+}
+
+// what the HCS says about a VM, such as why it stopped. It says it on its own
+// threads, which may still have an event on the way when the VM is closed, so
+// it goes in memory that the VM does not own: a few hundred bytes for each VM
+// that are never given back, and that nothing can write into after they are
+// freed
+#define VM_EVENTS 8
+struct VmEvents
+{
+  char        * text[VM_EVENTS];
+  volatile LONG count;
+};
+
 // one disposable VM and the guest on its serial port
 struct Vm
 {
@@ -916,9 +986,7 @@ struct Vm
   // the Windows guest's firmware without its disk and console, for --hcl
   bool        bare;
 
-  // what the HCS said about the VM, such as why it stopped
-  char        * events[8];
-  volatile LONG eventCount;
+  struct VmEvents * events;
 };
 
 static void vmPollState(struct Vm * vm)
@@ -1282,9 +1350,9 @@ static void vmAccess(struct Vm * vm, bool grant, struct Json * report)
 // threads until the VM is closed
 static void CALLBACK vmEvent(HCS_EVENT * event, void * context)
 {
-  struct Vm * vm = context;
-  const LONG slot = InterlockedIncrement(&vm->eventCount) - 1;
-  if (slot >= (LONG)(sizeof(vm->events) / sizeof(vm->events[0])))
+  struct VmEvents * events = context;
+  const LONG slot = InterlockedIncrement(&events->count) - 1;
+  if (slot >= VM_EVENTS)
     return;
 
   const char * name =
@@ -1300,7 +1368,9 @@ static void CALLBACK vmEvent(HCS_EVENT * event, void * context)
   strPrintf(&text, "%s (0x%08lx): %s", name, (unsigned long)event->Type,
       data ? data : "");
   free(data);
-  vm->events[slot] = text.data;
+
+  // published once it is whole, for whoever reads the slot
+  InterlockedExchangePointer((PVOID volatile *)&events->text[slot], text.data);
 }
 
 static bool vmCreate(struct Vm * vm, const char * config,
@@ -1322,9 +1392,12 @@ static bool vmCreate(struct Vm * vm, const char * config,
   }
   free(doc);
 
+  vm->events = calloc(1, sizeof(*vm->events));
+  if (!vm->events)
+    fail("Out of memory");
   if (api.setComputeSystemCallback)
     jsonResult(report, "event_callback", api.setComputeSystemCallback(
-          vm->system, 0, vm, vmEvent));
+          vm->system, 0, vm->events, vmEvent));
   vmAccess(vm, true, report);
 
   WCHAR * wlog = widen(logPath);
@@ -1418,15 +1491,19 @@ static void vmDestroy(struct Vm * vm, struct Json * report)
     vmAccess(vm, false, report);
   }
 
-  // no event arrives once the VM is closed
-  const LONG events = min(vm->eventCount,
-      (LONG)(sizeof(vm->events) / sizeof(vm->events[0])));
+  // what the HCS has said so far. An event that is still on its way finds its
+  // slot in memory that is not freed, and is not in the report
   jsonOpen(report, "hcs_events", '[');
-  for(LONG i = 0; i < events; ++i)
+  if (vm->events)
   {
-    jsonString(report, NULL, vm->events[i]);
-    free(vm->events[i]);
-    vm->events[i] = NULL;
+    const LONG count = min(vm->events->count, (LONG)VM_EVENTS);
+    for(LONG i = 0; i < count; ++i)
+    {
+      char * text = InterlockedExchangePointer(
+          (PVOID volatile *)&vm->events->text[i], NULL);
+      jsonString(report, NULL, text);
+      free(text);
+    }
   }
   jsonClose(report, ']');
 
@@ -3349,9 +3426,19 @@ static unsigned newestSchema(const char * doc)
   return newest;
 }
 
+// set when the probe has torn its VMs down and written its report
+static HANDLE finished;
+
 static BOOL WINAPI onConsoleCtrl(DWORD type)
 {
   InterlockedExchange(&aborted, 1);
+
+  // Windows ends the process when this returns, after five seconds for a
+  // close of the console, and for a logoff or a shutdown. The VMs, and what
+  // was added to the disk's DACL, are cleaned up and the report is written by
+  // the probe's own thread, which sees aborted, and gets this long to do it
+  if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT && finished)
+    WaitForSingleObject(finished, 4000);
   return TRUE;
 }
 
@@ -3781,6 +3868,7 @@ int main(int argc, char ** argv)
   if (!loadHcs() || !prepare(&options))
     return 2;
 
+  finished = CreateEventW(NULL, TRUE, FALSE, NULL);
   SetConsoleCtrlHandler(onConsoleCtrl, TRUE);
 
   char version[32];
@@ -3797,6 +3885,8 @@ int main(int argc, char ** argv)
 
   struct Json report = { 0 };
   jsonOpen(&report, NULL, '{');
+  reportOptions     = &options;
+  report.checkpoint = reportCheckpoint;
   jsonString(&report, "probe", "lg-windows-client-hcs-probe");
   jsonNumber(&report, "report_version", 1);
   jsonString(&report, "windows", version);
@@ -3852,12 +3942,13 @@ int main(int argc, char ** argv)
   free(systems);
   jsonClose(&report, ']');
   jsonBool(&report, "aborted", aborted);
+  jsonBool(&report, "complete", true);
   jsonClose(&report, '}');
   strAdd(&report.s, "\n", 1);
 
   char reportPath[MAX_PATH * 3];
   outPath(&options, "report.json", reportPath, sizeof(reportPath));
-  if (!writeFile(reportPath, report.s.data, report.s.len))
+  if (!reportWrite(&options, report.s.data, report.s.len))
     printf("Cannot write %s\n", reportPath);
   free(report.s.data);
 
@@ -3879,9 +3970,10 @@ int main(int argc, char ** argv)
         "%s\n", hclPassed ? "a VM with them ran" : "no VM with them ran");
   printf("Report: %s\n", reportPath);
 
-  if (aborted)
-    return 1;
-  return (!options.hdv || hdvPassed) && (!options.shm || shmPassed) &&
-    (!options.vm[0] || vmPassed) &&
+  const int status = !aborted && (!options.hdv || hdvPassed) &&
+    (!options.shm || shmPassed) && (!options.vm[0] || vmPassed) &&
     (!options.windowsDisk[0] || windowsPassed) ? 0 : 1;
+  if (finished)
+    SetEvent(finished);
+  return status;
 }
