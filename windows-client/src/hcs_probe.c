@@ -47,6 +47,8 @@
  * region, and only reports what the HCS does with them.
  */
 
+#include "hcs_systems.h"
+
 #include <windows.h>
 #include <bcrypt.h>
 #include <objbase.h>
@@ -3587,11 +3589,16 @@ int main(int argc, char ** argv)
       options.windowsDisk : NULL);
   jsonNumber(&report, "shared_memory_size", options.size);
 
-  // what the HCS runs already, such as WSL or VMs of Hyper-V Manager
+  // what the HCS runs already, such as WSL or VMs of Hyper-V Manager. The
+  // report goes to whoever the person who ran the probe sends it to, so it
+  // has how many there are and their type, owner and state, and not the ids
+  // and names that identify the PC's own VMs
   char * systems = NULL;
   const HRESULT hr = hcsEnumerate(&systems);
   jsonResult(&report, "enumerate", hr);
-  jsonRaw(&report, "compute_systems", SUCCEEDED(hr) ? systems : NULL);
+  char * systemsSummary = SUCCEEDED(hr) ? hcsSystemsSummary(systems) : NULL;
+  jsonRaw(&report, "compute_systems", systemsSummary);
+  free(systemsSummary);
 
   // the configuration schemas the HCS supports
   options.schemaMinor = SCHEMA_MINOR;

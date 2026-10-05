@@ -168,8 +168,9 @@ It writes `report.json`, the VMs' serial logs, and the copies of the kernel
 and the initrd that the VMs boot to a new folder next to itself.
 `--only hdv` or `--only shm` runs one case, `--kernel` boots another x86_64
 kernel with Hyper-V PCI support, and `--size-mib` sets the size of the
-memory, 32 MiB by default. The report also lists the compute systems the
-HCS already knows, such as WSL.
+memory, 32 MiB by default. The report also counts the compute systems the
+HCS already knows, such as WSL, with the type, owner and state of each, and
+none of their names or IDs, which identify the VMs of the PC.
 
 `--vm ID` checks an existing VM instead, such as one of Hyper-V Manager, by
 its ID (`(Get-VM NAME).Id`): whether the HCS opens it and creates a device
