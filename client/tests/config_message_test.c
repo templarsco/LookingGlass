@@ -94,8 +94,11 @@ LG_RendererOps * LG_Renderers[] =
 
 bool lgTransport_isValid(const char * name)
 {
+  // a build with ENABLE_TESTS has the test transport, which is the default
+  // on Windows
   return name &&
-    (strcmp(name, "lgmp") == 0 || strcmp(name, "spice") == 0);
+    (strcmp(name, "lgmp") == 0 || strcmp(name, "spice") == 0 ||
+     strcmp(name, "test") == 0);
 }
 
 int clock_gettime(clockid_t id, struct timespec * ts)
@@ -341,11 +344,15 @@ static void testCfgValues(void)
   checkStr(resampler->toString(resampler), "backend");
   CHECK(!resampler->parser(resampler, "linear"));
 
-  struct Option * renderer = opt("app", "renderer");
-  CHECK(renderer->parser(renderer, "OpenGL"));
+  // the last renderer that the build has, which is OpenGL when it has both
+  // of the test's, and the only one that a build without EGL, as Windows, has
+  const unsigned    last         = LG_RENDERER_COUNT - 1;
+  const char      * lastRenderer = LG_Renderers[last]->getName();
+  struct Option   * renderer     = opt("app", "renderer");
+  CHECK(renderer->parser(renderer, lastRenderer));
   CHECK(g_params.forceRenderer);
-  CHECK(g_params.forceRendererIndex == 1);
-  checkStr(renderer->toString(renderer), "OpenGL");
+  CHECK(g_params.forceRendererIndex == last);
+  checkStr(renderer->toString(renderer), lastRenderer);
   CHECK(renderer->parser(renderer, "auto"));
   CHECK(!g_params.forceRenderer);
   checkStr(renderer->toString(renderer), "auto");
@@ -392,7 +399,12 @@ static void testCfgSize(void)
 
 static void loadCfg(const char * text)
 {
+#ifdef _WIN32
+  // there is no /tmp, the tests run in their own directory
+  char path[] = "./lg-config-test-XXXXXX";
+#else
   char path[] = "/tmp/lg-config-test-XXXXXX";
+#endif
   const int fd = mkstemp(path);
   CHECK(fd >= 0);
   const size_t size = strlen(text);
