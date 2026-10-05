@@ -310,7 +310,8 @@ jobs:
           foreach ($mib in 32, 1024) {
             python windows-client\hcs_probe_smoke.py `
               windows-client\build\lg-windows-client-hcs-probe.exe `
-              --vm $vm.Id --size-mib $mib --output hcs-probe-vm-$mib
+              --vm $vm.Id --allow-foreign-vm --size-mib $mib `
+              --output hcs-probe-vm-$mib
             if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
           }
         } finally {

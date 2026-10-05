@@ -33,8 +33,10 @@ Looking Glass IDD's package goes next to it too, for the probe's --client.
 With -GpuPv, the driver packages of that GPU of this PC, by the Name that
 Get-VMHostPartitionableGpu shows, go to the guest's HostDriverStore, from
 where a guest with a partition of the GPU loads the GPU's driver, for the
-probe's --gpu. lg-windows-client-hcs-probe --windows-disk boots the disk.
-Nothing on this PC changes but the new disk. With -Logs, shows the
+probe's --gpu. lg-windows-client-hcs-probe --windows-disk boots the disk,
+which it does only for one that has the file that the script writes next to
+it, DISK.lgprobe, when it has finished it.
+Nothing on this PC changes but the new disk and that file. With -Logs, shows the
 tool's log, the driver's installation and Windows' device events from the
 disk once the guest is off. With -ListGpuPackages, only shows the driver
 packages that -GpuPv would copy. Run this elevated on Windows with
@@ -574,4 +576,11 @@ try {
   }
 }
 
-Get-Item $Disk | Format-List FullName, Length | Out-String | Write-Host
+# says that this script made the disk and finished it, which the probe asks
+# before it boots a disk that its guest writes to
+Set-Content -LiteralPath "$Disk.lgprobe" -Encoding ASCII -Value @(
+  'made by hcs_probe_windows_disk.ps1',
+  "on $([DateTime]::UtcNow.ToString('o'))")
+
+Get-Item -LiteralPath $Disk | Format-List FullName, Length | Out-String |
+  Write-Host

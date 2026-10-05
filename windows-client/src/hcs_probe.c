@@ -836,11 +836,14 @@ struct Options
   DWORD    bootTimeoutMs;
   bool     hdv, shm;
 
-  // an existing VM to check instead
+  // an existing VM to check instead, which this probe did not make
   char     vm[40];
+  bool     foreignVm;
 
-  // a disk with Windows to boot instead
+  // a disk with Windows to boot instead, which the guest writes to. It is one
+  // that hcs_probe_windows_disk.ps1 made unless foreignDisk says otherwise
   char     windowsDisk[MAX_PATH * 3];
+  bool     foreignDisk;
 
   // with it, a command that reads frames from the Looking Glass IDD
   char     client[4096];
@@ -3259,12 +3262,16 @@ static void usage(void)
     "                  Manager, by its ID ((Get-VM NAME).Id): whether the\n"
     "                  HCS opens it and lets this PC add shared memory to\n"
     "                  it, which the probe removes again. The VM keeps\n"
-    "                  running.\n"
+    "                  running. This acts on a VM that the probe did not\n"
+    "                  make, so it also needs --allow-foreign-vm.\n"
     "  --windows-disk PATH\n"
     "                  boot a disposable Windows guest from this disk\n"
     "                  instead, which runs lg-hyperv-ivshmem on COM1, and\n"
     "                  check the IVSHMEM driver over a SharedMemory region.\n"
-    "                  The guest writes to the disk.\n"
+    "                  The guest writes to the disk, so it must be one that\n"
+    "                  hcs_probe_windows_disk.ps1 made, which writes PATH.lgprobe\n"
+    "                  when it has finished; --allow-foreign-disk boots any\n"
+    "                  other.\n"
     "  --client COMMAND\n"
     "                  with --windows-disk, then install the Looking Glass\n"
     "                  IDD from the disk in the guest and run COMMAND here,\n"
@@ -3288,6 +3295,17 @@ static void usage(void)
     "                  for the exit code.\n");
 }
 
+// a whole number, with nothing after it
+static bool parseWhole(const char * text, unsigned long * result)
+{
+  if (*text < '0' || *text > '9')
+    return false;
+
+  char * end;
+  *result = strtoul(text, &end, 10);
+  return !*end;
+}
+
 static void parseOptions(int argc, char ** argv, struct Options * options)
 {
   memset(options, 0, sizeof(*options));
@@ -3297,10 +3315,9 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
   options->shm           = true;
   bool only = false, timeout = false;
 
-  for(int i = 1; i < argc; i += 2)
+  for(int i = 1; i < argc; ++i)
   {
-    const char * arg   = argv[i];
-    const char * value = argv[i + 1];
+    const char * arg = argv[i];
 
     if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0)
     {
@@ -3308,6 +3325,20 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
       exit(0);
     }
 
+    // the options that take nothing
+    if (strcmp(arg, "--allow-foreign-vm") == 0)
+    {
+      options->foreignVm = true;
+      continue;
+    }
+    if (strcmp(arg, "--allow-foreign-disk") == 0)
+    {
+      options->foreignDisk = true;
+      continue;
+    }
+
+    // and the ones that take a value
+    const char * value = i + 1 < argc ? argv[++i] : NULL;
     if (!value)
     {
       usage();
@@ -3321,8 +3352,8 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
       snprintf(options->out, sizeof(options->out), "%s", value);
     else if (strcmp(arg, "--size-mib") == 0)
     {
-      const unsigned long mib = strtoul(value, NULL, 10);
-      if (!mib || mib > 1024 || (mib & (mib - 1)))
+      unsigned long mib;
+      if (!parseWhole(value, &mib) || !mib || mib > 1024 || (mib & (mib - 1)))
         fail("--size-mib takes a power of two up to 1024");
       options->size = (uint64_t)mib << 20;
     }
@@ -3378,8 +3409,8 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
     }
     else if (strcmp(arg, "--timeout") == 0)
     {
-      const unsigned long seconds = strtoul(value, NULL, 10);
-      if (!seconds || seconds > 3600)
+      unsigned long seconds;
+      if (!parseWhole(value, &seconds) || !seconds || seconds > 3600)
         fail("--timeout takes 1 to 3600 seconds");
       options->bootTimeoutMs = seconds * 1000;
       timeout = true;
@@ -3396,7 +3427,20 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
     if (only)
       fail("--vm and --only do not go together");
     options->hdv = options->shm = false;
+
+    // it opens a VM that something else made and runs, adds shared memory to
+    // it and takes it away, which is not for a VM that matters
+    if (!options->foreignVm)
+      fail("--vm acts on a VM that this probe did not make: it opens the VM, "
+          "adds shared memory to it and removes it again. Add "
+          "--allow-foreign-vm if that is what you want, on a VM that you can "
+          "afford to lose");
   }
+  else if (options->foreignVm)
+    fail("--allow-foreign-vm goes with --vm");
+
+  if (options->foreignDisk && !options->windowsDisk[0])
+    fail("--allow-foreign-disk goes with --windows-disk");
 
   if (options->windowsDisk[0])
   {
@@ -3446,6 +3490,21 @@ static bool prepare(struct Options * options)
     if (!disk || !fileExists(disk))
     {
       printf("The disk %s does not exist\n", options->windowsDisk);
+      free(disk);
+      return false;
+    }
+
+    // the guest writes to the disk, and the probe boots it as a VM of its
+    // own, so it must be one that hcs_probe_windows_disk.ps1 made, which says
+    // so in a file next to it when it has finished
+    char marker[MAX_PATH * 3 + 16];
+    snprintf(marker, sizeof(marker), "%s.lgprobe", disk);
+    if (!options->foreignDisk && !fileExists(marker))
+    {
+      printf("The disk %s was not made by hcs_probe_windows_disk.ps1, which "
+          "writes %s next to a disk when it has finished it. The guest "
+          "writes to the disk. Add --allow-foreign-disk to boot this one "
+          "anyway, if you can afford to lose it.\n", disk, marker);
       free(disk);
       return false;
     }
