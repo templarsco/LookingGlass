@@ -384,6 +384,8 @@ jobs:
 
   windows-client-guest:
     name: windows-client-guest (${{ matrix.windows }})
+    # the IDD's driver package, which the Windows 11 guest installs
+    needs: idd
     runs-on: windows-2025
     strategy:
       fail-fast: false
@@ -393,12 +395,43 @@ jobs:
           # and Windows 11 Enterprise LTSC, which is 24H2
           - windows: server
             iso: https://go.microsoft.com/fwlink/?linkid=2345730&clcid=0x409&culture=en-us&country=us
+          # whose Looking Glass IDD then serves its display over the shared
+          # memory to the client on the runner
           - windows: client
             iso: https://go.microsoft.com/fwlink/?linkid=2289029&clcid=0x409&culture=en-us&country=us
+            idd: true
     steps:
     - uses: actions/checkout@v5
       with:
         submodules: recursive
+    - name: Install MinGW-w64, CMake and Mesa with MSYS2
+      if: matrix.idd
+      id: msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          make
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-mesa
+    - name: Build the Windows client with test capture
+      if: matrix.idd
+      shell: msys2 {0}
+      run: |
+        mkdir client/build
+        cd client/build
+        cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DOPTIMIZE_FOR_NATIVE=OFF ..
+        make -j$(nproc)
+        # the runner has no GPU, so the client uses Mesa's software OpenGL
+        cp /mingw64/bin/opengl32.dll .
+    - name: Get the Looking Glass IDD's driver package
+      if: matrix.idd
+      uses: actions/download-artifact@v6
+      with:
+        name: idd-package
+        path: ${{ runner.temp }}/idd
     - name: Build the HCS probe and lg-hyperv-ivshmem
       run: |
         mkdir windows-client\build
@@ -459,19 +492,40 @@ jobs:
         Get-Item "$env:RUNNER_TEMP\windows.iso" | Format-List FullName, Length
     - name: Make a Windows disk that runs lg-hyperv-ivshmem on COM1
       shell: powershell
+      env:
+        IDD: ${{ matrix.idd }}
       run: |
+        $idd = @{}
+        if ($env:IDD -eq 'true') {
+          $idd.Idd = "$env:RUNNER_TEMP\idd"
+        }
         windows-client\hcs_probe_windows_disk.ps1 `
           -Iso "$env:RUNNER_TEMP\windows.iso" `
           -Disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
           -Tool windows-client\build\lg-hyperv-ivshmem.exe `
-          -Inf "${{ steps.driver.outputs.inf }}"
+          -Inf "${{ steps.driver.outputs.inf }}" @idd
         Remove-Item "$env:RUNNER_TEMP\windows.iso"
     - name: Check the IVSHMEM driver over shared memory in a Windows guest
+      env:
+        IDD: ${{ matrix.idd }}
+        MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
       run: |
-        python windows-client\hcs_probe_smoke.py `
+        $python = (Get-Command python).Source
+        $options = @()
+        if ($env:IDD -eq 'true') {
+          # then the guest installs the IDD and the client reads its frames,
+          # with MinGW-w64's and Mesa's DLLs, and Mesa's software OpenGL
+          $env:PATH = "$env:MSYS2_LOCATION\mingw64\bin;$env:PATH"
+          $env:GALLIUM_DRIVER = 'llvmpipe'
+          $options = '--size-mib', '128', '--client',
+            ("$python windows-client\client_smoke_test.py --section " +
+              '{section} --output hcs-probe-idd-client --timeout 240 ' +
+              'client\build\looking-glass-client.exe')
+        }
+        & $python windows-client\hcs_probe_smoke.py `
           windows-client\build\lg-windows-client-hcs-probe.exe `
           --windows-disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
-          --output hcs-probe-windows
+          --output hcs-probe-windows @options
     - name: Show the Hyper-V events from the Windows guest's VMs
       if: always()
       run: |
@@ -504,6 +558,8 @@ jobs:
         path: |
           hcs-probe-windows/report.json
           hcs-probe-windows/*.serial.log
+          hcs-probe-windows/client-command.log
+          hcs-probe-idd-client/
         if-no-files-found: ignore
 
   windows-client-display:
@@ -582,6 +638,17 @@ jobs:
       run: |
         cd idd
         msbuild.exe LGIdd.sln /t:Build /p:Configuration=Release /p:Platform=x64
+    - name: Upload the IDD's driver package for the Windows guest
+      uses: actions/upload-artifact@v6
+      with:
+        name: idd-package
+        path: |
+          idd/x64/Release/LGIdd/*.cat
+          idd/x64/Release/LGIdd/*.dll
+          idd/x64/Release/LGIdd/*.inf
+          idd/x64/Release/LGIdd/LGIddHelper.exe
+          idd/x64/Release/LGIdd/LGIddInstall.exe
+        if-no-files-found: error
     - name: Build NSIS Installer
       run: |
         cd idd\x64\Release\LGIdd
@@ -589,7 +656,12 @@ jobs:
     - name: Build NSIS installer with IVSHMEM drivers
       run: |
         cd idd\x64\Release
-        Invoke-WebRequest https://dl.quantum2.xyz/ivshmem.tar.gz -OutFile ivshmem.tar.gz
+        # retried, as the host sometimes does not answer the connection
+        curl.exe -L --fail --retry 4 --retry-all-errors --silent --show-error `
+          -o ivshmem.tar.gz https://dl.quantum2.xyz/ivshmem.tar.gz
+        if ($LASTEXITCODE) {
+          exit $LASTEXITCODE
+        }
         tar -xzvf ivshmem.tar.gz
         cd LGIdd
         makensis -DBUILD_32BIT -DIVSHMEM installer.nsi

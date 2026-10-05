@@ -27,6 +27,11 @@ which serves it on a named shared memory section. Adding --world makes the
 producer let every account open the section, and the test then passes only
 if the client refuses it.
 
+With --section, the client reads an existing section instead, such as the
+one that the HCS probe shares with a Windows guest whose Looking Glass IDD
+serves its display there, and the test passes on the first frame it
+composes, whatever it shows.
+
 The client must be built with ENABLE_TESTS, which adds the framebuffer
 capture. Under Wine, pass --runner wine64."""
 
@@ -139,13 +144,14 @@ class Producer:
     self.reader.join(timeout=10)
 
 
-def run_client(args, transport, capture, log):
+def run_client(args, transport, capture, log, frame=SERIAL,
+    size=(WIDTH, HEIGHT)):
   command = shlex.split(args.runner) + [args.client] + transport + [
     'app:renderer=OpenGL',
     f'test:captureFile={capture}',
-    f'test:captureFrame={SERIAL}',
+    f'test:captureFrame={frame}',
     'test:captureDelay=1',
-    f'win:size={WIDTH}x{HEIGHT}',
+    f'win:size={size[0]}x{size[1]}',
     'win:borderless=yes',
     'win:autoResize=no',
     'win:allowResize=no',
@@ -211,7 +217,54 @@ def check_capture(path):
   return errors
 
 
+def check_any_capture(path):
+  """A frame from a guest, which shows whatever the guest displayed: the
+  header must be sound, and the pixels are only described."""
+  data = Path(path).read_bytes()
+  if len(data) < HEADER.size:
+    return ['the capture is shorter than its header'], None
+
+  (magic, version, headerSize, frameSerial, sourceType, captureFormat,
+   width, height, stride, flags, dataSize) = HEADER.unpack_from(data)
+
+  errors = []
+  if magic != CAPTURE_MAGIC or version != CAPTURE_VERSION or \
+      headerSize != HEADER.size:
+    errors.append(f'the capture header is not one this test knows: magic '
+        f'{magic:#x}, version {version}, size {headerSize}')
+  if frameSerial < 1:
+    errors.append(f'frameSerial is {frameSerial}')
+  if captureFormat != CAPTURE_RGBA8 or not width or not height or \
+      stride < width * 4 or dataSize != len(data) - HEADER.size or \
+      dataSize < stride * height:
+    errors.append(f'the capture is {width}x{height}, stride {stride}, '
+        f'format {captureFormat}, {dataSize} bytes of data')
+  if errors:
+    return errors, None
+
+  pixels = data[HEADER.size:]
+  colors = set()
+  dark   = 0
+  step   = max(1, (width * height) // 20000)
+  for i in range(0, width * height, step):
+    x, y   = i % width, i // width
+    offset = y * stride + x * 4
+    rgb    = tuple(pixels[offset:offset + 3])
+    colors.add(rgb)
+    dark  += max(rgb) < 16
+
+  samples = (width * height + step - 1) // step
+  return [], (f'frame {frameSerial} of type {sourceType}, composed at '
+      f'{width}x{height}: {len(colors)} colours in {samples} samples, '
+      f'{100 * dark // samples}% near black')
+
+
 def run(args, output, capture, log):
+  if args.section:
+    return run_client(args,
+        ['app:transport=lgmp', f'lgmp:shmDevice={args.section}'], capture,
+        log, frame=1, size=(1280, 720))
+
   if not args.producer:
     return run_client(args, test_transport(), capture, log)
 
@@ -238,6 +291,8 @@ def main():
       help='path to lg-windows-client-producer.exe, to use LGMP')
   parser.add_argument('--world', action='store_true',
       help='check that the client refuses a section every account can open')
+  parser.add_argument('--section',
+      help='read any frame from this existing section instead')
   parser.add_argument('--runner', default='',
       help='command that runs Windows programs, such as wine64')
   parser.add_argument('--output', help='keep the capture and logs here')
@@ -247,6 +302,8 @@ def main():
   args = parser.parse_args()
   if args.world and not args.producer:
     parser.error('--world needs --producer')
+  if args.section and args.producer:
+    parser.error('--section and --producer do not go together')
 
   output = Path(args.output or tempfile.mkdtemp(prefix='lg-win-smoke-'))
   output.mkdir(parents=True, exist_ok=True)
@@ -279,6 +336,16 @@ def main():
     print(text)
     print('the client did not write a capture')
     return 1
+
+  if args.section:
+    errors, description = check_any_capture(capture)
+    print(text)
+    if errors:
+      print('\n'.join(errors))
+      return 1
+    print(f'The client composed a frame from {args.section} in its window: '
+        f'{description}')
+    return 0
 
   errors = check_capture(capture)
   if errors:
