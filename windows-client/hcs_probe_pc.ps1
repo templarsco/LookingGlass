@@ -54,7 +54,7 @@ new one.
 
 [CmdletBinding()]
 param(
-  [string] $WorkDir = "$PSScriptRoot\work",
+  [string] $WorkDir,
   [string] $Iso,
   [string] $Gpu,
   [switch] $NoGpu,
@@ -65,6 +65,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
+
+# next to the script, which is not a default of the parameter: Windows
+# PowerShell 5.1 does not have $PSScriptRoot yet when it sets those, and the
+# work folder was \work
+if (-not $WorkDir) {
+  $WorkDir = Join-Path $PSScriptRoot 'work'
+}
 
 # Microsoft's evaluation ISO of Windows 11 Enterprise LTSC, 64-bit, en-US,
 # with which CI checks the same guest
