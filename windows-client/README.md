@@ -193,7 +193,9 @@ keeps the shared code covered there.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
 - There is no audio, clipboard or SPICE support on Windows.
-- The client has run on Windows only in CI, with software OpenGL, and
-  under Wine. No run on a physical Windows PC with a GPU driver is
-  recorded yet.
+- The client has run with software OpenGL in CI, under Wine, and on one
+  physical Windows PC, with an RX 9070 XT (OpenGL 4.6 Compatibility Profile
+  Context 26.9.1.260826), where `client_format_test.py` passes its 25 cases
+  and the 15 that ask for the pinned upload path get it. No other GPU or
+  driver has been tried.
 - Run times are not performance results.
