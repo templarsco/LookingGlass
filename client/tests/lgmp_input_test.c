@@ -71,6 +71,10 @@ typedef struct TestState
   PLGMPMemory               statuses[TEST_MAX_STATUSES];
   unsigned                  statusCount;
   StatusTrace               status;
+  // set by a test that leaves the client owning the guest's input, which the
+  // disconnect that ends it has to give back
+  bool                      expectRelease;
+  uint32_t                  releaseGeneration;
 }
 TestState;
 
@@ -530,6 +534,24 @@ static bool testIdle(TestState * state)
   return true;
 }
 
+static bool testDisconnect(TestState * state)
+{
+  CHECK(postAvailable(state, 60));
+  CHECK(state->ops->keyDown(state->input, KEY_A));
+
+  KVMFRInputMessage claim;
+  KVMFRInputMessage keyboard;
+  CHECK(expectType(state, KVMFR_INPUT_MESSAGE_CLAIM, &claim));
+  CHECK(expectType(state, KVMFR_INPUT_MESSAGE_KEYBOARD, &keyboard));
+  CHECK(postOwner(state, 60, state->clientID, claim.generation));
+
+  // the client owns the guest's input, with a key down, and the test ends
+  // here, so the disconnect after it has to hand the input back
+  state->expectRelease     = true;
+  state->releaseGeneration = claim.generation;
+  return true;
+}
+
 static bool stateInit(TestState * state)
 {
   memset(state, 0, sizeof(*state));
@@ -662,6 +684,8 @@ static bool disconnectAndDrain(TestState * state)
         memset(&message, 0, sizeof(message));
       valid &= message.type == KVMFR_INPUT_MESSAGE_RELEASE;
       valid &= message.reserved == 0;
+      if (state->releaseGeneration)
+        valid &= message.generation == state->releaseGeneration;
       if (lgmpHostStreamReadRelease(state->streams[0], &buffer) !=
           LGMP_OK)
         valid = false;
@@ -683,6 +707,12 @@ static bool disconnectAndDrain(TestState * state)
     valid = false;
   if (!atomic_load(&task.done))
     valid = false;
+  if (state->expectRelease && !releaseAcknowledged)
+  {
+    fprintf(stderr,
+        "the client disconnected without releasing the guest's input\n");
+    valid = false;
+  }
   return valid;
 }
 
@@ -715,13 +745,14 @@ tests[] =
   { "restart" , testRestart  },
   { "pressure", testPressure },
   { "idle"    , testIdle     },
+  { "disconnect", testDisconnect },
 };
 
 int main(int argc, char * argv[])
 {
   if (argc != 2)
   {
-    fprintf(stderr, "usage: %s <claim|blocked|restart|pressure|idle>\n",
+    fprintf(stderr, "usage: %s <claim|blocked|restart|pressure|idle|disconnect>\n",
         argv[0]);
     return 2;
   }

@@ -105,9 +105,29 @@ someone else's DACL.
 
 ### Tests
 
-- The Win32 input layer and keymap have unit tests in
-  [client/tests](../client/tests), which run on Linux next to the X11 and
-  Wayland ones (`ctest -R display-input-win32`).
+- The client's unit tests in [client/tests](../client/tests) run natively on
+  Windows. They cover the LGMP transport (frames, input and clipboard, with a
+  host in the same process), the input and mouse state, keybinds, the clipboard,
+  frame scheduling and timing, the transport fallback, the configuration and
+  the Win32 input layer and keymap. The SPICE, file clipboard (FUSE) and
+  rendering tests (GoogleTest with Weston or X11) are Linux only. `ENABLE_TESTS`
+  alone only adds the framebuffer capture on Windows, so ask for the unit tests
+  as well, in an MSYS2 MINGW64 shell:
+
+  ```sh
+  cd client/build
+  cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DENABLE_UNIT_TESTS=ON \
+    -DOPTIMIZE_FOR_NATIVE=OFF ..
+  make -j$(nproc)
+  ctest --output-on-failure -j$(nproc)
+  ```
+
+  The tests were written for Linux, so [client/tests/windows](../client/tests/windows)
+  stands in for what Windows lacks: `sys/mman.h` for anonymous memory, `alarm()`,
+  a section instead of a temporary file for the memory the LGMP transport
+  opens ([shm_test.h](../client/tests/shm_test.h)), and a clock that the tests
+  can set. They drive the code in one process: they do not push messages
+  through a Win32 window, and no guest is involved.
 - [client_smoke_test.py](client_smoke_test.py) runs a client built with
   `-DENABLE_TESTS=ON` on test frame 4 in a borderless window, reads back
   what the client composed in that window and compares every pixel with

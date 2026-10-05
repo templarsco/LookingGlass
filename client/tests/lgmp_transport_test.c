@@ -28,6 +28,8 @@
 
 #include <lgmp/host.h>
 
+#include "shm_test.h"
+
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -35,12 +37,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <unistd.h>
 
 #define TEST_SHM_SIZE (2U * 1024U * 1024U)
 #define TEST_TIMEOUT  20U
-#define WAIT_TIMEOUT  (TEST_TIMEOUT + 100U)
+#define TEST_WAIT_TIMEOUT  (TEST_TIMEOUT + 100U)
 #define POLL_INTERVAL 50000U
 
 extern const LG_TransportOps LGT_LGMP;
@@ -81,7 +82,7 @@ static bool cancelAfter(void * opaque)
 static bool waitForQueuesEmpty(PLGMPHost host, PLGMPHostQueue frameQueue,
     PLGMPHostQueue pointerQueue)
 {
-  for (unsigned i = 0; i < WAIT_TIMEOUT; ++i)
+  for (unsigned i = 0; i < TEST_WAIT_TIMEOUT; ++i)
   {
     if (lgmpHostProcess(host) != LGMP_OK)
       return false;
@@ -212,7 +213,7 @@ static void videoStatusChanged(void * opaque,
 static bool waitStatusCount(
     const struct VideoStatusTrace * trace, unsigned int count)
 {
-  for (unsigned i = 0; i < WAIT_TIMEOUT; ++i)
+  for (unsigned i = 0; i < TEST_WAIT_TIMEOUT; ++i)
   {
     if (atomic_load_explicit(&trace->count, memory_order_acquire) >= count)
       return true;
@@ -297,7 +298,7 @@ static bool checkWaitCancellation(LG_Transport * transport,
   }
 
   bool subscribed = false;
-  for (unsigned i = 0; i < WAIT_TIMEOUT; ++i)
+  for (unsigned i = 0; i < TEST_WAIT_TIMEOUT; ++i)
   {
     if (lgmpHostQueueHasSubs(frameQueue) &&
         lgmpHostQueueHasSubs(pointerQueue))
@@ -319,10 +320,8 @@ static bool checkWaitCancellation(LG_Transport * transport,
 int main(void)
 {
   int result = 1;
-  int fd = -1;
-  char path[] = "/tmp/lgmp-transport-test-XXXXXX";
-  bool pathExists = false;
-  void * hostMemory = MAP_FAILED;
+  struct TestShm shm;
+  memset(&shm, 0, sizeof(shm));
   PLGMPHost host = NULL;
   PLGMPHostQueue frameQueue = NULL;
   PLGMPHostQueue pointerQueue = NULL;
@@ -352,21 +351,14 @@ int main(void)
         cancelAfter, &cancelDuringProbe));
   CHECK(cancelDuringProbe.calls >= cancelDuringProbe.limit);
 
-  fd = mkstemp(path);
-  CHECK(fd >= 0);
-  pathExists = true;
-  CHECK(ftruncate(fd, TEST_SHM_SIZE) == 0);
-
-  hostMemory = mmap(NULL, TEST_SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED,
-      fd, 0);
-  CHECK(hostMemory != MAP_FAILED);
+  CHECK(testShm_create(&shm, "lgmp-transport-test", TEST_SHM_SIZE));
 
   KVMFR session = { 0 };
   memcpy(session.magic, KVMFR_MAGIC, sizeof(session.magic));
   session.version = KVMFR_VERSION;
   memcpy(session.hostver, "transport-test", sizeof("transport-test"));
 
-  CHECK(lgmpHostInit(hostMemory, TEST_SHM_SIZE, &host, sizeof(session),
+  CHECK(lgmpHostInit(shm.memory, TEST_SHM_SIZE, &host, sizeof(session),
         (uint8_t *)&session) == LGMP_OK);
 
   const struct LGMPQueueConfig frameConfig = {
@@ -423,7 +415,7 @@ int main(void)
   wirePointer->y = 1;
 
   LGT_LGMP.setup();
-  option_set_string("lgmp", "shmDevice", path);
+  option_set_string("lgmp", "shmDevice", shm.device);
   option_set_bool("lgmp", "allowDMA", false);
   option_set_int("lgmp", "framePollInterval", POLL_INTERVAL);
   option_set_int("lgmp", "cursorPollInterval", POLL_INTERVAL);
@@ -746,7 +738,7 @@ int main(void)
   pthread_t crossUnregisterThread;
   CHECK(pthread_create(&disconnectThread, NULL,
         disconnectVideo, &videoTrace) == 0);
-  for (unsigned i = 0; i < WAIT_TIMEOUT && !atomic_load_explicit(
+  for (unsigned i = 0; i < TEST_WAIT_TIMEOUT && !atomic_load_explicit(
         &videoTrace.entered, memory_order_acquire); ++i)
     usleep(1000);
   CHECK(atomic_load_explicit(&videoTrace.entered, memory_order_acquire));
@@ -828,7 +820,7 @@ int main(void)
   pthread_t gateThread;
   CHECK(pthread_create(&gateThread, NULL,
         registerVideoStatus, &gateTrace) == 0);
-  for (unsigned i = 0; i < WAIT_TIMEOUT && !atomic_load_explicit(
+  for (unsigned i = 0; i < TEST_WAIT_TIMEOUT && !atomic_load_explicit(
         &gateTrace.entered, memory_order_acquire); ++i)
     usleep(1000);
   CHECK(atomic_load_explicit(&gateTrace.entered, memory_order_acquire));
@@ -838,7 +830,7 @@ int main(void)
   pthread_t abaPublishThread;
   CHECK(pthread_create(&abaPublishThread, NULL,
         disconnectVideoSignaled, &abaTrace) == 0);
-  for (unsigned i = 0; i < WAIT_TIMEOUT && !atomic_load_explicit(
+  for (unsigned i = 0; i < TEST_WAIT_TIMEOUT && !atomic_load_explicit(
         &abaWaiting, memory_order_acquire); ++i)
     usleep(1000);
   CHECK(atomic_load_explicit(&abaWaiting, memory_order_acquire));
@@ -856,7 +848,7 @@ int main(void)
   pthread_t unregisterThread;
   CHECK(pthread_create(&unregisterThread, NULL,
         unregisterVideoStatus, &unregisterState) == 0);
-  for (unsigned i = 0; i < WAIT_TIMEOUT && !atomic_load_explicit(
+  for (unsigned i = 0; i < TEST_WAIT_TIMEOUT && !atomic_load_explicit(
         &unregisterState.started, memory_order_acquire); ++i)
     usleep(1000);
   CHECK(atomic_load_explicit(
@@ -955,7 +947,7 @@ int main(void)
   pthread_t drainThread;
   CHECK(pthread_create(&drainThread, NULL,
         disconnectVideoSignaled, &drainTrace) == 0);
-  for (unsigned i = 0; i < WAIT_TIMEOUT && !atomic_load_explicit(
+  for (unsigned i = 0; i < TEST_WAIT_TIMEOUT && !atomic_load_explicit(
         &drainWaiting, memory_order_acquire); ++i)
     usleep(1000);
   CHECK(atomic_load_explicit(&drainWaiting, memory_order_acquire));
@@ -1029,11 +1021,6 @@ cleanup:
   lgmpHostMemFree(&malformedFrameMemory);
   lgmpHostMemFree(&frameMemory);
   lgmpHostFree(&host);
-  if (hostMemory != MAP_FAILED)
-    munmap(hostMemory, TEST_SHM_SIZE);
-  if (fd >= 0)
-    close(fd);
-  if (pathExists)
-    unlink(path);
+  testShm_destroy(&shm);
   return result;
 }

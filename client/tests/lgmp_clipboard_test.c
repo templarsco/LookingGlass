@@ -617,9 +617,14 @@ static bool noClientControl(TestState * state)
       usleep(1000);
       continue;
     }
-    if (status == LGMP_OK)
-      lgmpHostAckData(state->queue);
-    CHECK(status == LGMP_ERR_QUEUE_EMPTY);
+
+    // the client sends a keepalive when it has been quiet for a while, which
+    // is not control, and it can fall in here as slow sleeps stretch the wait
+    CHECK(status == LGMP_OK);
+    CHECK(size == sizeof(record));
+    CHECK(clientID == state->clientID);
+    CHECK(lgmpHostAckData(state->queue) == LGMP_OK);
+    CHECK(record.type == KVMFR_CLIPBOARD_MESSAGE_KEEPALIVE);
   }
   return true;
 }

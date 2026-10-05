@@ -1,5 +1,19 @@
 cmake_minimum_required(VERSION 3.10)
 
+if(WIN32)
+  # the tests are written for Linux: this adds sys/mman.h for the ones that
+  # host an LGMP session in anonymous memory, and alarm() as a watchdog
+  include_directories(BEFORE "${CMAKE_CURRENT_SOURCE_DIR}/windows")
+
+  # The tests link client sources that call more than the test provides, and
+  # rely on --gc-sections to drop what they do not reach. On x86-64 Windows the
+  # linker keeps every function that has unwind tables, so build without them.
+  add_compile_options(-fno-asynchronous-unwind-tables -fno-unwind-tables)
+
+  add_library(lg_test_windows OBJECT windows/support.c)
+  link_libraries($<TARGET_OBJECTS:lg_test_windows> bcrypt)
+endif()
+
 add_executable(font-tests
   font_test.c
   ../src/font.c
@@ -93,6 +107,7 @@ set(LGMP_INPUT_CASES
   restart
   pressure
   idle
+  disconnect
 )
 foreach(name IN LISTS LGMP_INPUT_CASES)
   add_test(NAME lgmp-input-${name}
@@ -548,6 +563,8 @@ foreach(name IN LISTS CLIPBOARD_CASES)
   )
 endforeach()
 
+# file clipboard needs FUSE, which Windows does not have
+if(NOT WIN32)
 add_executable(clipboard-files-tests
   clipboard_files_test.c
   ../src/clipboard_files.c
@@ -579,7 +596,10 @@ set_tests_properties(clipboard-files-mount PROPERTIES
   TIMEOUT 10
   SKIP_RETURN_CODE 77
 )
+endif()
 
+# SPICE needs a Winsock port of PureSpice, so the Windows client has none
+if(NOT WIN32)
 add_executable(spice-clipboard-tests
   spice_clipboard_test.c
   clipboard_files_stub.c
@@ -608,6 +628,7 @@ foreach(name IN ITEMS outbound inbound)
     TIMEOUT 10
   )
 endforeach()
+endif()
 
 add_executable(transport-fallback-tests
   transport_fallback_test.c
@@ -652,6 +673,8 @@ foreach(name IN LISTS TRANSPORT_FALLBACK_CASES)
   )
 endforeach()
 
+# SPICE needs a Winsock port of PureSpice, so the Windows client has none
+if(NOT WIN32)
 add_executable(spice-tests
   spice_test.c
   ../transports/SPICE/session.c
@@ -713,6 +736,7 @@ add_test(NAME purespice-connect-cancel
 set_tests_properties(purespice-connect-cancel PROPERTIES
   TIMEOUT 5
 )
+endif()
 
 add_executable(frame-scheduler-tests
   frame_scheduler_test.c
@@ -827,6 +851,14 @@ foreach(name IN LISTS CONFIG_MESSAGE_CASES)
     TIMEOUT 10
   )
 endforeach()
+
+if(WIN32)
+  # these two set the clock, see windows/mock_clock.h
+  foreach(target IN ITEMS frame-scheduler-tests config-message-tests)
+    target_compile_options(${target} PRIVATE
+      "SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/windows/mock_clock.h")
+  endforeach()
+endif()
 
 if(ENABLE_AUDIO)
   pkg_check_modules(AUDIO_TEST_SAMPLERATE REQUIRED IMPORTED_TARGET
@@ -958,6 +990,9 @@ if(ENABLE_EGL)
   endforeach()
 endif()
 
+# the rendering tests need GoogleTest and a Wayland or X11 compositor; the
+# Windows client checks its rendering with windows-client/client_*_test.py
+if(NOT WIN32)
 find_package(GTest REQUIRED)
 find_program(WESTON_EXECUTABLE NAMES weston)
 if(NOT WESTON_EXECUTABLE)
@@ -1031,4 +1066,5 @@ if(ENABLE_X11)
   set_tests_properties(render-x11-tests PROPERTIES
     TIMEOUT 120
   )
+endif()
 endif()
