@@ -14,7 +14,10 @@ Three steps of that plan exist so far:
   keyboard state and reconnects.
 - Step 3: the client reads frames over LGMP from a named shared memory
   section on the PC, the Windows counterpart of the KVMFR device on Linux.
-  It refuses a section that accounts other than the user's can open.
+  It refuses a section that any account but the user, the user's logon
+  session, SYSTEM, the Administrators and Hyper-V virtual machines can map
+  or modify. Any VM's account is accepted, not one VM's: the creator of the
+  section decides which VM gets it, and should grant that VM's account only.
 
 The client cannot show a guest yet. That is step 5, IVSHMEM on Hyper-V,
 which is under way: the [HCS probe](#hcs-shared-memory-probe) checks on a
@@ -435,9 +438,12 @@ process:
   session, posts one frame on the LGMP frame queue and then streams the
   pixels through the framebuffer write pointer, using the frame layout and
   post-then-write order of `host/src/app.c`.
-- The main thread acts as the viewer. It validates the session with the
-  same checks as the client LGMP transport, subscribes to the frame queue,
-  reads the frame through `common/framebuffer` and compares every pixel.
+- The main thread acts as the viewer. It checks the session and the frame
+  with checks of its own, which are simpler than the client LGMP
+  transport's, subscribes to the frame queue, reads the frame through
+  `common/framebuffer` and compares every pixel. So this says that the
+  protocol and the framebuffer code work on Windows, and nothing about the
+  transport's validation of a hostile host.
 
 The frame is 1280x720 BGRA with a padded stride of 1296 pixels, so a
 pitch/width mix-up fails. The test also fails if the host sees the frame
@@ -447,6 +453,14 @@ and ctest stops it after 60 seconds.
 The shared region is an unnamed mapping private to the test process, so it
 exposes nothing to other processes. The client's named section is covered
 by the smoke test above.
+
+`lg-windows-client-section-test` checks which named sections the client
+takes. It makes sections with different security in its own process and opens
+each as the client does: it must take one that only this user and the system
+can open, with no integrity label or one of medium integrity, and refuse one
+with a label below medium, as a sandboxed process of the user's would make
+with a name that the client opens, and one that every account, or every
+authenticated account, can write or map. ctest runs it on Windows.
 
 ### Building the Loopback Test
 

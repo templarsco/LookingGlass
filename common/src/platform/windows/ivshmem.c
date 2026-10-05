@@ -309,6 +309,7 @@ static bool sectionIsPrivate(HANDLE handle, const char * name)
   TOKEN_GROUPS       * groups = NULL;
   PSID                 owner  = NULL;
   PACL                 dacl   = NULL;
+  PACL                 sacl   = NULL;
   PSECURITY_DESCRIPTOR sd     = NULL;
 
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
@@ -321,9 +322,21 @@ static bool sectionIsPrivate(HANDLE handle, const char * name)
       !(groups = tokenInfo(token, TokenGroups)))
     goto out;
 
-  const DWORD error = GetSecurityInfo(handle, SE_KERNEL_OBJECT,
-      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-      &owner, NULL, &dacl, NULL, &sd);
+  // the integrity label is in the SACL, which READ_CONTROL reads as far as the
+  // label goes. Where that is not supported, such as under Wine, the owner and
+  // the DACL are all that there is to check
+  DWORD error = GetSecurityInfo(handle, SE_KERNEL_OBJECT,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+      LABEL_SECURITY_INFORMATION, &owner, NULL, &dacl, &sacl, &sd);
+  if (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED)
+  {
+    DEBUG_WARN("The integrity label of the shared memory section %s cannot "
+        "be read here, so it is not checked", name);
+    sacl = NULL;
+    error = GetSecurityInfo(handle, SE_KERNEL_OBJECT,
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+        &owner, NULL, &dacl, NULL, &sd);
+  }
   if (error != ERROR_SUCCESS)
   {
     DEBUG_WINERROR("Failed to read who can open the shared memory section",
@@ -386,6 +399,37 @@ static bool sectionIsPrivate(HANDLE handle, const char * name)
     if ((ace->Mask & access) && !sidTrusted(sid, user, groups))
     {
       sectionUntrusted(name, "can be opened by", sid);
+      goto out;
+    }
+  }
+
+  // A process of low integrity, which a sandbox gives to what it runs, can make
+  // a section with a name before the user's own process does. It is owned by
+  // the user and only the user can open it, so the checks above pass, and the
+  // client would then trust it with the user's keystrokes. What a process of
+  // the user's usual integrity makes has no label, or one of medium or above
+  for (DWORD i = 0; sacl && i < sacl->AceCount; ++i)
+  {
+    ACE_HEADER * header;
+    if (!GetAce(sacl, i, (void **)&header))
+    {
+      DEBUG_WINERROR("GetAce failed", GetLastError());
+      goto out;
+    }
+
+    if (header->AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE)
+      continue;
+
+    const SYSTEM_MANDATORY_LABEL_ACE * label =
+      (const SYSTEM_MANDATORY_LABEL_ACE *)header;
+    PSID sid = (PSID)&label->SidStart;
+    const DWORD count = *GetSidSubAuthorityCount(sid);
+    if (count && *GetSidSubAuthority(sid, count - 1) <
+        SECURITY_MANDATORY_MEDIUM_RID)
+    {
+      DEBUG_ERROR("The shared memory section %s has an integrity label below "
+          "medium, so a process of lower integrity than the user's usual ones "
+          "made it, as a sandboxed program is", name);
       goto out;
     }
   }
@@ -527,8 +571,13 @@ void ivshmemClose(struct IVSHMEM * dev)
 
 void ivshmemFree(struct IVSHMEM * dev)
 {
-  DEBUG_ASSERT(dev && dev->opaque && !dev->mem);
+  DEBUG_ASSERT(dev);
 
+  // a section is freed by ivshmemClose, which leaves nothing here
+  if (!dev->opaque)
+    return;
+
+  DEBUG_ASSERT(!dev->mem);
   struct IVSHMEMInfo * info = (struct IVSHMEMInfo *)dev->opaque;
 
   free(info);
