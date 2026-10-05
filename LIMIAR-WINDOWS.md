@@ -161,6 +161,15 @@ in [windows-client](windows-client/README.md).
    [windows-client](windows-client/README.md#presentation-timing). When a frame
    is on the display, input latency, audio, and a stream from a guest are not
    measured.
+   Status, October 5, 2026: the reconnect and resolution-change handling is
+   tested on Windows with the test producer on a named section: it sets
+   another resolution with the session going on, and its capture host
+   restarts on the same memory, at once or after being gone for over a
+   second, as a guest's would. The client shows the last frame with every
+   pixel as generated, at its size, with the window following the frames'
+   size; see [windows-client](windows-client/README.md#tests). This does not
+   cover focus changes or a window dragged to another size, and the producer
+   is not a guest.
 
 ## Initial Acceptance Gates
 

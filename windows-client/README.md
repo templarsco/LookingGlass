@@ -101,7 +101,14 @@ looking-glass-client.exe app:transport=lgmp lgmp:shmDevice=Local\looking-glass
 services such as Hyper-V's, and creating one needs administrator rights.
 The producer also takes `--size=WxH`, `--fps=N` and `--frames=N`, and
 refuses to start if the section already exists, as that section would keep
-someone else's DACL.
+someone else's DACL. `--then=WxH:N` makes it serve another size after the
+frames so far, up to frame N, as when the guest sets another resolution,
+and `--then=WxH:N:restart` makes the capture host of the guest restart
+instead: the producer drops its LGMP host and starts a new one on the same
+memory, which LGMP gives a new session ID so that the client sees it, and
+frames 1 to N follow. `--gap=MS` keeps the host away for that long first,
+and `--dwell=MS` is how long the producer waits after a step, once the
+client has taken its frames, before the next one.
 
 ### Presentation Timing
 
@@ -216,11 +223,28 @@ window across two displays, and Windows builds other than 11 were not tried.
     --producer windows-client/build/lg-windows-client-producer.exe \
     client/build/looking-glass-client.exe
   ```
+- [client_session_test.py](client_session_test.py) serves frames with the
+  producer while it does what a guest does, in four scenarios: the
+  resolution changes twice with the session going on; the host restarts at
+  once, at another resolution or at the same one; and the host is gone for
+  longer than the second that a client waits for it. A scenario passes if the
+  client composes the last frame, which only the last session has, at that
+  frame's size and with every pixel as generated, logged each size that it
+  was given in order, and started as many sessions as there were hosts,
+  logging that it waited for the host to restart after each but the last.
+  The window follows the frames' size, as `win:autoResize` makes it. CI runs
+  it on Windows.
 
-Focus changes, pointer capture, the keyboard grab, DPI scaling, fullscreen
-and reconnects were checked by hand under Wine with Xvfb, not by an
-automated test. Wine on Xvfb injects Scroll Lock state changes, so pick
-another escape key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
+  ```sh
+  python windows-client/client_session_test.py \
+    --producer windows-client/build/lg-windows-client-producer.exe \
+    client/build/looking-glass-client.exe
+  ```
+
+Focus changes, pointer capture, the keyboard grab, DPI scaling and
+fullscreen were checked by hand under Wine with Xvfb, not by an automated
+test. Wine on Xvfb injects Scroll Lock state changes, so pick another escape
+key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
 
 ### HCS Shared Memory Probe
 
