@@ -393,8 +393,16 @@ top of the address space, is refused and not taken for a range that ends
 at a small address. `check REGISTERS MEMORY SIZE` says whether `install`
 would take them and changes nothing, and `selftest` checks what `install`
 takes and refuses on made-up RAM, without a device or an administrator,
-which CI runs. The probe sends the address that the HCS reports in
-the VM's `SharedMemoryRegion` property over the serial port, which
+which CI runs. The device stays across restarts with the ranges it was
+given, and Windows starts it before anything here runs again. The HCS puts
+the region after the VM's memory, so if the VM's memory changes in size, the
+ranges are stale until `install` runs again, and what Windows does with a
+device on ranges that are no longer the region, or that are RAM now, was not
+tried. Give the VM the same memory for as long as its guest keeps the device,
+or `remove` the device first.
+
+The probe sends the address that the HCS reports in the VM's
+`SharedMemoryRegion` property over the serial port, which
 `lg-hyperv-ivshmem serial COM1 INF` answers, and checks that the guest
 found the region there by itself.
 
