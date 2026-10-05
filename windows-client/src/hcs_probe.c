@@ -893,6 +893,10 @@ struct Vm
   FILE      * log;
   char        pending[16384];
   size_t      pendingLen;
+
+  // the line that the serial port is in the middle of
+  char        line[2048];
+  size_t      lineLen;
   struct Str  transcript;
   int         replies;
   bool        ready, panicked, disconnected, stopped;
@@ -967,6 +971,51 @@ static bool vmSerialClosed(struct Vm * vm)
 // the most of a guest's serial output that a log keeps
 #define SERIAL_LOG_LIMIT (UINT64_C(64) << 20)
 
+static bool textHas(const char * text, size_t size, const char * needle)
+{
+  const size_t length = strlen(needle);
+  for(size_t i = 0; i + length <= size; ++i)
+    if (memcmp(text + i, needle, length) == 0)
+      return true;
+  return false;
+}
+
+// what the serial port gave, as the lines that vmNextReply reads. Only the
+// lines that it can use are kept, a reply or a panic, so that a guest that
+// writes a lot cannot push a reply out of the buffer before it is read, as it
+// did when a line that did not fit emptied it. When the buffer is full the
+// oldest lines go, whole. A line longer than a reply can be is cut: the log
+// has all of it
+static void vmFeed(struct Vm * vm, const char * data, size_t size)
+{
+  for(size_t i = 0; i < size; ++i)
+  {
+    if (vm->lineLen < sizeof(vm->line))
+      vm->line[vm->lineLen++] = data[i];
+    if (data[i] != '\n')
+      continue;
+
+    // the line ends with its newline, also when it was cut
+    vm->line[vm->lineLen - 1] = '\n';
+    if (textHas(vm->line, vm->lineLen, "LGSHM ") ||
+        textHas(vm->line, vm->lineLen, "Kernel panic"))
+    {
+      while (vm->pendingLen + vm->lineLen > sizeof(vm->pending) &&
+          vm->pendingLen)
+      {
+        const char * end = memchr(vm->pending, '\n', vm->pendingLen);
+        const size_t drop = end ? (size_t)(end - vm->pending) + 1 :
+          vm->pendingLen;
+        memmove(vm->pending, vm->pending + drop, vm->pendingLen - drop);
+        vm->pendingLen -= drop;
+      }
+      memcpy(vm->pending + vm->pendingLen, vm->line, vm->lineLen);
+      vm->pendingLen += vm->lineLen;
+    }
+    vm->lineLen = 0;
+  }
+}
+
 // reads what the serial port has; false once it is gone
 static bool vmPump(struct Vm * vm)
 {
@@ -1011,12 +1060,7 @@ static bool vmPump(struct Vm * vm)
       fflush(vm->log);
     }
 
-    // a line longer than the buffer is dropped, the log keeps it
-    if (vm->pendingLen + got > sizeof(vm->pending))
-      vm->pendingLen = 0;
-    memcpy(vm->pending + vm->pendingLen, buf,
-        min((size_t)got, sizeof(vm->pending)));
-    vm->pendingLen += min((size_t)got, sizeof(vm->pending));
+    vmFeed(vm, buf, got);
   }
   return true;
 }
