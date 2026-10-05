@@ -103,13 +103,79 @@ The producer also takes `--size=WxH`, `--fps=N` and `--frames=N`, and
 refuses to start if the section already exists, as that section would keep
 someone else's DACL.
 
+### Presentation Timing
+
+With `win:jitRender=yes` the client renders in step with the display, as it
+does under Wayland and X11: the render thread waits for the display's
+vertical blank, then renders and submits the newest frame. That is also what
+the frame scheduler needs, to pace the host's frames against the client's
+display. The option is still off by default.
+
+[vblank.c](../client/displayservers/Win32/vblank.c) runs a thread that waits
+for the blank of the display that the window is on, through the graphics
+kernel's `D3DKMTWaitForVerticalBlankEvent`, and the render thread waits for
+that thread. A session that cannot ask the graphics kernel, such as a remote
+one, gets `DwmFlush`. If neither gives a blank, or none comes for the longer
+of 50 ms and eight periods, as when a display is off, `waitFrame` returns at
+the display mode's rate without claiming that it is the display's cadence,
+and the render thread keeps rendering; the blank is the cadence again once it
+comes. The thread also measures the time between blanks, and the client uses
+that as the frame period once it has enough of it, since a display mode has
+whole hertz only.
+
+The graphics kernel's wait is for one display, which matters with displays
+of different rates. On a PC with a 240 Hz and a 144 Hz display, DWM's
+refresh was 239.96 Hz and `DwmFlush` ticked at 240 Hz whichever display was
+measured, while the graphics kernel gave 239.96 Hz for the first and
+143.87 Hz for the second.
+
+When the client stops, it logs what it measured, between a blank and its own
+`SwapBuffers`:
+
+```
+Vertical blank by graphics kernel: 1231 blanks, 4.1671 ms (239.977 Hz) measured, p50 4.1675 p95 4.1925 p99 4.2375 max 4.4154 ms, 0 missed, 0 early
+Render after the blank: let go at p50 0.0075 p95 0.0125 p99 0.0175 max 3.1778 ms, frame submitted at p50 0.0725 p95 0.0925 p99 0.1175 max 28.1704 ms; 1 of 1179 frames took over a period
+```
+
+Two programs measure it:
+
+- `lg-windows-client-vblank-probe` ([vblank_probe.c](src/vblank_probe.c))
+  opens no window. It lists the displays, and for one of them gives the
+  intervals between the graphics kernel's blanks and between `DwmFlush`'s
+  ticks, and DWM's own account of the refresh rate. `--monitor N` picks the
+  display and `--seconds N` how long it measures.
+- [client_pacing_test.py](client_pacing_test.py) runs the client on a
+  synthetic stream for a few seconds in a small window at the corner of the
+  display, and reads those two lines. `--require-hardware` also fails the
+  run unless the blanks came from the graphics kernel, were measured, none
+  were missed or early, and the frames were in time. CI runs it without that
+  option, as its runners have no display to pace by.
+
+On a PC with a Ryzen 7 9800X3D, an RX 9070 XT (driver 26.9.1.260826) and a
+1920x1080 240 Hz display, Windows 11 build 26200, the probe saw 720 blanks in
+3 s with a mean of 4.1673 ms, p99 of 4.2634 ms and none missed, and
+`DwmFlush` a p99 of 4.5203 ms. The client's line above is a 5 s run of a
+240 frames a second stream. A 120 frames a second one on the same display had
+a p99 of 4.2425 ms between blanks and none missed, with 1 of 599 frames over a
+period. The one frame over a period was the first, which makes the renderer's
+buffers and textures.
+
+Not covered: these are what the client measured itself, so they are not when
+a frame was on the display, which DWM composes for a windowed OpenGL client,
+and which only a camera or an analyzer on the display can say. They are not a
+latency, and they are not a result for a stream from a guest, with the
+frame scheduler. The client does not wait before rendering to be as late as it
+can, as the X11 one does after timing its render. Variable refresh, HDR, a
+window across two displays, and Windows builds other than 11 were not tried.
+
 ### Tests
 
 - The client's unit tests in [client/tests](../client/tests) run natively on
   Windows. They cover the LGMP transport (frames, input and clipboard, with a
   host in the same process), the input and mouse state, keybinds, the clipboard,
-  frame scheduling and timing, the transport fallback, the configuration and
-  the Win32 input layer and keymap. The SPICE, file clipboard (FUSE) and
+  frame scheduling and timing, the transport fallback, the configuration, the
+  Win32 input layer and keymap, and the pacing of the Win32 display server's
+  wait for the vertical blank. The SPICE, file clipboard (FUSE) and
   rendering tests (GoogleTest with Weston or X11) are Linux only. `ENABLE_TESTS`
   alone only adds the framebuffer capture on Windows, so ask for the unit tests
   as well, in an MSYS2 MINGW64 shell:
