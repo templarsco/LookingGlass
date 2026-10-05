@@ -386,7 +386,14 @@ whether Direct3D 11 makes a device on each.
 the guest physical address of the zeroed page, and MEMORY and SIZE are the
 shared memory's. `status` shows the device and its resources, `memory` the
 RAM that Windows uses, which the device must stay out of, and `remove`
-removes the device. The probe sends the address that the HCS reports in
+removes the device. The ranges must be whole pages that x64 can address and
+that stay out of that RAM, and `install` refuses them otherwise, however the
+numbers are written: a size that is a negative number, or that runs past the
+top of the address space, is refused and not taken for a range that ends
+at a small address. `check REGISTERS MEMORY SIZE` says whether `install`
+would take them and changes nothing, and `selftest` checks what `install`
+takes and refuses on made-up RAM, without a device or an administrator,
+which CI runs. The probe sends the address that the HCS reports in
 the VM's `SharedMemoryRegion` property over the serial port, which
 `lg-hyperv-ivshmem serial COM1 INF` answers, and checks that the guest
 found the region there by itself.

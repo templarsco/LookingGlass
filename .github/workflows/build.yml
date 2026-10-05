@@ -487,6 +487,12 @@ jobs:
         windows-client\build\lg-hyperv-ivshmem.exe memory
         $bytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
         "Windows reports 0x{0:x} bytes of memory" -f $bytes
+    - name: Check what keeps lg-hyperv-ivshmem's device out of the RAM
+      run: |
+        windows-client\build\lg-hyperv-ivshmem.exe selftest
+        if ($LASTEXITCODE) {
+          exit $LASTEXITCODE
+        }
     - name: Get the IVSHMEM driver that Looking Glass's installer bundles
       id: driver
       run: |

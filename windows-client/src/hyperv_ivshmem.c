@@ -49,6 +49,8 @@
 
 #include "ivshmem.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -56,10 +58,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wctype.h>
 
 #define PAGE_SIZE      4096
 #define GOLDEN         0x9E3779B97F4A7C15ULL
 #define REGISTERS_SIZE 256
+
+// the most that x64 can address
+#define PHYSICAL_LIMIT (UINT64_C(1) << 52)
 
 // the IDs that Windows gives QEMU's ivshmem-plain on a PCI bus, which the
 // IVSHMEM driver's INF matches
@@ -118,17 +124,37 @@ static bool failed(const char * what, const char * step, unsigned long error)
   return false;
 }
 
+// a number that fits in 64 bits. strtoull takes a minus sign and gives the
+// negative as a very large number, which a size must not be
 static bool parseNumber(const char ** text, uint64_t * value)
 {
-  while (**text == ' ')
+  while (isspace((unsigned char)**text))
     ++*text;
 
+  if (**text == '-')
+    return false;
+
   char * end;
+  errno = 0;
   *value = strtoull(*text, &end, 0);
-  if (end == *text || (*end && *end != ' '))
+  if (end == *text || errno == ERANGE || (*end && *end != ' '))
     return false;
   *text = end;
   return true;
+}
+
+static bool parseWide(const WCHAR * text, uint64_t * value)
+{
+  while (iswspace(*text))
+    ++text;
+
+  if (*text == L'-')
+    return false;
+
+  WCHAR * end;
+  errno = 0;
+  *value = _wcstoui64(text, &end, 0);
+  return end != text && !*end && errno != ERANGE;
 }
 
 /* The memory ranges in a resource list that Windows keeps under
@@ -236,12 +262,22 @@ static size_t ramRanges(struct Range * ranges, size_t max)
       max);
 }
 
+// where a range ends, which is the top of the address space for one that runs
+// past it, as the sum of a start and a very large length would otherwise wrap
+// to a small number
+static uint64_t rangeEnd(uint64_t start, uint64_t length)
+{
+  uint64_t end;
+  return __builtin_add_overflow(start, length, &end) ? UINT64_MAX : end;
+}
+
 static bool overlaps(const struct Range * ranges, size_t count,
     uint64_t start, uint64_t length)
 {
+  const uint64_t end = rangeEnd(start, length);
   for(size_t i = 0; i < count; ++i)
-    if (start < ranges[i].start + ranges[i].length &&
-        ranges[i].start < start + length)
+    if (start < rangeEnd(ranges[i].start, ranges[i].length) &&
+        ranges[i].start < end)
       return true;
   return false;
 }
@@ -429,31 +465,58 @@ static bool deviceStarted(struct Device * d, ULONG * status, ULONG * problem)
   return (*status & DN_STARTED) && !(*status & DN_HAS_PROBLEM);
 }
 
-/* Makes or updates the device, installs the IVSHMEM driver on it and waits
- * for Windows to start it. The ranges must not be RAM that Windows uses:
- * a device there would hand the IVSHMEM driver's users Windows' own memory. */
-static bool install(uint64_t registers, uint64_t memory, uint64_t size,
-    const WCHAR * inf)
+/* Why the registers and the memory cannot be a device's, or NULL if they can.
+ * They must be whole pages, in what x64 can address without running past the
+ * top of it, as a size that is a negative number does, and not into each
+ * other: that is "args". And they must not be RAM that Windows uses: a device
+ * there would hand the IVSHMEM driver's users Windows' own memory. */
+static const char * rangesProblem(const struct Range * ram, size_t count,
+    uint64_t registers, uint64_t memory, uint64_t size)
+{
+  const uint64_t registersEnd = rangeEnd(registers, REGISTERS_SIZE);
+  const uint64_t memoryEnd    = rangeEnd(memory, size);
+  if (!size || size % PAGE_SIZE || memory % PAGE_SIZE ||
+      registers % PAGE_SIZE ||
+      registersEnd > PHYSICAL_LIMIT || memoryEnd > PHYSICAL_LIMIT ||
+      (registers < memoryEnd && memory < registersEnd))
+    return "args";
+
+  if (overlaps(ram, count, registers, REGISTERS_SIZE) ||
+      overlaps(ram, count, memory, size))
+    return "ram";
+
+  return NULL;
+}
+
+// checks the ranges against this PC's RAM, and says why not, for what, which
+// is a verb, that failed
+static bool checkRanges(const char * what, uint64_t registers,
+    uint64_t memory, uint64_t size)
 {
   struct Range ram[MAX_RANGES];
   const size_t count = ramRanges(ram, MAX_RANGES);
   if (!count)
-    return failed("install", "ram", GetLastError());
-  if (overlaps(ram, count, registers, REGISTERS_SIZE) ||
-      overlaps(ram, count, memory, size))
-  {
-    emit("install failed step=ram error=0x0 the ranges are RAM that Windows "
-        "uses");
-    return false;
-  }
+    return failed(what, "ram", GetLastError());
 
-  if (!size || size % PAGE_SIZE || memory % PAGE_SIZE ||
-      registers % PAGE_SIZE ||
-      (registers < memory + size && memory < registers + REGISTERS_SIZE))
-  {
-    emit("install failed step=args error=0x0");
+  const char * problem = rangesProblem(ram, count, registers, memory, size);
+  if (!problem)
+    return true;
+
+  if (strcmp(problem, "ram") == 0)
+    emit("%s failed step=ram error=0x0 the ranges are RAM that Windows uses",
+        what);
+  else
+    emit("%s failed step=args error=0x0", what);
+  return false;
+}
+
+/* Makes or updates the device, installs the IVSHMEM driver on it and waits
+ * for Windows to start it. */
+static bool install(uint64_t registers, uint64_t memory, uint64_t size,
+    const WCHAR * inf)
+{
+  if (!checkRanges("install", registers, memory, size))
     return false;
-  }
 
   struct Device d = { .set = INVALID_HANDLE_VALUE };
   bool created = false;
@@ -1221,6 +1284,130 @@ static int serve(const WCHAR * name, const WCHAR * inf)
   }
 }
 
+/* Checks, without a device or an administrator, what keeps the device off the
+ * RAM that Windows uses: the numbers that are taken, and the ranges that are
+ * refused, on a made-up RAM so that it is the same on every PC. The ones that
+ * wrap around the address space were taken for ranges that did not touch RAM. */
+static int selfTest(void)
+{
+  // what a guest with 2 GiB below 4 GiB and 128 MiB above would list
+  static const struct Range ram[] =
+  {
+    { 0x0000000000001000ULL, 0x000000007FFFF000ULL },
+    { 0x0000000100000000ULL, 0x0000000008000000ULL },
+  };
+  const size_t count = sizeof(ram) / sizeof(ram[0]);
+
+  static const struct
+  {
+    const char * name;
+    uint64_t     registers;
+    uint64_t     memory;
+    uint64_t     size;
+    const char * problem;  // NULL if they can be a device's
+  }
+  ranges[] =
+  {
+    { "the region after the RAM",
+      0x10FFFF000ULL, 0x108000000ULL, 0x7FFF000ULL, NULL },
+    { "memory in the RAM",
+      0x10FFFF000ULL, 0x100000000ULL, 0x1000000ULL, "ram" },
+    { "registers in the RAM",
+      0x100000000ULL, 0x108000000ULL, 0x1000000ULL, "ram" },
+    { "memory that ends past the top, and wraps to 0",
+      0x10FFFF000ULL, 0x1000ULL, 0xFFFFFFFFFFFFF000ULL, "args" },
+    { "memory that ends past the top, and wraps to 0 from higher up",
+      0x10FFFF000ULL, 0x100000000ULL, 0xFFFFFFFF00000000ULL, "args" },
+    { "memory that ends past the top, and wraps to a small number",
+      0x10FFFF000ULL, 0x200000000ULL, 0xFFFFFFFFFFFFE000ULL, "args" },
+    { "registers at the top",
+      0xFFFFFFFFFFFFF000ULL, 0x108000000ULL, 0x1000ULL, "args" },
+    { "memory past what x64 can address",
+      0x10000000001000ULL, 0x10000000000000ULL, 0x1000ULL, "args" },
+    { "memory that ends past what x64 can address, without wrapping",
+      0x10FFFF000ULL, 0x200000000ULL, 0x10000000000000ULL, "args" },
+    { "no memory",
+      0x10FFFF000ULL, 0x108000000ULL, 0, "args" },
+    { "memory that is not whole pages",
+      0x10FFFF000ULL, 0x108000000ULL, 0x7FFF001ULL, "args" },
+    { "registers that are not on a page",
+      0x10FFFF010ULL, 0x108000000ULL, 0x7FFF000ULL, "args" },
+    { "registers in the memory",
+      0x108001000ULL, 0x108000000ULL, 0x7FFF000ULL, "args" },
+  };
+
+  int failures = 0;
+  for(size_t i = 0; i < sizeof(ranges) / sizeof(ranges[0]); ++i)
+  {
+    const char * problem = rangesProblem(ram, count, ranges[i].registers,
+        ranges[i].memory, ranges[i].size);
+    const bool same = problem && ranges[i].problem ?
+      strcmp(problem, ranges[i].problem) == 0 : problem == ranges[i].problem;
+    if (!same)
+    {
+      emit("selftest failed ranges=\"%s\" got=%s wanted=%s", ranges[i].name,
+          problem ? problem : "accepted",
+          ranges[i].problem ? ranges[i].problem : "accepted");
+      ++failures;
+    }
+  }
+
+  static const struct
+  {
+    const char * text;
+    bool         valid;
+    uint64_t     value;
+  }
+  numbers[] =
+  {
+    { "4096"                 , true , 4096 },
+    { "0x1000"               , true , 0x1000 },
+    { "  0x20"               , true , 0x20 },
+    { "0xFFFFFFFFFFFFFFFF"   , true , UINT64_MAX },
+    { "18446744073709551615" , true , UINT64_MAX },
+    { "-4096"                , false, 0 },
+    { "  -4096"              , false, 0 },
+    { "\t-4096"              , false, 0 },
+    { "0x10000000000000000"  , false, 0 },
+    { "18446744073709551616" , false, 0 },
+    { ""                     , false, 0 },
+    { "0x"                   , false, 0 },
+    { "12x"                  , false, 0 },
+  };
+
+  for(size_t i = 0; i < sizeof(numbers) / sizeof(numbers[0]); ++i)
+  {
+    const char * text = numbers[i].text;
+    uint64_t value = 0;
+    const bool valid = parseNumber(&text, &value);
+    if (valid != numbers[i].valid || (valid && value != numbers[i].value))
+    {
+      emit("selftest failed number=\"%s\" valid=%d", numbers[i].text, valid);
+      ++failures;
+    }
+
+    // the same number, as a command line gives it
+    WCHAR wide[64] = { 0 };
+    for(size_t c = 0; numbers[i].text[c] && c + 1 < 64; ++c)
+      wide[c] = (unsigned char)numbers[i].text[c];
+    value = 0;
+    const bool wideValid = parseWide(wide, &value);
+    if (wideValid != numbers[i].valid ||
+        (wideValid && value != numbers[i].value))
+    {
+      emit("selftest failed number=\"%s\" valid=%d as an argument",
+          numbers[i].text, wideValid);
+      ++failures;
+    }
+  }
+
+  if (failures)
+    return 1;
+
+  emit("selftest ok");
+  return 0;
+}
+
 static void usage(void)
 {
   printf(
@@ -1239,6 +1426,13 @@ static void usage(void)
     "      the same with the ranges given: REGISTERS is the guest physical\n"
     "      address of a page of the region that the PC keeps zeroed, MEMORY\n"
     "      and SIZE the shared memory\n"
+    "  check REGISTERS MEMORY SIZE\n"
+    "      says whether install would take these ranges, which must be whole\n"
+    "      pages that x64 can address and not RAM that Windows uses, and\n"
+    "      changes nothing\n"
+    "  selftest\n"
+    "      checks the numbers and ranges that install takes and refuses, on\n"
+    "      made-up RAM, and changes nothing\n"
     "  find\n"
     "      shows the region: the memory that Windows keeps reserved where\n"
     "      its RAM ends, where the HCS puts it\n"
@@ -1266,20 +1460,24 @@ int wmain(int argc, WCHAR ** argv)
   }
 
   const WCHAR * verb = argv[1];
-  if (_wcsicmp(verb, L"install") == 0 && argc == 6)
+  if ((_wcsicmp(verb, L"install") == 0 && argc == 6) ||
+      (_wcsicmp(verb, L"check") == 0 && argc == 5))
   {
     uint64_t values[3];
     for(int i = 0; i < 3; ++i)
-    {
-      WCHAR * end;
-      values[i] = _wcstoui64(argv[2 + i], &end, 0);
-      if (end == argv[2 + i] || *end)
+      if (!parseWide(argv[2 + i], &values[i]))
       {
         usage();
         return 2;
       }
-    }
-    return install(values[0], values[1], values[2], argv[5]) ? 0 : 1;
+
+    if (_wcsicmp(verb, L"install") == 0)
+      return install(values[0], values[1], values[2], argv[5]) ? 0 : 1;
+
+    if (!checkRanges("check", values[0], values[1], values[2]))
+      return 1;
+    emit("check ok");
+    return 0;
   }
 
   // the region that the guest finds, whose last page is the registers
@@ -1311,6 +1509,9 @@ int wmain(int argc, WCHAR ** argv)
 
   if (_wcsicmp(verb, L"remove") == 0 && argc == 2)
     return removeDevice() ? 0 : 1;
+
+  if (_wcsicmp(verb, L"selftest") == 0 && argc == 2)
+    return selfTest();
 
   if (_wcsicmp(verb, L"status") == 0 && argc == 2)
   {
