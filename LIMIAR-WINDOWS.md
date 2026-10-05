@@ -134,8 +134,21 @@ in [windows-client](windows-client/README.md).
      tell it where the region is: Windows keeps it as Loader Reserved
      memory that starts where RAM ends, which `lg-hyperv-ivshmem` looks
      for. Both guests found it where the HCS said it put it.
+   - The HCS's paravisor setting (`HclEnabled`) loads Windows' own
+     paravisor image; the HCS has no documented setting for one's own,
+     such as an OpenHCL build. On the runners it creates and starts a VM
+     with `GuestStateOnly` isolation, a guest state file and the region,
+     and puts the region where it does without the paravisor, but the VM's
+     firmware stops with a fatal error right after the start. The same VM
+     without the region keeps running, so the region and Windows'
+     paravisor do not go together there.
    - Open: whether the HCS gives the region to a VM with GPU-PV and
-     OpenHCL, and the IDD in such a guest rendering on the GPU.
+     OpenHCL, and the IDD in such a guest rendering on the GPU. The runners
+     have no GPU, so this needs a PC:
+     [hcs_probe_pc.ps1](windows-client/hcs_probe_pc.ps1) runs the whole
+     check there, in disposable VMs of the HCS, with a partition of the
+     PC's GPU and its driver in the guest, and with the paravisor setting;
+     see [windows-client](windows-client/README.md#pc-test).
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.

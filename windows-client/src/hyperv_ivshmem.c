@@ -41,6 +41,12 @@
 #include <newdev.h>
 #include <setupapi.h>
 
+#define COBJMACROS
+#include <initguid.h>
+#include <devguid.h>
+#include <dxgi.h>
+#include <d3d11.h>
+
 #include "ivshmem.h"
 
 #include <inttypes.h>
@@ -967,6 +973,99 @@ static void cmdIddLog(void)
   emit("iddlog ok");
 }
 
+/* adapters: the display adapters, as Windows' devices and as DXGI adapters,
+ * and whether Direct3D 11 makes a device on each. With a partition of the
+ * PC's GPU, one of them is the GPU, and Direct3D makes a device on it only
+ * if the GPU's driver from the PC's DriverStore is in the HostDriverStore */
+static void cmdAdapters(void)
+{
+  unsigned devices = 0;
+  HDEVINFO set = SetupDiGetClassDevsW(&GUID_DEVCLASS_DISPLAY, NULL, NULL,
+      DIGCF_PRESENT);
+  if (set != INVALID_HANDLE_VALUE)
+  {
+    SP_DEVINFO_DATA data = { .cbSize = sizeof(data) };
+    for(DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &data); ++i, ++devices)
+    {
+      WCHAR id[MAX_DEVICE_ID_LEN];
+      WCHAR name[256]   = L"";
+      WCHAR service[64] = L"";
+      if (CM_Get_Device_IDW(data.DevInst, id, MAX_DEVICE_ID_LEN, 0) !=
+          CR_SUCCESS)
+        wcscpy(id, L"unknown");
+      SetupDiGetDeviceRegistryPropertyW(set, &data, SPDRP_DEVICEDESC, NULL,
+          (BYTE *)name, sizeof(name) - sizeof(WCHAR), NULL);
+      SetupDiGetDeviceRegistryPropertyW(set, &data, SPDRP_SERVICE, NULL,
+          (BYTE *)service, sizeof(service) - sizeof(WCHAR), NULL);
+
+      ULONG status = 0, problem = 0;
+      CM_Get_DevNode_Status(&status, &problem, data.DevInst, 0);
+      emit("adapter device instance=%ls status=0x%lx problem=0x%lx "
+          "service=%ls name=%ls", id, (unsigned long)status,
+          (unsigned long)problem, service[0] ? service : L"none", name);
+    }
+    SetupDiDestroyDeviceInfoList(set);
+  }
+
+  typedef HRESULT (WINAPI * CreateFactory)(REFIID, void **);
+  typedef HRESULT (WINAPI * CreateDevice)(IDXGIAdapter *, D3D_DRIVER_TYPE,
+      HMODULE, UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
+      D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
+
+  HMODULE dxgi  = LoadLibraryW(L"dxgi.dll");
+  HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
+  CreateFactory createFactory = dxgi ?
+    (CreateFactory)GetProcAddress(dxgi, "CreateDXGIFactory1") : NULL;
+  CreateDevice createDevice = d3d11 ?
+    (CreateDevice)GetProcAddress(d3d11, "D3D11CreateDevice") : NULL;
+
+  IDXGIFactory1 * factory = NULL;
+  const HRESULT hr = createFactory && createDevice ?
+    createFactory(&IID_IDXGIFactory1, (void **)&factory) :
+    HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+  if (FAILED(hr))
+    emit("adapters failed step=dxgi error=0x%lx devices=%u",
+        (unsigned long)hr, devices);
+  else
+  {
+    unsigned adapters = 0, gpus = 0;
+    IDXGIAdapter1 * adapter;
+    for(UINT i = 0; SUCCEEDED(IDXGIFactory1_EnumAdapters1(factory, i,
+          &adapter)); ++i, ++adapters)
+    {
+      DXGI_ADAPTER_DESC1 desc = { 0 };
+      IDXGIAdapter1_GetDesc1(adapter, &desc);
+
+      ID3D11Device *    device = NULL;
+      D3D_FEATURE_LEVEL level  = 0;
+      const HRESULT made = createDevice((IDXGIAdapter *)adapter,
+          D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0, D3D11_SDK_VERSION,
+          &device, &level, NULL);
+      if (device)
+        ID3D11Device_Release(device);
+      IDXGIAdapter1_Release(adapter);
+
+      // Microsoft's own adapters, such as the Basic Render Driver, are
+      // vendor 0x1414
+      const bool gpu = SUCCEEDED(made) && desc.VendorId != 0x1414 &&
+        !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE);
+      gpus += gpu;
+      emit("adapter dxgi index=%u vendor=0x%04x device=0x%04x "
+          "memory=%" PRIu64 " flags=0x%x d3d11=0x%lx level=0x%x gpu=%d "
+          "name=%ls", i, desc.VendorId, desc.DeviceId,
+          (uint64_t)desc.DedicatedVideoMemory, desc.Flags,
+          (unsigned long)made, (unsigned)level, gpu, desc.Description);
+    }
+    IDXGIFactory1_Release(factory);
+    emit("adapters ok devices=%u dxgi=%u gpus=%u", devices, adapters, gpus);
+  }
+
+  if (d3d11)
+    FreeLibrary(d3d11);
+  if (dxgi)
+    FreeLibrary(dxgi);
+}
+
 static void powerOff(void)
 {
   HANDLE token;
@@ -1022,6 +1121,8 @@ static void handle(const char * line, const WCHAR * inf)
     cmdIdd();
   else if (command(line, "iddlog", &args))
     cmdIddLog();
+  else if (command(line, "adapters", &args))
+    cmdAdapters();
   else if (command(line, "off", &args))
   {
     emit("off");
@@ -1147,6 +1248,9 @@ static void usage(void)
     "      shows the device and its resources\n"
     "  memory\n"
     "      shows the RAM that Windows uses, which the device stays out of\n"
+    "  adapters\n"
+    "      shows the display adapters, and whether Direct3D 11 works on\n"
+    "      each, such as a partition of the PC's GPU\n"
     "  serial PORT [INF]\n"
     "      answers the HCS probe (lg-windows-client-hcs-probe) on a serial\n"
     "      port such as COM1\n");
@@ -1217,6 +1321,12 @@ int wmain(int argc, WCHAR ** argv)
   if (_wcsicmp(verb, L"memory") == 0 && argc == 2)
   {
     memory();
+    return 0;
+  }
+
+  if (_wcsicmp(verb, L"adapters") == 0 && argc == 2)
+  {
+    cmdAdapters();
     return 0;
   }
 
