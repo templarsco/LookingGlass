@@ -60,6 +60,9 @@ target_link_libraries(lg-windows-client-loopback
   lgmp
 )
 
+# what the HCS probe's report says about the virtual machines of the PC
+add_executable(lg-hcs-systems-test src/hcs_systems_test.c src/hcs_systems.c)
+
 if(WIN32)
   set_target_properties(lg-windows-client-loopback PROPERTIES
     LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
@@ -121,7 +124,7 @@ if(WIN32)
 
     # the init is a source only for the command that builds it to run
     add_executable(lg-windows-client-hcs-probe src/hcs_probe.c
-      "${GUEST_INIT}")
+      src/hcs_systems.c "${GUEST_INIT}")
     target_compile_definitions(lg-windows-client-hcs-probe PRIVATE
       LG_HCS_PROBE_GUEST="${GUEST_INIT}")
     set_source_files_properties(src/hcs_probe.c PROPERTIES
@@ -146,6 +149,8 @@ include(CTest)
 if(BUILD_TESTING)
   add_test(NAME loopback COMMAND lg-windows-client-loopback)
   set_tests_properties(loopback PROPERTIES TIMEOUT 60)
+  add_test(NAME hcs-systems COMMAND lg-hcs-systems-test)
+  set_tests_properties(hcs-systems PROPERTIES TIMEOUT 60)
 endif()
 
 feature_summary(WHAT ENABLED_FEATURES DISABLED_FEATURES)

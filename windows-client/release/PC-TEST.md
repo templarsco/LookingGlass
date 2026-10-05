@@ -45,8 +45,14 @@ test certificate, which only the guest trusts.
 
 ## Running
 
-Unpack the folder to a path without spaces, such as `C:\lg-pc-test`, and
-run in an elevated Windows PowerShell:
+Unpack the folder to a path without spaces, such as `C:\lg-pc-test`. First
+see what a run would do, which needs no elevation and changes nothing:
+
+```
+powershell -ExecutionPolicy Bypass -File C:\lg-pc-test\hcs_probe_pc.ps1 -Plan
+```
+
+Then run it in an elevated Windows PowerShell, without `-Plan`:
 
 ```
 powershell -ExecutionPolicy Bypass -File C:\lg-pc-test\hcs_probe_pc.ps1
@@ -58,9 +64,19 @@ free on the drive of the work folder, `work` next to the script unless
 download and Windows setting itself up. At the end the script names the
 zip to send back.
 
+- `-Plan` says what a run would do, with this PC's GPUs, free space and
+  what is downloaded already, and does nothing else.
 - `-Gpu NAME` picks the GPU, by the Name that `Get-VMHostPartitionableGpu`
-  shows, when Hyper-V can partition several. `-NoGpu` tests without one,
-  as CI does on runners that have no GPU.
+  shows, when Hyper-V can partition several, as on a PC with a GPU in the
+  processor and another one on a card. `-NoGpu` tests without one, as CI
+  does on runners that have no GPU.
+- The IVSHMEM driver goes into the guest, and nothing here knows its hash in
+  advance, so the script shows the SHA-256 of what it downloaded and of the
+  ISO, and stops unless every driver catalog has a valid signature.
+  `-IvshmemSha256` and `-IsoSha256` stop it unless the files are the ones
+  with the hashes you give, which is how to pin a run to files that you
+  checked before. `-AllowUnverifiedDriver` accepts a driver whose signature
+  is not valid.
 - `-Iso PATH` uses a Windows ISO that is on the PC already.
 - `-Watch` leaves the client showing the guest's display until you close
   its window, or for ten minutes.
@@ -69,6 +85,24 @@ zip to send back.
 - `-NoHcl` skips the VMs with the paravisor setting.
 
 Deleting the work folder removes everything the test made.
+
+## What goes in the zip
+
+The log of the run, the probe's report, the guest's logs, the Hyper-V events
+about the probe's own VMs, and the first frame that the client composed. The
+probe's report says how many VMs the HCS lists on the PC, with the type, the
+owner and the state of each, and no name or id of any: the zip may go to
+someone else, and these identify a PC's VMs. The script also hides the user
+and machine names in the text files that it zips.
+
+The log still has the PC's Windows version, its processor, free space and the
+device path of the GPU, and the frame is a picture of the guest's display,
+which in this test is a new Windows. Read `pc-test.log` before sending the
+zip.
+
+While the probe runs, the PC's other VMs keep running, and share the GPU
+with the probe's. Do not start a game on the PC, or in a VM that uses its
+GPU, until the test ends.
 
 ## What it does not do
 
