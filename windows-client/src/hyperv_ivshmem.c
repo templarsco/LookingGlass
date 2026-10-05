@@ -612,8 +612,13 @@ static HANDLE              ivshmem = INVALID_HANDLE_VALUE;
 static volatile uint8_t  * map;
 static uint64_t            mapSize;
 
+static void unmapIvshmem(void);
+
 static bool mapIvshmem(uint16_t * peer)
 {
+  // a mapping from an earlier call is given up, not lost
+  unmapIvshmem();
+
   HDEVINFO set = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_IVSHMEM, NULL, NULL,
       DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
   if (set == INVALID_HANDLE_VALUE)
@@ -657,13 +662,21 @@ static bool mapIvshmem(uint16_t * peer)
   IVSHMEM_SIZE total;
   if (!DeviceIoControl(ivshmem, IOCTL_IVSHMEM_REQUEST_SIZE, NULL, 0, &total,
         sizeof(total), NULL, NULL))
-    return failed("map", "size", GetLastError());
+  {
+    const DWORD sizeError = GetLastError();
+    unmapIvshmem();
+    return failed("map", "size", sizeError);
+  }
 
   IVSHMEM_MMAP_CONFIG config = { .cacheMode = IVSHMEM_CACHE_WRITECOMBINED };
   IVSHMEM_MMAP mmap = { 0 };
   if (!DeviceIoControl(ivshmem, IOCTL_IVSHMEM_REQUEST_MMAP, &config,
         sizeof(config), &mmap, sizeof(mmap), NULL, NULL))
-    return failed("map", "mmap", GetLastError());
+  {
+    const DWORD mmapError = GetLastError();
+    unmapIvshmem();
+    return failed("map", "mmap", mmapError);
+  }
 
   map     = mmap.ptr;
   mapSize = total;
