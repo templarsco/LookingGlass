@@ -893,6 +893,10 @@ struct Vm
   int         replies;
   bool        ready, panicked, disconnected, stopped;
 
+  // how much of the guest's serial output is in the log
+  uint64_t    logged;
+  bool        logCut;
+
   // a Windows guest restarts while it sets itself up, which closes the
   // serial port until the VM opens it again
   bool        reopenSerial;
@@ -956,6 +960,9 @@ static bool vmSerialClosed(struct Vm * vm)
   return true;
 }
 
+// the most of a guest's serial output that a log keeps
+#define SERIAL_LOG_LIMIT (UINT64_C(64) << 20)
+
 // reads what the serial port has; false once it is gone
 static bool vmPump(struct Vm * vm)
 {
@@ -983,9 +990,20 @@ static bool vmPump(struct Vm * vm)
       return vmSerialClosed(vm);
     available -= got;
 
-    if (vm->log)
+    if (vm->log && !vm->logCut)
     {
-      fwrite(buf, 1, got, vm->log);
+      // a guest that never stops writing would fill the PC's disk
+      const uint64_t room = SERIAL_LOG_LIMIT - vm->logged;
+      const size_t   keep = got < room ? got : (size_t)room;
+      fwrite(buf, 1, keep, vm->log);
+      vm->logged += keep;
+      if (keep < got)
+      {
+        fprintf(vm->log, "\n[the log ends here: the guest wrote more than "
+            "%u MiB to its serial port]\n",
+            (unsigned)(SERIAL_LOG_LIMIT >> 20));
+        vm->logCut = true;
+      }
       fflush(vm->log);
     }
 
