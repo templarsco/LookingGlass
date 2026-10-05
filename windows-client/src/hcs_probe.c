@@ -31,7 +31,9 @@
  * init (hcs_probe_guest.c) checks the memory from the guest side and answers
  * on the serial port. The VMs boot copies of the kernel and the initrd in the
  * probe's output folder and end when it exits, so the probe leaves nothing on
- * the host but that folder.
+ * the host but that folder, apart from what Windows records of its own accord
+ * and what it adds to the permissions of a disk that it boots, which it takes
+ * away when it ends.
  *
  * With --vm it instead checks a VM that something else created, such as
  * Hyper-V Manager: whether the HCS opens it and lets this PC add a
@@ -3461,7 +3463,9 @@ static void usage(void)
     "Checks whether this PC can share memory with a Hyper-V VM the way\n"
     "IVSHMEM does for Looking Glass. It boots disposable Linux VMs through\n"
     "the Host Compute Service and leaves nothing on the host but its output\n"
-    "folder. Run it from an elevated prompt.\n"
+    "folder, apart from what Windows records of its own accord, and what it\n"
+    "adds to the permissions of a disk that it boots, which it takes away\n"
+    "when it ends. Run it from an elevated prompt.\n"
     "\n"
     "  --kernel PATH   Linux kernel to boot (default: WSL's, in\n"
     "                  %%ProgramFiles%%\\WSL\\tools\\kernel)\n"

@@ -143,7 +143,9 @@ another escape key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
 
 `lg-windows-client-hcs-probe` checks, on a PC with Hyper-V, the two ways
 step 5 could give a VM the shared memory. It leaves nothing on the PC but
-its output folder. Each case boots a disposable Linux VM through the Host
+its output folder, apart from what Windows records of its own accord, and
+what it adds to a disk's permissions while it boots that disk, which it takes
+away when it ends. Each case boots a disposable Linux VM through the Host
 Compute Service, as WSL does, with WSL's kernel and the probe's own init,
 [hcs_probe_guest.c](src/hcs_probe_guest.c). The init maps the memory,
 checks a pattern the PC wrote at the start of every page, and exchanges one
@@ -171,7 +173,10 @@ It writes `report.json`, the VMs' serial logs, and the copies of the kernel
 and the initrd that the VMs boot to a new folder next to itself.
 `--only hdv` or `--only shm` runs one case, `--kernel` boots another x86_64
 kernel with Hyper-V PCI support, and `--size-mib` sets the size of the
-memory, 32 MiB by default. The report also counts the compute systems the
+memory, 32 MiB by default. The report is written again whenever a case or an
+attempt ends, as a whole document with `"complete": false`, so a run that is
+cut short keeps what it found out, and the report that ends the run has
+`"complete": true`. It also counts the compute systems the
 HCS already knows, such as WSL, with the type, owner and state of each, and
 none of their names or IDs, which identify the VMs of the PC.
 
@@ -179,7 +184,8 @@ none of their names or IDs, which identify the VMs of the PC.
 its ID (`(Get-VM NAME).Id`): whether the HCS opens it and creates a device
 host for it, and whether it lets the probe add a `SharedMemory` region,
 which the probe removes again. The VM keeps running, and nothing in it
-checks the region.
+checks the region. It acts on a VM that the probe did not make, so it needs
+`--allow-foreign-vm` too, and it is not for a VM that matters.
 
 `--windows-disk PATH` boots a disposable Windows guest instead, with a
 `SharedMemory` region, from a disk that
@@ -190,13 +196,19 @@ it installs the IVSHMEM driver on a device over the region, and the checks
 read and write through the driver's mapping, as the Looking Glass host
 does. The guest's `lg-hyperv-ivshmem adapters` also lists its display
 adapters, and whether Direct3D 11 makes a device on each, for the report.
-The guest writes to the disk. With `-Logs`, the script shows what
+The guest writes to the disk, so the probe boots only one that has the file
+`PATH.lgprobe`, which the script writes when it has finished a disk, unless
+`--allow-foreign-disk` says to boot another. With `-Logs`, the script shows what
 the guest logged on the disk. With `--client COMMAND` too, the guest then
 installs the Looking Glass IDD that the script's `-Idd` put on the disk,
 and the probe runs COMMAND with `{section}` replaced by the section's name
 and passes if it exits with 0, such as
 [client_smoke_test.py](client_smoke_test.py) `--section {section}`, which
-passes once the client composes a frame that the IDD served.
+passes once the client composes a frame that the IDD served. COMMAND is ended
+after ten minutes, with everything that it started: the client is usually its
+child, and a job object ends it with the command. With `--watch`, COMMAND is
+for looking at the guest and not a test, so it also passes if it is still
+running when its ten minutes are up.
 
 `--gpu INTERFACE` gives the Windows guest a partition of the PC's GPU
 (GPU-PV) too, by the Name that `Get-VMHostPartitionableGpu` shows: the

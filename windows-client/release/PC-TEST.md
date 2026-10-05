@@ -41,12 +41,29 @@ whether the Looking Glass client on the PC then shows the VM's display.
 Nothing else on the PC changes: no other virtual machine, no certificate,
 no boot setting and no driver of the PC. The probe's VMs go away when it
 ends. The test signs nothing: the IDD's package is signed by the build's
-test certificate, which only the guest trusts.
+test certificate, which only the guest trusts. The bundle's files lose the
+mark that says that they came from the internet, as what the script copies
+into the guest should not carry it there. The disk that the test makes has a
+small file next to it, `windows.vhdx.lgprobe`, which says that the script
+finished it: the probe boots only a disk that has one, as the guest writes
+to it.
+
+The VMs of the probe share the PC's GPU with any other VM that uses it, and
+sharing a GPU between virtual machines is an experimental part of Hyper-V,
+which can slow or stop what another VM is showing.
 
 ## Running
 
-Unpack the folder to a path without spaces, such as `C:\lg-pc-test`. First
-see what a run would do, which needs no elevation and changes nothing:
+Unpack the folder to a path without spaces. The script runs what is in the
+folder, and what it puts in the work folder, as an administrator for tens of
+minutes, so no account but the administrators and you may be able to change
+them: a folder made in the root of `C:`, such as `C:\lg-pc-test`, can be
+changed by every account on the PC, and the script then stops and says so.
+Run it with `-LockFolders`, which locks the folders to SYSTEM and the
+administrators, with read access for you, or lock them yourself; a locked
+folder needs an elevated shell to delete. First see what a run would do,
+which needs no elevation and changes nothing, and which says if the folders
+can be changed by others:
 
 ```
 powershell -ExecutionPolicy Bypass -File C:\lg-pc-test\hcs_probe_pc.ps1 -Plan
@@ -79,7 +96,7 @@ zip to send back.
   is not valid.
 - `-Iso PATH` uses a Windows ISO that is on the PC already.
 - `-Watch` leaves the client showing the guest's display until you close
-  its window, or for ten minutes.
+  its window, or for ten minutes, which is not a failure.
 - `-Reuse` boots the disk of the last run again instead of making a new
   one.
 - `-NoHcl` skips the VMs with the paravisor setting.
@@ -95,7 +112,10 @@ owner and the state of each, and no name or id of any: the zip may go to
 someone else, and these identify a PC's VMs. The script also hides the user
 and machine names in the text files that it zips.
 
-The log still has the PC's Windows version, its processor, free space and the
+The log has the user's and the machine's names where a transcript puts them,
+and the script hides them in the text files that it zips; it hides them by
+their text, so a path that has them in another form is not changed. The log
+still has the PC's Windows version, its processor, free space and the
 device path of the GPU, and the frame is a picture of the guest's display,
 which in this test is a new Windows. Read `pc-test.log` before sending the
 zip.
