@@ -5,6 +5,8 @@ add_library(displayserver_Win32 STATIC
   win32.c
   input_event.c
   keymap.c
+  vblank.c
+  vblank_source.c
 )
 
 # per monitor DPI awareness v2 and the DPI aware window APIs need Windows 10
@@ -19,6 +21,7 @@ target_link_libraries(displayserver_Win32
   lg_resources
   user32
   gdi32
+  dwmapi
   opengl32
 )
 

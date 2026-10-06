@@ -60,17 +60,17 @@ FRAME_TYPE_BGRA   = 1
 HEADER = struct.Struct('<QIIQIIIIIIQ')
 
 
-def expected_color(x, y):
+def expected_color(x, y, width=WIDTH, height=HEIGHT, serial=SERIAL):
   """The colour client/transports/Test/test.c generates at x, y."""
-  r = x * 255 // (WIDTH  - 1)
-  g = y * 255 // (HEIGHT - 1)
+  r = x * 255 // max(width  - 1, 1)
+  g = y * 255 // max(height - 1, 1)
   b = 0x30 if ((x // 32) ^ (y // 32)) & 1 else 0x90
 
-  box  = min(WIDTH, HEIGHT, 64)
-  boxX = (SERIAL * 7) % (WIDTH  - box)
-  boxY = (SERIAL * 5) % (HEIGHT - box)
+  box  = min(width, height, 64)
+  boxX = (serial * 7) % (width  - box if width  > box else 1)
+  boxY = (serial * 5) % (height - box if height > box else 1)
   if boxX <= x < boxX + box and boxY <= y < boxY + box:
-    color = (SERIAL * 2654435761) & 0xffffffff
+    color = (serial * 2654435761) & 0xffffffff
     r = (color >> 16) & 0xff
     g = (color >>  8) & 0xff
     b =  color        & 0xff
@@ -97,18 +97,20 @@ def test_transport():
 
 
 class Producer:
-  """lg-windows-client-producer serving frames 1 to SERIAL on a section."""
+  """lg-windows-client-producer serving frames 1 to SERIAL on a section, or
+  what its extra options say."""
 
-  def __init__(self, args, name, log):
+  def __init__(self, args, name, log, size=(WIDTH, HEIGHT), frames=SERIAL,
+      extra=()):
     self.log   = log
     self.lines = queue.Queue()
     command = shlex.split(args.runner) + [
       args.producer,
-      f'--size={WIDTH}x{HEIGHT}',
-      f'--frames={SERIAL}',
+      f'--size={size[0]}x{size[1]}',
+      f'--frames={frames}',
       f'--timeout={int(args.timeout) + 60}',
       name,
-    ] + (['--world'] if args.world else [])
+    ] + list(extra) + (['--world'] if args.world else [])
     self.process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         errors='replace')
@@ -160,7 +162,7 @@ def run_client(args, transport, capture, log, frame=SERIAL,
     'win:noScreensaver=no',
     'opengl:mipmap=no',
     'opengl:vsync=no',
-    'opengl:amdPinnedMem=no',
+    f'opengl:amdPinnedMem={args.amd_pinned_mem}',
     'opengl:preventBuffer=yes',
   ] + args.client_args
 
@@ -172,13 +174,13 @@ def run_client(args, transport, capture, log, frame=SERIAL,
       return None
 
 
-def check_capture(path):
+def check_capture(path, width=WIDTH, height=HEIGHT, serial=SERIAL):
   data = Path(path).read_bytes()
   if len(data) < HEADER.size:
     return ['the capture is shorter than its header']
 
   (magic, version, headerSize, frameSerial, sourceType, captureFormat,
-   width, height, stride, flags, dataSize) = HEADER.unpack_from(data)
+   gotWidth, gotHeight, stride, flags, dataSize) = HEADER.unpack_from(data)
 
   errors = []
   def expect(name, value, wanted):
@@ -188,12 +190,12 @@ def check_capture(path):
   expect('magic', magic, CAPTURE_MAGIC)
   expect('version', version, CAPTURE_VERSION)
   expect('headerSize', headerSize, HEADER.size)
-  expect('frameSerial', frameSerial, SERIAL)
+  expect('frameSerial', frameSerial, serial)
   expect('sourceType', sourceType, FRAME_TYPE_BGRA)
   expect('captureFormat', captureFormat, CAPTURE_RGBA8)
-  expect('width', width, WIDTH)
-  expect('height', height, HEIGHT)
-  expect('stride', stride, WIDTH * 4)
+  expect('width', gotWidth, width)
+  expect('height', gotHeight, height)
+  expect('stride', stride, width * 4)
   expect('dataSize', dataSize, len(data) - HEADER.size)
   if errors:
     return errors
@@ -201,19 +203,19 @@ def check_capture(path):
   pixels     = data[HEADER.size:]
   bottomUp   = flags & CAPTURE_BOTTOM_UP
   mismatches = 0
-  for y in range(HEIGHT):
-    row = (HEIGHT - 1 - y if bottomUp else y) * stride
-    for x in range(WIDTH):
+  for y in range(height):
+    row = (height - 1 - y if bottomUp else y) * stride
+    for x in range(width):
       offset = row + x * 4
       got    = tuple(pixels[offset:offset + 3])
-      wanted = expected_color(x, y)
+      wanted = expected_color(x, y, width, height, serial)
       if max(abs(a - b) for a, b in zip(got, wanted)) > 2:
         if mismatches < 10:
           errors.append(f'pixel {x},{y} is {got}, expected {wanted}')
         mismatches += 1
 
   if mismatches:
-    errors.append(f'{mismatches} of {WIDTH * HEIGHT} pixels differ')
+    errors.append(f'{mismatches} of {width * height} pixels differ')
   return errors
 
 
@@ -297,6 +299,8 @@ def main():
       help='command that runs Windows programs, such as wine64')
   parser.add_argument('--output', help='keep the capture and logs here')
   parser.add_argument('--timeout', type=float, default=60)
+  parser.add_argument('--amd-pinned-mem', choices=('yes', 'no'), default='yes',
+      help='exercise the default pinned-memory path when the GPU supports it')
   parser.add_argument('client_args', nargs='*',
       help='extra client options, after --')
   args = parser.parse_args()

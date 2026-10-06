@@ -104,13 +104,106 @@ looking-glass-client.exe app:transport=lgmp lgmp:shmDevice=Local\looking-glass
 services such as Hyper-V's, and creating one needs administrator rights.
 The producer also takes `--size=WxH`, `--fps=N` and `--frames=N`, and
 refuses to start if the section already exists, as that section would keep
-someone else's DACL.
+someone else's DACL. `--then=WxH:N` makes it serve another size after the
+frames so far, up to frame N, as when the guest sets another resolution,
+and `--then=WxH:N:restart` makes the capture host of the guest restart
+instead: the producer drops its LGMP host and starts a new one on the same
+memory, which LGMP gives a new session ID so that the client sees it, and
+frames 1 to N follow. `--gap=MS` keeps the host away for that long first,
+and `--dwell=MS` is how long the producer waits after a step, once the
+client has taken its frames, before the next one.
+
+### Presentation Timing
+
+With `win:jitRender=yes` the client renders in step with the display, as it
+does under Wayland and X11: the render thread waits for the display's
+vertical blank, then renders and submits the newest frame. That is also what
+the frame scheduler needs, to pace the host's frames against the client's
+display. The option is still off by default.
+
+[vblank.c](../client/displayservers/Win32/vblank.c) runs a thread that waits
+for the blank of the display that the window is on, through the graphics
+kernel's `D3DKMTWaitForVerticalBlankEvent`, and the render thread waits for
+that thread. A session that cannot ask the graphics kernel, such as a remote
+one, gets `DwmFlush`. If neither gives a blank, or none comes for the longer
+of 50 ms and eight periods, as when a display is off, `waitFrame` returns at
+the display mode's rate without claiming that it is the display's cadence,
+and the render thread keeps rendering; the blank is the cadence again once it
+comes. The thread also measures the time between blanks, and the client uses
+that as the frame period once it has enough of it, since a display mode has
+whole hertz only.
+
+The graphics kernel's wait is for one display, which matters with displays
+of different rates. On a PC with a 240 Hz and a 144 Hz display, DWM's
+refresh was 239.96 Hz and `DwmFlush` ticked at 240 Hz whichever display was
+measured, while the graphics kernel gave 239.96 Hz for the first and
+143.87 Hz for the second.
+
+When the client stops, it logs what it measured, between a blank and its own
+`SwapBuffers`:
+
+```
+Vertical blank by graphics kernel: 1231 blanks, 4.1671 ms (239.977 Hz) measured, p50 4.1675 p95 4.1925 p99 4.2375 max 4.4154 ms, 0 missed, 0 early
+Render after the blank: let go at p50 0.0075 p95 0.0125 p99 0.0175 max 3.1778 ms, frame submitted at p50 0.0725 p95 0.0925 p99 0.1175 max 28.1704 ms; 1 of 1179 frames took over a period
+```
+
+Two programs measure it:
+
+- `lg-windows-client-vblank-probe` ([vblank_probe.c](src/vblank_probe.c))
+  opens no window. It lists the displays, and for one of them gives the
+  intervals between the graphics kernel's blanks and between `DwmFlush`'s
+  ticks, and DWM's own account of the refresh rate. `--monitor N` picks the
+  display and `--seconds N` how long it measures.
+- [client_pacing_test.py](client_pacing_test.py) runs the client on a
+  synthetic stream for a few seconds in a small window at the corner of the
+  display, and reads those two lines. `--require-hardware` also fails the
+  run unless the blanks came from the graphics kernel, were measured, none
+  were missed or early, and the frames were in time. CI runs it without that
+  option, as its runners have no display to pace by.
+
+On a PC with a Ryzen 7 9800X3D, an RX 9070 XT (driver 26.9.1.260826) and a
+1920x1080 240 Hz display, Windows 11 build 26200, the probe saw 720 blanks in
+3 s with a mean of 4.1673 ms, p99 of 4.2634 ms and none missed, and
+`DwmFlush` a p99 of 4.5203 ms. The client's line above is a 5 s run of a
+240 frames a second stream. A 120 frames a second one on the same display had
+a p99 of 4.2425 ms between blanks and none missed, with 1 of 599 frames over a
+period. The one frame over a period was the first, which makes the renderer's
+buffers and textures.
+
+Not covered: these are what the client measured itself, so they are not when
+a frame was on the display, which DWM composes for a windowed OpenGL client,
+and which only a camera or an analyzer on the display can say. They are not a
+latency, and they are not a result for a stream from a guest, with the
+frame scheduler. The client does not wait before rendering to be as late as it
+can, as the X11 one does after timing its render. Variable refresh, HDR, a
+window across two displays, and Windows builds other than 11 were not tried.
 
 ### Tests
 
-- The Win32 input layer and keymap have unit tests in
-  [client/tests](../client/tests), which run on Linux next to the X11 and
-  Wayland ones (`ctest -R display-input-win32`).
+- The client's unit tests in [client/tests](../client/tests) run natively on
+  Windows. They cover the LGMP transport (frames, input and clipboard, with a
+  host in the same process), the input and mouse state, keybinds, the clipboard,
+  frame scheduling and timing, the transport fallback, the configuration, the
+  Win32 input layer and keymap, and the pacing of the Win32 display server's
+  wait for the vertical blank. The SPICE, file clipboard (FUSE) and
+  rendering tests (GoogleTest with Weston or X11) are Linux only. `ENABLE_TESTS`
+  alone only adds the framebuffer capture on Windows, so ask for the unit tests
+  as well, in an MSYS2 MINGW64 shell:
+
+  ```sh
+  cd client/build
+  cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DENABLE_UNIT_TESTS=ON \
+    -DOPTIMIZE_FOR_NATIVE=OFF ..
+  make -j$(nproc)
+  ctest --output-on-failure -j$(nproc)
+  ```
+
+  The tests were written for Linux, so [client/tests/windows](../client/tests/windows)
+  stands in for what Windows lacks: `sys/mman.h` for anonymous memory, `alarm()`,
+  a section instead of a temporary file for the memory the LGMP transport
+  opens ([shm_test.h](../client/tests/shm_test.h)), and a clock that the tests
+  can set. They drive the code in one process: they do not push messages
+  through a Win32 window, and no guest is involved.
 - [client_smoke_test.py](client_smoke_test.py) runs a client built with
   `-DENABLE_TESTS=ON` on test frame 4 in a borderless window, reads back
   what the client composed in that window and compares every pixel with
@@ -133,11 +226,55 @@ someone else's DACL.
     --producer windows-client/build/lg-windows-client-producer.exe \
     client/build/looking-glass-client.exe
   ```
+- [client_format_test.py](client_format_test.py) makes the same check for a
+  matrix of formats, sizes, strides and upload paths: packed and padded
+  strides, odd sizes, the 24-bit formats, a 1080p frame, and sequences that
+  cycle the renderer's upload buffers, each with `opengl:amdPinnedMem` on
+  and off. Every case runs with its own empty configuration directory, so
+  the user's `client.ini` cannot change what is tested. HDR formats are not
+  covered, as the OpenGL renderer has no HDR-to-SDR path.
 
-Focus changes, pointer capture, the keyboard grab, DPI scaling, fullscreen
-and reconnects were checked by hand under Wine with Xvfb, not by an
-automated test. Wine on Xvfb injects Scroll Lock state changes, so pick
-another escape key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
+  ```sh
+  python windows-client/client_format_test.py client/build/looking-glass-client.exe
+  ```
+
+  CI runs it with Mesa's software OpenGL, which has no
+  `GL_AMD_pinned_memory`, so the pinned cases only exercise the ordinary
+  upload path there, and the test says so. That is not enough, because the
+  pinned path once failed only on hardware: on an RX 9070 XT (OpenGL 4.6
+  Compatibility Profile Context 26.9.1.260826), the renderer's
+  `glBufferSubData` into the buffer that the driver pins left it black,
+  without a GL error, so the client showed black frames by default. The
+  renderer now writes to the pinned memory directly, and a PC with an AMD
+  GPU should run the test with `--require-pinned`, which fails a case that
+  asked for the pinned path and did not get it:
+
+  ```sh
+  python windows-client/client_format_test.py --require-pinned \
+    client/build/looking-glass-client.exe
+  ```
+- [client_session_test.py](client_session_test.py) serves frames with the
+  producer while it does what a guest does, in four scenarios: the
+  resolution changes twice with the session going on; the host restarts at
+  once, at another resolution or at the same one; and the host is gone for
+  longer than the second that a client waits for it. A scenario passes if the
+  client composes the last frame, which only the last session has, at that
+  frame's size and with every pixel as generated, logged each size that it
+  was given in order, and started as many sessions as there were hosts,
+  logging that it waited for the host to restart after each but the last.
+  The window follows the frames' size, as `win:autoResize` makes it. CI runs
+  it on Windows.
+
+  ```sh
+  python windows-client/client_session_test.py \
+    --producer windows-client/build/lg-windows-client-producer.exe \
+    client/build/looking-glass-client.exe
+  ```
+
+Focus changes, pointer capture, the keyboard grab, DPI scaling and
+fullscreen were checked by hand under Wine with Xvfb, not by an automated
+test. Wine on Xvfb injects Scroll Lock state changes, so pick another escape
+key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
 
 ### HCS Shared Memory Probe
 
@@ -515,7 +652,9 @@ keeps the shared code covered there.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
 - There is no audio, clipboard or SPICE support on Windows.
-- The client has run on Windows only in CI, with software OpenGL, and
-  under Wine. No run on a physical Windows PC with a GPU driver is
-  recorded yet.
+- The client has run with software OpenGL in CI, under Wine, and on one
+  physical Windows PC, with an RX 9070 XT (OpenGL 4.6 Compatibility Profile
+  Context 26.9.1.260826), where `client_format_test.py` passes its 25 cases
+  and the 15 that ask for the pinned upload path get it. No other GPU or
+  driver has been tried.
 - Run times are not performance results.

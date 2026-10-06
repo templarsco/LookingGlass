@@ -524,7 +524,7 @@ static void init(void)
   clipboard_setLocalAvailable(true);
 }
 
-static void bind(struct Provider * provider)
+static void bindProvider(struct Provider * provider)
 {
   clipboard_setFallback(&plainOps, provider);
   CHECK(provider->attach == 1);
@@ -679,7 +679,7 @@ static void testFilePublication(void)
 static void testFileReplacement(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   clipboardFilesStubRemoteReady = true;
 
   const uint64_t first = UINT64_C(0x2000000000000001);
@@ -722,7 +722,7 @@ static void testFileReplacement(void)
 static void testFileFailure(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
 
   const LG_ClipboardData text[] = { LG_CLIPBOARD_DATA_TEXT };
   p.ev->notice(p.evCtx, text, 1);
@@ -812,7 +812,7 @@ static void waitAtomicBool(const atomic_bool * value)
 static void testCallbackSerialization(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData text[] = { LG_CLIPBOARD_DATA_TEXT };
   clipboard_notifyTypes(text, 1);
   CHECK(p.ev->request(p.evCtx, 1, LG_CLIPBOARD_DATA_TEXT));
@@ -848,7 +848,7 @@ static void testCallbackSerialization(void)
 static void testRequest(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData types[] =
     { LG_CLIPBOARD_DATA_TEXT, LG_CLIPBOARD_DATA_PNG };
   notice(&p, types, 2);
@@ -886,7 +886,7 @@ static void testRequest(void)
 static void testRemoteKeepsLocalRequest(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData types[] = { LG_CLIPBOARD_DATA_TEXT };
 
   clipboard_notifyTypes(types, 1);
@@ -920,7 +920,7 @@ static void testRemoteKeepsLocalRequest(void)
 static void testPendingRemoteKeepsLocalRequest(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData types[] = { LG_CLIPBOARD_DATA_TEXT };
 
   clipboard_notifyTypes(types, 1);
@@ -945,7 +945,7 @@ static void testPendingRemoteKeepsLocalRequest(void)
 static void testInvalid(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData bad[] = { LG_CLIPBOARD_DATA_NONE };
   p.ev->notice(p.evCtx, NULL, 1);
   p.ev->notice(p.evCtx, bad, 1);
@@ -1002,7 +1002,7 @@ static void testInvalid(void)
 static void testCancel(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData text[] = { LG_CLIPBOARD_DATA_TEXT };
   const LG_ClipboardData png[]  = { LG_CLIPBOARD_DATA_PNG };
 
@@ -1083,7 +1083,7 @@ static void testGeneration(void)
 static void testLocal(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData bad[] = { LG_CLIPBOARD_DATA_NONE };
   const LG_ClipboardData many[LG_CLIPBOARD_DATA_NONE + 1] = { 0 };
   const LG_ClipboardData types[] =
@@ -1138,7 +1138,7 @@ static void testLocal(void)
 static void testReentrant(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData types[] = { LG_CLIPBOARD_DATA_TEXT };
   notice(&p, types, 1);
 
@@ -1330,7 +1330,7 @@ static void testRequestPublication(void)
 static void testStreamLegacy(void)
 {
   init();
-  bind(&p);
+  bindProvider(&p);
   const LG_ClipboardData types[] = { LG_CLIPBOARD_DATA_TEXT };
   clipboard_notifyTypes(types, 1);
 

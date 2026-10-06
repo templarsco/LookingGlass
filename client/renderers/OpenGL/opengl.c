@@ -1400,18 +1400,27 @@ static bool opengl_bufferFn(void * opaque, const void * data, size_t size)
     return false;
   }
 
-  // update the buffer, this performs a DMA transfer if possible
-  g_gl_dynProcs.glBufferSubData(
-    GL_PIXEL_UNPACK_BUFFER,
-    this->texPos,
-    size,
-    data
-  );
-
-  if (check_gl_error("glBufferSubData"))
+#ifdef _WIN32
+  if (this->amdPinnedMemSupport)
   {
-    this->texUploadError = true;
-    return false;
+    // drawFrame waits for this buffer's fence before permitting CPU writes.
+    memcpy(this->texPixels[this->texWIndex] + this->texPos, data, size);
+  }
+  else
+#endif
+  {
+    g_gl_dynProcs.glBufferSubData(
+      GL_PIXEL_UNPACK_BUFFER,
+      this->texPos,
+      size,
+      data
+    );
+
+    if (check_gl_error("glBufferSubData"))
+    {
+      this->texUploadError = true;
+      return false;
+    }
   }
 
   this->texPos += size;
@@ -1437,11 +1446,11 @@ static bool drawFrame(struct Inst * this,
 
       case GL_TIMEOUT_EXPIRED:
         DEBUG_WARN("Timeout expired, DMA transfers are too slow!");
-        break;
+        return false;
 
       case GL_WAIT_FAILED:
         DEBUG_ERROR("Wait failed %d", glGetError());
-        break;
+        return false;
     }
 
     g_gl_dynProcs.glDeleteSync(this->fences[this->texWIndex]);

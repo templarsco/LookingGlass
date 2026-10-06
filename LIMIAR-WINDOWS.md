@@ -159,6 +159,24 @@ in [windows-client](windows-client/README.md).
 6. Add audio and complete reconnect/resolution-change handling. Measure
    frame pacing and input/display latency at 60/120/240 Hz on the actual
    host; a configured refresh rate is not a performance result.
+   Status, October 5, 2026: `win:jitRender` works on Windows. The render
+   thread waits for the vertical blank of the display that the window is on,
+   through the graphics kernel, and the client measures the display's refresh
+   period and how soon after a blank it submits a frame. On a PC with a 240 Hz
+   display, a synthetic stream was submitted a few hundredths of a millisecond
+   after the blank at the median, with no blank missed; see
+   [windows-client](windows-client/README.md#presentation-timing). When a frame
+   is on the display, input latency, audio, and a stream from a guest are not
+   measured.
+   Status, October 5, 2026: the reconnect and resolution-change handling is
+   tested on Windows with the test producer on a named section: it sets
+   another resolution with the session going on, and its capture host
+   restarts on the same memory, at once or after being gone for over a
+   second, as a guest's would. The client shows the last frame with every
+   pixel as generated, at its size, with the window following the frames'
+   size; see [windows-client](windows-client/README.md#tests). This does not
+   cover focus changes or a window dragged to another size, and the producer
+   is not a guest.
 
 ## Initial Acceptance Gates
 
