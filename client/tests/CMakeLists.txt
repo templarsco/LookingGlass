@@ -74,6 +74,21 @@ target_link_libraries(clipboard-format-tests
 add_test(NAME clipboard-format-tests COMMAND clipboard-format-tests)
 set_tests_properties(clipboard-format-tests PROPERTIES TIMEOUT 60)
 
+add_executable(win32-clipboard-tests
+  win32_clipboard_test.c
+  ../displayservers/Win32/clipboard.c
+  ../displayservers/Win32/clipboard_format.c
+)
+target_include_directories(win32-clipboard-tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+)
+target_link_libraries(win32-clipboard-tests
+  ${EXE_FLAGS}
+  lg_common
+)
+add_test(NAME win32-clipboard-tests COMMAND win32-clipboard-tests)
+set_tests_properties(win32-clipboard-tests PROPERTIES TIMEOUT 60)
+
 if(WIN32)
   add_executable(watchdog-tests watchdog_test.c)
   target_link_libraries(watchdog-tests
