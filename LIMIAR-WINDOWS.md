@@ -38,6 +38,16 @@ in [windows-client](windows-client/README.md).
    the endpoint half of the first gate below waits for step 3. The Win32
    input layer has unit tests. Focus, capture, DPI and reconnect behavior
    was checked by hand under Wine, not yet on a physical Windows PC.
+   Status, October 6, 2026: on a physical PC (Windows 11, an RX 9070 XT, a
+   240 Hz and a 144 Hz display) the client is a program of the GUI subsystem,
+   with a log file and a message box when it has no console; it puts its
+   window on a monitor when the position that is configured is on none,
+   renders nothing for a window that is minimized, asks Windows not to
+   throttle it, reads a configuration file in UTF-8, and copies text and
+   images between the PC's clipboard and a guest's over LGMP. All of it was
+   checked with the test transport and the test producer: no guest has
+   served frames, so the clipboard has not been tried with one. See
+   [windows-client](windows-client/README.md) for what was and was not tested.
 3. Add an explicit Windows local shared-memory endpoint with per-user ACLs
    and a negotiated protocol version. Do not reinterpret a Linux DMA-BUF
    file descriptor as a Windows handle. Never expose an unauthenticated
