@@ -243,7 +243,9 @@ api;
 
 static volatile LONG aborted;
 
-static void fail(const char * what)
+// it ends the program, which the compiler needs to know to see that what comes
+// after a failed allocation is not reached
+static void __attribute__((noreturn)) fail(const char * what)
 {
   fprintf(stderr, "%s\n", what);
   exit(2);
@@ -258,6 +260,10 @@ struct Str
 
 static void strAdd(struct Str * s, const char * text, size_t len)
 {
+  // the sums below do not wrap
+  if (len >= SIZE_MAX - s->len)
+    fail("Out of memory");
+
   if (s->len + len + 1 > s->cap)
   {
     size_t cap = s->cap ? s->cap : 256;
