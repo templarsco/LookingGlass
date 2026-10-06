@@ -799,6 +799,12 @@ jobs:
       run: |
         cd client/build
         ctest --output-on-failure -j$(nproc)
+    - name: Check the clipboard on Windows' own, in a window station of its own
+      run: |
+        # ctest passes the test if it cannot make a station, which is a
+        # reason to look, and this step does not
+        client/build/tests/win32-clipboard-real-tests.exe | tee clipboard-real.txt
+        grep -q "real tests passed" clipboard-real.txt
     - name: Build the test frame producer
       run: |
         mkdir windows-client/build
