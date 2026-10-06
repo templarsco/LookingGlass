@@ -25,6 +25,10 @@ endif()
 if (ENABLE_OPENGL)
   add_renderer(OpenGL)
 endif()
+# after OpenGL, which stays the one that is tried first
+if (ENABLE_D3D11)
+  add_renderer(D3D11)
+endif()
 
 list(REMOVE_AT RENDERERS      0)
 list(REMOVE_AT RENDERERS_LINK 0)

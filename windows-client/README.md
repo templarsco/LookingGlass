@@ -57,9 +57,10 @@ MSYS2 is needed rather than a plain MinGW-w64 install because the build
 embeds resources with `cp` and `dd`.
 
 The MinGW runtime is linked statically, so `looking-glass-client.exe` needs
-no extra DLLs. It renders with the OpenGL renderer through WGL. EGL, audio,
-clipboard file transfer, evdev input and SPICE are left out of the Windows
-build.
+no extra DLLs. It renders with the OpenGL renderer through WGL, and has a
+Direct3D 11 renderer that is not finished (see [Direct3D 11
+Renderer](#direct3d-11-renderer)). EGL, audio, clipboard file transfer, evdev
+input and SPICE are left out of the Windows build.
 
 ### Clipboard
 
@@ -104,6 +105,45 @@ is pasted from. **Not tested: a guest.** No LGMP host that speaks the clipboard
 exists in these tools, so the path from the core to the LGMP queue and the Windows
 guest's helper is covered by the client's existing tests of those, and not
 by this one.
+
+### Direct3D 11 Renderer
+
+`app:renderer=D3D11` selects a renderer that draws with Direct3D 11, into a
+flip model swap chain that the window manager shows without copying it. It
+needs no OpenGL driver, which is what a virtual machine or a remote session
+often lacks: with no GPU that Direct3D can use, it draws with WARP, Windows'
+own software rasterizer. OpenGL is still the renderer that the client starts
+with, and the one that is tried first; `-DENABLE_D3D11=OFF` leaves the new one
+out of the build.
+
+**It does not draw the guest's frames yet.** What exists is the part that the
+rest stands on: the device, the swap chain for the window, following the
+window's size, a clear and a present on every render, and the readback that
+the tests use. Frames, the cursor and the overlays come next, so it is for
+testing, not for use.
+
+- `d3d11:adapter` is `auto` (the GPU, and WARP if there is none that works),
+  `hardware` (the GPU only) or `warp`. `d3d11:vsync` waits for the vertical
+  blank to show a frame (off by default, as for OpenGL). The adapter and the
+  feature level are logged.
+- `d3d11.dll` is loaded when the renderer is made and is not linked in, so the
+  client's imports do not change, and a Windows that lacks Direct3D 11 only
+  loses this renderer. The window of this renderer gets no OpenGL pixel format.
+- The swap chain is the size of the window's client area in pixels, read from
+  Windows when the core says the window changed, and it is not the size
+  that the core computes with the scale, which can be a pixel off.
+- A GPU that is removed or reset ends the client with a message that says so.
+  It is not recovered from yet.
+
+[client_d3d11_test.py](client_d3d11_test.py) checks it on the client's test
+transport, on each adapter, with the capture that the client takes of its
+window: the capture is as large as the window and the colour that the renderer
+clears to. It also makes the window five sizes while frames arrive, and
+checks that the capture is the last size, that the client logs no failure
+and exits, and that an adapter that is not one is refused before the client
+starts. On the developer's PC (Windows 11, an RX 9070 XT) all five cases pass,
+and `auto` picks the RX 9070 XT. CI has no GPU: it covers WARP, and accepts
+the refusal of `hardware`.
 
 ### Running
 
@@ -383,6 +423,16 @@ window across two displays, and Windows builds other than 11 were not tried.
 
   ```sh
   python windows-client/client_startup_test.py client/build/looking-glass-client.exe
+  ```
+- [client_d3d11_test.py](client_d3d11_test.py) runs the client with the
+  Direct3D 11 renderer on each adapter, resizes its window while frames
+  arrive, and checks an adapter that is not one; see [Direct3D 11
+  Renderer](#direct3d-11-renderer). `--require-hardware` fails a PC that has no
+  GPU that Direct3D can use, which is what a PC with one should run it with.
+  CI runs it on Windows, where it only has WARP.
+
+  ```sh
+  python windows-client/client_d3d11_test.py client/build/looking-glass-client.exe
   ```
 - [client_binary_test.py](client_binary_test.py) reads the executable, on any
   host, and checks what a PC that is not the one that built it needs from
@@ -776,6 +826,9 @@ keeps the shared code covered there.
   host has not run in a Hyper-V guest yet.
 - The LGMP path copies each frame through the CPU into an OpenGL texture.
   There is no zero-copy import on Windows; DMA-BUF is Linux only.
+- The Direct3D 11 renderer draws no frames yet, and only the device, the swap
+  chain and the resize have been tried, on an RX 9070 XT and on WARP; no other
+  GPU, and no PC that lacks an OpenGL driver, which is what it is for.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
 - There is no audio or SPICE support on Windows, and no files on the
