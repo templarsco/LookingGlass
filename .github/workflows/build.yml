@@ -1,5 +1,8 @@
 name: build
 on: [push, pull_request]
+# no job writes to the repository: the token only reads it
+permissions:
+  contents: read
 jobs:
   client:
     runs-on: ubuntu-latest
@@ -286,10 +289,14 @@ jobs:
         Set-ItemProperty $key -Name DumpType -Value 1 -Type DWord
         Set-ItemProperty $key -Name DumpCount -Value 8 -Type DWord
     - name: Check shared memory with Hyper-V VMs that boot WSL's kernel
+      env:
+        # through the environment, as a file name can hold what a step takes
+        # for an expression
+        KERNEL: ${{ steps.wsl-kernel.outputs.kernel }}
       run: |
         python windows-client\hcs_probe_smoke.py `
           windows-client\build\lg-windows-client-hcs-probe.exe `
-          --kernel "${{ steps.wsl-kernel.outputs.kernel }}" --output hcs-probe
+          --kernel $env:KERNEL --output hcs-probe
     - name: Check shared memory with a VM of Hyper-V Manager
       run: |
         # a disposable VM without a disk, which waits in its firmware
@@ -303,7 +310,8 @@ jobs:
           foreach ($mib in 32, 1024) {
             python windows-client\hcs_probe_smoke.py `
               windows-client\build\lg-windows-client-hcs-probe.exe `
-              --vm $vm.Id --size-mib $mib --output hcs-probe-vm-$mib
+              --vm $vm.Id --allow-foreign-vm --size-mib $mib `
+              --output hcs-probe-vm-$mib
             if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
           }
         } finally {
@@ -450,7 +458,7 @@ jobs:
     - name: Install MinGW-w64, CMake and Mesa with MSYS2
       if: matrix.idd
       id: msys2
-      uses: msys2/setup-msys2@v2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
       with:
         msystem: MINGW64
         update: true
@@ -487,6 +495,12 @@ jobs:
         windows-client\build\lg-hyperv-ivshmem.exe memory
         $bytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
         "Windows reports 0x{0:x} bytes of memory" -f $bytes
+    - name: Check what keeps lg-hyperv-ivshmem's device out of the RAM
+      run: |
+        windows-client\build\lg-hyperv-ivshmem.exe selftest
+        if ($LASTEXITCODE) {
+          exit $LASTEXITCODE
+        }
     - name: Get the IVSHMEM driver that Looking Glass's installer bundles
       id: driver
       run: |
@@ -537,6 +551,9 @@ jobs:
       shell: powershell
       env:
         IDD: ${{ matrix.idd }}
+        # through the environment, as a file name in the archive can hold what
+        # a step takes for an expression
+        INF: ${{ steps.driver.outputs.inf }}
       run: |
         $idd = @{}
         if ($env:IDD -eq 'true') {
@@ -546,7 +563,7 @@ jobs:
           -Iso "$env:RUNNER_TEMP\windows.iso" `
           -Disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
           -Tool windows-client\build\lg-hyperv-ivshmem.exe `
-          -Inf "${{ steps.driver.outputs.inf }}" @idd
+          -Inf $env:INF @idd
         Remove-Item "$env:RUNNER_TEMP\windows.iso"
     - name: Check the IVSHMEM driver over shared memory in a Windows guest
       env:
@@ -670,7 +687,7 @@ jobs:
         path: ${{ runner.temp }}/lg-pc-test
     - name: Install Mesa with MSYS2
       id: msys2
-      uses: msys2/setup-msys2@v2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
       with:
         msystem: MINGW64
         update: true
@@ -698,10 +715,12 @@ jobs:
           "%RUNNER_TEMP%\lg-pc-test\client" || exit /b 1
         set "PATH=%MSYS2_LOCATION%\mingw64\bin;%PATH%"
         set GALLIUM_DRIVER=llvmpipe
-        rem as the bundle's README says to run it
+        rem as the bundle's README says to run it. The runner's temp folder can
+        rem be changed by every user, so the script says so and stops, unless
+        rem it is told to lock the folders, which this does and so tests
         powershell -NoProfile -ExecutionPolicy Bypass ^
           -File "%RUNNER_TEMP%\lg-pc-test\hcs_probe_pc.ps1" -NoGpu ^
-          -WorkDir "%RUNNER_TEMP%\pc-test"
+          -LockFolders -WorkDir "%RUNNER_TEMP%\pc-test"
     - name: Check the PC test's zip
       if: always()
       run: |
@@ -748,7 +767,7 @@ jobs:
       with:
         submodules: recursive
     - name: Install MinGW-w64, CMake and Mesa with MSYS2
-      uses: msys2/setup-msys2@v2
+      uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
       with:
         msystem: MINGW64
         update: true
@@ -829,7 +848,7 @@ jobs:
       with:
         submodules: recursive
     - name: Add msbuild to PATH
-      uses: microsoft/setup-msbuild@v3
+      uses: microsoft/setup-msbuild@30375c66a4eea26614e0d39710365f22f8b0af57 # v3
       with:
         msbuild-architecture: x64
     - name: Install NuGet packages

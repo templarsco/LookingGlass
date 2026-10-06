@@ -48,6 +48,13 @@ folder whose path has no spaces, such as C:\lg-pc-test:
 nothing, makes no folder and starts no virtual machine, and it needs no
 elevation. Run it first.
 
+Elevated code is run from the folder of this script and reads what is put in
+the work folder, so the script stops if another account can change either,
+as it can in a folder made in the root of C:. Move the bundle to a folder
+that only the administrators can write, or add -LockFolders, which locks the
+folders to SYSTEM and the administrators, with read access for you, and which
+then need an elevated shell to delete.
+
 -Gpu picks the GPU by the Name that Get-VMHostPartitionableGpu shows, when
 there are several, and -NoGpu tests without one, as CI does. -Iso takes a
 Windows ISO already on this PC instead of downloading one. -Watch leaves
@@ -82,7 +89,8 @@ param(
   [switch] $Plan,
   [string] $IvshmemSha256,
   [string] $IsoSha256,
-  [switch] $AllowUnverifiedDriver
+  [switch] $AllowUnverifiedDriver,
+  [switch] $LockFolders
 )
 
 $ErrorActionPreference = 'Stop'
@@ -175,6 +183,81 @@ foreach ($file in 'lg-windows-client-hcs-probe.exe', 'lg-hyperv-ivshmem.exe',
     throw "$file is missing from $PSScriptRoot`: unpack the whole bundle"
   }
 }
+# Elevated code is run from the folder of this script, and reads what is put in
+# the work folder, for tens of minutes. A folder that C:\ gave to every user
+# lets any of them replace the probe, a script or the ISO, and be run as an
+# administrator, so no account but SYSTEM, the Administrators and this user
+# may change them. These are the others that may, or may own the folder and so
+# say who may
+function Get-OtherWriters([string] $folder) {
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  $trusted = @('S-1-5-18', 'S-1-5-32-544', $me,
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+  $rights = [Security.AccessControl.FileSystemRights]
+  $write = $rights::WriteData -bor $rights::AppendData -bor
+    $rights::WriteExtendedAttributes -bor $rights::WriteAttributes -bor
+    $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor
+    $rights::ChangePermissions -bor $rights::TakeOwnership
+
+  $acl = Get-Acl -LiteralPath $folder
+  $others = @()
+  foreach ($ace in $acl.Access) {
+    # an entry that only what is inside inherits gives nothing on the folder
+    if ($ace.AccessControlType -ne 'Allow' -or ($ace.PropagationFlags -band
+        [Security.AccessControl.PropagationFlags]::InheritOnly) -or
+        -not ($ace.FileSystemRights -band $write)) {
+      continue
+    }
+    $sid = $ace.IdentityReference.Translate(
+      [Security.Principal.SecurityIdentifier]).Value
+    if ($sid -notin $trusted) {
+      $others += $ace.IdentityReference.Value
+    }
+  }
+  $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+  if ($owner -notin $trusted) {
+    $others += "the owner of the folder, $owner"
+  }
+  return @($others | Select-Object -Unique)
+}
+
+# SYSTEM and the Administrators change it, and this user reads it
+function Lock-Folder([string] $folder) {
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+  & icacls.exe $folder /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' `
+    '*S-1-5-32-544:(OI)(CI)F' "*${me}:(OI)(CI)RX" | Out-Null
+  if ($LASTEXITCODE) {
+    throw "icacls could not lock $folder (exit $LASTEXITCODE)"
+  }
+}
+
+$unsafe = @()
+foreach ($folder in $PSScriptRoot, $WorkDir) {
+  if (Test-Path -LiteralPath $folder) {
+    $writers = @(Get-OtherWriters $folder)
+    if ($writers) {
+      $unsafe += [pscustomobject]@{ Folder = $folder; Writers = $writers }
+    }
+  }
+}
+if ($unsafe -and -not $Plan) {
+  if ($LockFolders) {
+    foreach ($item in $unsafe) {
+      Write-Host "Locking $($item.Folder): it can be changed by $(
+        $item.Writers -join ', ')"
+      Lock-Folder $item.Folder
+    }
+  } else {
+    $lines = $unsafe | ForEach-Object {
+      "$($_.Folder) can be changed by $($_.Writers -join ', ')" }
+    throw ("This runs as an administrator what is in these folders, which " +
+      "other accounts can change, and could replace:`n" +
+      ($lines -join "`n") + "`nLock them to SYSTEM and the administrators " +
+      'yourself, or run this again with -LockFolders, which does it and gives ' +
+      'you read access; a locked folder needs an elevated shell to delete')
+  }
+}
+
 if (-not (Get-Command Get-VMHostPartitionableGpu -ErrorAction Ignore)) {
   throw "Hyper-V's PowerShell module is missing: turn on Hyper-V with its " +
     'management tools'
@@ -282,6 +365,18 @@ if ($Plan) {
     $clientText)
   Write-Host "  - a zip of the log and the probe's report"
   Write-Host ''
+  if ($unsafe) {
+    Write-Host ''
+    Write-Host ('== Elevated code is run from these folders, and other ' +
+      'accounts can change them:')
+    foreach ($item in $unsafe) {
+      Write-Host "  $($item.Folder): $($item.Writers -join ', ')"
+    }
+    Write-Host ('A run stops until they are moved somewhere that only the ' +
+      'administrators can write, or -LockFolders locks them to SYSTEM and ' +
+      'the administrators, with read access for you.')
+  }
+  Write-Host ''
   Write-Host ('Nothing else on this PC changes: no other virtual machine, no ' +
     'certificate, no boot setting and no driver of this PC. The disk is a ' +
     'new file that is mounted for a while, and Windows gives its volumes ' +
@@ -295,7 +390,12 @@ if ($Plan) {
 Get-ChildItem -LiteralPath $PSScriptRoot -Recurse -File |
   Where-Object FullName -notlike "$WorkDir\*" | Unblock-File
 
+$workExisted = Test-Path -LiteralPath $WorkDir
 New-Item -ItemType Directory -Force $WorkDir | Out-Null
+if (-not $workExisted -and @(Get-OtherWriters $WorkDir)) {
+  # a folder that this made takes its parent's permissions
+  Lock-Folder $WorkDir
+}
 
 $stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
 $results = "$WorkDir\results-$stamp"
@@ -439,6 +539,10 @@ try {
   }
   $probeArgs = @('--windows-disk', $disk, '--size-mib', '128', '--client',
     $client, '--out', "$results\probe")
+  if ($Watch) {
+    # a window that is left open is how this ends, and not a failure
+    $probeArgs += '--watch'
+  }
   if ($chosen) {
     $probeArgs += '--gpu', $chosen.Name
   }

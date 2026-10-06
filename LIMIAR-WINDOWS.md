@@ -45,10 +45,17 @@ in [windows-client](windows-client/README.md).
    Status, September 28, 2026: the endpoint is a named section, the Windows
    counterpart of `/dev/kvmfr0`. The client's LGMP transport builds for
    Windows and opens it by name (`lgmp:shmDevice`, `Global\looking-glass` by
-   default); the existing LGMP and KVMFR session checks negotiate the
-   protocol versions. Before mapping it, the client refuses a section whose
+   default); the existing LGMP and KVMFR session checks refuse a host whose
+   protocol versions are not the client's, which is an exact match and not a
+   negotiation, and the size of the section is read from the mapping, not
+   agreed. Before mapping it, the client refuses a section whose
    owner or DACL lets any account but the user, the user's logon session,
-   SYSTEM, Administrators or a Hyper-V VM account map or modify it. CI serves
+   SYSTEM, Administrators or a Hyper-V VM account map or modify it; the account
+   of any VM, `S-1-5-83-*`, is accepted, so the creator of the section must
+   grant the one VM's account that is meant, and not the group of them all.
+   A section with an integrity label below medium, which a sandboxed process
+   of the user's would make with the name that the client opens, is refused
+   too, as the user owns it. CI serves
    a known frame from a test producer on such a section, with a padded
    stride, and checks every pixel in the client's window; it also checks
    that a section every account can open is refused. This meets the first

@@ -14,7 +14,10 @@ Three steps of that plan exist so far:
   keyboard state and reconnects.
 - Step 3: the client reads frames over LGMP from a named shared memory
   section on the PC, the Windows counterpart of the KVMFR device on Linux.
-  It refuses a section that accounts other than the user's can open.
+  It refuses a section that any account but the user, the user's logon
+  session, SYSTEM, the Administrators and Hyper-V virtual machines can map
+  or modify. Any VM's account is accepted, not one VM's: the creator of the
+  section decides which VM gets it, and should grant that VM's account only.
 
 The client cannot show a guest yet. That is step 5, IVSHMEM on Hyper-V,
 which is under way: the [HCS probe](#hcs-shared-memory-probe) checks on a
@@ -277,7 +280,9 @@ key there, such as `input:escapeKey=KEY_RIGHTCTRL`.
 
 `lg-windows-client-hcs-probe` checks, on a PC with Hyper-V, the two ways
 step 5 could give a VM the shared memory. It leaves nothing on the PC but
-its output folder. Each case boots a disposable Linux VM through the Host
+its output folder, apart from what Windows records of its own accord, and
+what it adds to a disk's permissions while it boots that disk, which it takes
+away when it ends. Each case boots a disposable Linux VM through the Host
 Compute Service, as WSL does, with WSL's kernel and the probe's own init,
 [hcs_probe_guest.c](src/hcs_probe_guest.c). The init maps the memory,
 checks a pattern the PC wrote at the start of every page, and exchanges one
@@ -305,7 +310,10 @@ It writes `report.json`, the VMs' serial logs, and the copies of the kernel
 and the initrd that the VMs boot to a new folder next to itself.
 `--only hdv` or `--only shm` runs one case, `--kernel` boots another x86_64
 kernel with Hyper-V PCI support, and `--size-mib` sets the size of the
-memory, 32 MiB by default. The report also counts the compute systems the
+memory, 32 MiB by default. The report is written again whenever a case or an
+attempt ends, as a whole document with `"complete": false`, so a run that is
+cut short keeps what it found out, and the report that ends the run has
+`"complete": true`. It also counts the compute systems the
 HCS already knows, such as WSL, with the type, owner and state of each, and
 none of their names or IDs, which identify the VMs of the PC.
 
@@ -313,7 +321,8 @@ none of their names or IDs, which identify the VMs of the PC.
 its ID (`(Get-VM NAME).Id`): whether the HCS opens it and creates a device
 host for it, and whether it lets the probe add a `SharedMemory` region,
 which the probe removes again. The VM keeps running, and nothing in it
-checks the region.
+checks the region. It acts on a VM that the probe did not make, so it needs
+`--allow-foreign-vm` too, and it is not for a VM that matters.
 
 `--windows-disk PATH` boots a disposable Windows guest instead, with a
 `SharedMemory` region, from a disk that
@@ -324,13 +333,19 @@ it installs the IVSHMEM driver on a device over the region, and the checks
 read and write through the driver's mapping, as the Looking Glass host
 does. The guest's `lg-hyperv-ivshmem adapters` also lists its display
 adapters, and whether Direct3D 11 makes a device on each, for the report.
-The guest writes to the disk. With `-Logs`, the script shows what
+The guest writes to the disk, so the probe boots only one that has the file
+`PATH.lgprobe`, which the script writes when it has finished a disk, unless
+`--allow-foreign-disk` says to boot another. With `-Logs`, the script shows what
 the guest logged on the disk. With `--client COMMAND` too, the guest then
 installs the Looking Glass IDD that the script's `-Idd` put on the disk,
 and the probe runs COMMAND with `{section}` replaced by the section's name
 and passes if it exits with 0, such as
 [client_smoke_test.py](client_smoke_test.py) `--section {section}`, which
-passes once the client composes a frame that the IDD served.
+passes once the client composes a frame that the IDD served. COMMAND is ended
+after ten minutes, with everything that it started: the client is usually its
+child, and a job object ends it with the command. With `--watch`, COMMAND is
+for looking at the guest and not a test, so it also passes if it is still
+running when its ten minutes are up.
 
 `--gpu INTERFACE` gives the Windows guest a partition of the PC's GPU
 (GPU-PV) too, by the Name that `Get-VMHostPartitionableGpu` shows: the
@@ -523,8 +538,23 @@ whether Direct3D 11 makes a device on each.
 the guest physical address of the zeroed page, and MEMORY and SIZE are the
 shared memory's. `status` shows the device and its resources, `memory` the
 RAM that Windows uses, which the device must stay out of, and `remove`
-removes the device. The probe sends the address that the HCS reports in
-the VM's `SharedMemoryRegion` property over the serial port, which
+removes the device. The ranges must be whole pages that x64 can address and
+that stay out of that RAM, and `install` refuses them otherwise, however the
+numbers are written: a size that is a negative number, or that runs past the
+top of the address space, is refused and not taken for a range that ends
+at a small address. `check REGISTERS MEMORY SIZE` says whether `install`
+would take them and changes nothing, and `selftest` checks what `install`
+takes and refuses on made-up RAM, without a device or an administrator,
+which CI runs. The device stays across restarts with the ranges it was
+given, and Windows starts it before anything here runs again. The HCS puts
+the region after the VM's memory, so if the VM's memory changes in size, the
+ranges are stale until `install` runs again, and what Windows does with a
+device on ranges that are no longer the region, or that are RAM now, was not
+tried. Give the VM the same memory for as long as its guest keeps the device,
+or `remove` the device first.
+
+The probe sends the address that the HCS reports in the VM's
+`SharedMemoryRegion` property over the serial port, which
 `lg-hyperv-ivshmem serial COM1 INF` answers, and checks that the guest
 found the region there by itself.
 
@@ -557,9 +587,12 @@ process:
   session, posts one frame on the LGMP frame queue and then streams the
   pixels through the framebuffer write pointer, using the frame layout and
   post-then-write order of `host/src/app.c`.
-- The main thread acts as the viewer. It validates the session with the
-  same checks as the client LGMP transport, subscribes to the frame queue,
-  reads the frame through `common/framebuffer` and compares every pixel.
+- The main thread acts as the viewer. It checks the session and the frame
+  with checks of its own, which are simpler than the client LGMP
+  transport's, subscribes to the frame queue, reads the frame through
+  `common/framebuffer` and compares every pixel. So this says that the
+  protocol and the framebuffer code work on Windows, and nothing about the
+  transport's validation of a hostile host.
 
 The frame is 1280x720 BGRA with a padded stride of 1296 pixels, so a
 pitch/width mix-up fails. The test also fails if the host sees the frame
@@ -569,6 +602,14 @@ and ctest stops it after 60 seconds.
 The shared region is an unnamed mapping private to the test process, so it
 exposes nothing to other processes. The client's named section is covered
 by the smoke test above.
+
+`lg-windows-client-section-test` checks which named sections the client
+takes. It makes sections with different security in its own process and opens
+each as the client does: it must take one that only this user and the system
+can open, with no integrity label or one of medium integrity, and refuse one
+with a label below medium, as a sandboxed process of the user's would make
+with a name that the client opens, and one that every account, or every
+authenticated account, can write or map. ctest runs it on Windows.
 
 ### Building the Loopback Test
 

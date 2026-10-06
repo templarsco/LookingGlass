@@ -100,6 +100,15 @@ if(WIN32)
   set_target_properties(lg-hyperv-ivshmem PROPERTIES
     LINK_FLAGS "-municode -static -Wl,--gc-sections -Wl,--nxcompat")
 
+  # which named sections the client takes, by the security that they have
+  add_executable(lg-windows-client-section-test src/section_test.c)
+  target_link_libraries(lg-windows-client-section-test
+    lg_common
+    advapi32
+  )
+  set_target_properties(lg-windows-client-section-test PROPERTIES
+    LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+
   # the HCS shared memory probe boots VMs with its own init, which needs a
   # compiler for x86_64 Linux: the host's GCC when cross-compiling from
   # Linux, else Clang with LLD
@@ -143,6 +152,7 @@ if(WIN32)
       advapi32
       bcrypt
       ole32
+      shell32
     )
     set_target_properties(lg-windows-client-hcs-probe PROPERTIES
       LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
@@ -161,6 +171,10 @@ if(BUILD_TESTING)
   set_tests_properties(loopback PROPERTIES TIMEOUT 60)
   add_test(NAME hcs-systems COMMAND lg-hcs-systems-test)
   set_tests_properties(hcs-systems PROPERTIES TIMEOUT 60)
+  if(WIN32)
+    add_test(NAME section COMMAND lg-windows-client-section-test)
+    set_tests_properties(section PROPERTIES TIMEOUT 60)
+  endif()
 endif()
 
 feature_summary(WHAT ENABLED_FEATURES DISABLED_FEATURES)

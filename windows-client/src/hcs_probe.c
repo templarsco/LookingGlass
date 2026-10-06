@@ -31,7 +31,9 @@
  * init (hcs_probe_guest.c) checks the memory from the guest side and answers
  * on the serial port. The VMs boot copies of the kernel and the initrd in the
  * probe's output folder and end when it exits, so the probe leaves nothing on
- * the host but that folder.
+ * the host but that folder, apart from what Windows records of its own accord
+ * and what it adds to the permissions of a disk that it boots, which it takes
+ * away when it ends.
  *
  * With --vm it instead checks a VM that something else created, such as
  * Hyper-V Manager: whether the HCS opens it and lets this PC add a
@@ -53,6 +55,7 @@
 #include <bcrypt.h>
 #include <objbase.h>
 #include <sddl.h>
+#include <shellapi.h>
 
 #include <ctype.h>
 #include <inttypes.h>
@@ -240,7 +243,9 @@ api;
 
 static volatile LONG aborted;
 
-static void fail(const char * what)
+// it ends the program, which the compiler needs to know to see that what comes
+// after a failed allocation is not reached
+static void __attribute__((noreturn)) fail(const char * what)
 {
   fprintf(stderr, "%s\n", what);
   exit(2);
@@ -255,6 +260,10 @@ struct Str
 
 static void strAdd(struct Str * s, const char * text, size_t len)
 {
+  // the sums below do not wrap
+  if (len >= SIZE_MAX - s->len)
+    fail("Out of memory");
+
   if (s->len + len + 1 > s->cap)
   {
     size_t cap = s->cap ? s->cap : 256;
@@ -319,6 +328,11 @@ struct Json
   struct Str s;
   int        depth;
   bool       first[16];
+  char       bracket[16];  // how each open scope began
+
+  // told when an array or object of the first few levels is closed, which is
+  // when a case or an attempt has finished
+  void       (*checkpoint)(struct Json *);
 };
 
 static void jsonMember(struct Json * j, const char * key)
@@ -339,12 +353,17 @@ static void jsonOpen(struct Json * j, const char * key, char bracket)
     jsonMember(j, key);
   strAdd(&j->s, &bracket, 1);
   j->first[++j->depth] = true;
+  j->bracket[j->depth] = bracket;
 }
 
 static void jsonClose(struct Json * j, char bracket)
 {
   strAdd(&j->s, &bracket, 1);
   --j->depth;
+
+  // the report, the cases, a case, its attempts, an attempt
+  if (j->checkpoint && j->depth >= 1 && j->depth <= 4)
+    j->checkpoint(j);
 }
 
 static void jsonString(struct Json * j, const char * key, const char * value)
@@ -383,6 +402,22 @@ static void jsonRaw(struct Json * j, const char * key, const char * value)
     strAdd(&j->s, value, strlen(value));
   else
     strAdd(&j->s, "null", 4);
+}
+
+// the report as it stands, as a document of its own: the scopes that are open
+// are closed in a copy, and the root says that it is not complete
+static void jsonSnapshot(const struct Json * j, struct Str * out)
+{
+  if (j->s.len)
+    strAdd(out, j->s.data, j->s.len);
+  for(int d = j->depth; d >= 1; --d)
+  {
+    if (d == 1)
+      strLiteral(out, ",\"complete\":false");
+    const char close = j->bracket[d] == '[' ? ']' : '}';
+    strAdd(out, &close, 1);
+  }
+  strAdd(out, "\n", 1);
 }
 
 static WCHAR * widen(const char * text)
@@ -836,14 +871,21 @@ struct Options
   DWORD    bootTimeoutMs;
   bool     hdv, shm;
 
-  // an existing VM to check instead
+  // an existing VM to check instead, which this probe did not make
   char     vm[40];
+  bool     foreignVm;
 
-  // a disk with Windows to boot instead
+  // a disk with Windows to boot instead, which the guest writes to. It is one
+  // that hcs_probe_windows_disk.ps1 made unless foreignDisk says otherwise
   char     windowsDisk[MAX_PATH * 3];
+  bool     foreignDisk;
 
   // with it, a command that reads frames from the Looking Glass IDD
   char     client[4096];
+
+  // the command is for looking at the guest, so it is not a test: it passes
+  // if it was still running when its time was up
+  bool     watch;
 
   // and a partition of this PC's GPU for the guest, by its device
   // interface, as Get-VMHostPartitionableGpu names it
@@ -879,6 +921,50 @@ static void outPath(const struct Options * options, const char * name,
     fail("The output folder's path is too long");
 }
 
+// writes the report where it goes, whole or not at all: to a file next to it,
+// which then replaces it
+static bool reportWrite(const struct Options * options, const char * data,
+    size_t size)
+{
+  char path[MAX_PATH * 3], temp[MAX_PATH * 3 + 8];
+  outPath(options, "report.json", path, sizeof(path));
+  snprintf(temp, sizeof(temp), "%s.tmp", path);
+  if (!writeFile(temp, data, size))
+    return false;
+
+  WCHAR * wtemp = widen(temp);
+  WCHAR * wpath = widen(path);
+  const BOOL moved = MoveFileExW(wtemp, wpath, MOVEFILE_REPLACE_EXISTING);
+  free(wtemp);
+  free(wpath);
+  return moved;
+}
+
+// a copy of the report is written as the probe goes, so that a run that is
+// cut short, as a close of the console or a crash does, still has what it
+// found out: a PC test can take an hour
+static const struct Options * reportOptions;
+
+static void reportCheckpoint(struct Json * report)
+{
+  struct Str doc = { 0 };
+  jsonSnapshot(report, &doc);
+  reportWrite(reportOptions, doc.data, doc.len);
+  free(doc.data);
+}
+
+// what the HCS says about a VM, such as why it stopped. It says it on its own
+// threads, which may still have an event on the way when the VM is closed, so
+// it goes in memory that the VM does not own: a few hundred bytes for each VM
+// that are never given back, and that nothing can write into after they are
+// freed
+#define VM_EVENTS 8
+struct VmEvents
+{
+  char        * text[VM_EVENTS];
+  volatile LONG count;
+};
+
 // one disposable VM and the guest on its serial port
 struct Vm
 {
@@ -889,9 +975,17 @@ struct Vm
   FILE      * log;
   char        pending[16384];
   size_t      pendingLen;
+
+  // the line that the serial port is in the middle of
+  char        line[2048];
+  size_t      lineLen;
   struct Str  transcript;
   int         replies;
   bool        ready, panicked, disconnected, stopped;
+
+  // how much of the guest's serial output is in the log
+  uint64_t    logged;
+  bool        logCut;
 
   // a Windows guest restarts while it sets itself up, which closes the
   // serial port until the VM opens it again
@@ -904,9 +998,7 @@ struct Vm
   // the Windows guest's firmware without its disk and console, for --hcl
   bool        bare;
 
-  // what the HCS said about the VM, such as why it stopped
-  char        * events[8];
-  volatile LONG eventCount;
+  struct VmEvents * events;
 };
 
 static void vmPollState(struct Vm * vm)
@@ -956,6 +1048,54 @@ static bool vmSerialClosed(struct Vm * vm)
   return true;
 }
 
+// the most of a guest's serial output that a log keeps
+#define SERIAL_LOG_LIMIT (UINT64_C(64) << 20)
+
+static bool textHas(const char * text, size_t size, const char * needle)
+{
+  const size_t length = strlen(needle);
+  for(size_t i = 0; i + length <= size; ++i)
+    if (memcmp(text + i, needle, length) == 0)
+      return true;
+  return false;
+}
+
+// what the serial port gave, as the lines that vmNextReply reads. Only the
+// lines that it can use are kept, a reply or a panic, so that a guest that
+// writes a lot cannot push a reply out of the buffer before it is read, as it
+// did when a line that did not fit emptied it. When the buffer is full the
+// oldest lines go, whole. A line longer than a reply can be is cut: the log
+// has all of it
+static void vmFeed(struct Vm * vm, const char * data, size_t size)
+{
+  for(size_t i = 0; i < size; ++i)
+  {
+    if (vm->lineLen < sizeof(vm->line))
+      vm->line[vm->lineLen++] = data[i];
+    if (data[i] != '\n')
+      continue;
+
+    // the line ends with its newline, also when it was cut
+    vm->line[vm->lineLen - 1] = '\n';
+    if (textHas(vm->line, vm->lineLen, "LGSHM ") ||
+        textHas(vm->line, vm->lineLen, "Kernel panic"))
+    {
+      while (vm->pendingLen + vm->lineLen > sizeof(vm->pending) &&
+          vm->pendingLen)
+      {
+        const char * end = memchr(vm->pending, '\n', vm->pendingLen);
+        const size_t drop = end ? (size_t)(end - vm->pending) + 1 :
+          vm->pendingLen;
+        memmove(vm->pending, vm->pending + drop, vm->pendingLen - drop);
+        vm->pendingLen -= drop;
+      }
+      memcpy(vm->pending + vm->pendingLen, vm->line, vm->lineLen);
+      vm->pendingLen += vm->lineLen;
+    }
+    vm->lineLen = 0;
+  }
+}
+
 // reads what the serial port has; false once it is gone
 static bool vmPump(struct Vm * vm)
 {
@@ -983,18 +1123,24 @@ static bool vmPump(struct Vm * vm)
       return vmSerialClosed(vm);
     available -= got;
 
-    if (vm->log)
+    if (vm->log && !vm->logCut)
     {
-      fwrite(buf, 1, got, vm->log);
+      // a guest that never stops writing would fill the PC's disk
+      const uint64_t room = SERIAL_LOG_LIMIT - vm->logged;
+      const size_t   keep = got < room ? got : (size_t)room;
+      fwrite(buf, 1, keep, vm->log);
+      vm->logged += keep;
+      if (keep < got)
+      {
+        fprintf(vm->log, "\n[the log ends here: the guest wrote more than "
+            "%u MiB to its serial port]\n",
+            (unsigned)(SERIAL_LOG_LIMIT >> 20));
+        vm->logCut = true;
+      }
       fflush(vm->log);
     }
 
-    // a line longer than the buffer is dropped, the log keeps it
-    if (vm->pendingLen + got > sizeof(vm->pending))
-      vm->pendingLen = 0;
-    memcpy(vm->pending + vm->pendingLen, buf,
-        min((size_t)got, sizeof(vm->pending)));
-    vm->pendingLen += min((size_t)got, sizeof(vm->pending));
+    vmFeed(vm, buf, got);
   }
   return true;
 }
@@ -1216,9 +1362,9 @@ static void vmAccess(struct Vm * vm, bool grant, struct Json * report)
 // threads until the VM is closed
 static void CALLBACK vmEvent(HCS_EVENT * event, void * context)
 {
-  struct Vm * vm = context;
-  const LONG slot = InterlockedIncrement(&vm->eventCount) - 1;
-  if (slot >= (LONG)(sizeof(vm->events) / sizeof(vm->events[0])))
+  struct VmEvents * events = context;
+  const LONG slot = InterlockedIncrement(&events->count) - 1;
+  if (slot >= VM_EVENTS)
     return;
 
   const char * name =
@@ -1234,7 +1380,9 @@ static void CALLBACK vmEvent(HCS_EVENT * event, void * context)
   strPrintf(&text, "%s (0x%08lx): %s", name, (unsigned long)event->Type,
       data ? data : "");
   free(data);
-  vm->events[slot] = text.data;
+
+  // published once it is whole, for whoever reads the slot
+  InterlockedExchangePointer((PVOID volatile *)&events->text[slot], text.data);
 }
 
 static bool vmCreate(struct Vm * vm, const char * config,
@@ -1256,9 +1404,12 @@ static bool vmCreate(struct Vm * vm, const char * config,
   }
   free(doc);
 
+  vm->events = calloc(1, sizeof(*vm->events));
+  if (!vm->events)
+    fail("Out of memory");
   if (api.setComputeSystemCallback)
     jsonResult(report, "event_callback", api.setComputeSystemCallback(
-          vm->system, 0, vm, vmEvent));
+          vm->system, 0, vm->events, vmEvent));
   vmAccess(vm, true, report);
 
   WCHAR * wlog = widen(logPath);
@@ -1352,15 +1503,19 @@ static void vmDestroy(struct Vm * vm, struct Json * report)
     vmAccess(vm, false, report);
   }
 
-  // no event arrives once the VM is closed
-  const LONG events = min(vm->eventCount,
-      (LONG)(sizeof(vm->events) / sizeof(vm->events[0])));
+  // what the HCS has said so far. An event that is still on its way finds its
+  // slot in memory that is not freed, and is not in the report
   jsonOpen(report, "hcs_events", '[');
-  for(LONG i = 0; i < events; ++i)
+  if (vm->events)
   {
-    jsonString(report, NULL, vm->events[i]);
-    free(vm->events[i]);
-    vm->events[i] = NULL;
+    const LONG count = min(vm->events->count, (LONG)VM_EVENTS);
+    for(LONG i = 0; i < count; ++i)
+    {
+      char * text = InterlockedExchangePointer(
+          (PVOID volatile *)&vm->events->text[i], NULL);
+      jsonString(report, NULL, text);
+      free(text);
+    }
   }
   jsonClose(report, ']');
 
@@ -2624,6 +2779,73 @@ static void hclGuestStateDone(const char * id, const char * vmgs,
 #define IDD_TIMEOUT_MS    360000
 #define CLIENT_TIMEOUT_MS 600000
 
+// starts --client's command with its output going to log, in a job that ends
+// every process that the command started, and the command itself, when the
+// job is closed or ended. The command is often a shell or python, and the
+// client is its child, which ending the command alone leaves running, with
+// its window and the shared memory. It is suspended until it is in the job,
+// so that it cannot start anything first. Without a job, the command is
+// started as it would be, and ended alone.
+static bool startContained(WCHAR * command, HANDLE log,
+    PROCESS_INFORMATION * pi, HANDLE * job, DWORD * error)
+{
+  *job = CreateJobObjectW(NULL, NULL);
+  if (*job)
+  {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = { 0 };
+    limits.BasicLimitInformation.LimitFlags =
+      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(*job, JobObjectExtendedLimitInformation,
+          &limits, sizeof(limits)))
+    {
+      CloseHandle(*job);
+      *job = NULL;
+    }
+  }
+
+  // the log is the only handle that the command inherits, and not every
+  // handle of the probe that can be inherited, such as a VM's serial log
+  SIZE_T listSize = 0;
+  InitializeProcThreadAttributeList(NULL, 1, 0, &listSize);
+  LPPROC_THREAD_ATTRIBUTE_LIST list = malloc(listSize);
+  if (!list || !InitializeProcThreadAttributeList(list, 1, 0, &listSize))
+  {
+    *error = GetLastError();
+    free(list);
+    return false;
+  }
+
+  bool started = false;
+  HANDLE inherit[1] = { log };
+  if (UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        inherit, sizeof(inherit), NULL, NULL))
+  {
+    STARTUPINFOEXW si = { 0 };
+    si.StartupInfo.cb         = sizeof(si);
+    si.StartupInfo.dwFlags    = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdOutput = log;
+    si.StartupInfo.hStdError  = log;
+    si.lpAttributeList        = list;
+
+    started = CreateProcessW(NULL, command, NULL, NULL, TRUE,
+        CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+        &si.StartupInfo, pi);
+  }
+  *error = GetLastError();
+  DeleteProcThreadAttributeList(list);
+  free(list);
+  if (!started)
+    return false;
+
+  if (*job && !AssignProcessToJobObject(*job, pi->hProcess))
+  {
+    CloseHandle(*job);
+    *job = NULL;
+  }
+  ResumeThread(pi->hThread);
+  return true;
+}
+
 // runs --client's command with {section} replaced by the section's name,
 // while the guest's lines keep going to its log; true if it exits with 0
 static bool clientCommand(struct Vm * vm, const struct Section * section,
@@ -2646,23 +2868,21 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
   char logPath[MAX_PATH * 3];
   outPath(vm->options, "client-command.log", logPath, sizeof(logPath));
   SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-  HANDLE log = CreateFileA(logPath, GENERIC_WRITE, FILE_SHARE_READ, &sa,
+  WCHAR * wlog = widen(logPath);
+  HANDLE log = CreateFileW(wlog, GENERIC_WRITE, FILE_SHARE_READ, &sa,
       CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  free(wlog);
 
-  STARTUPINFOA si =
-  {
-    .cb         = sizeof(si),
-    .dwFlags    = STARTF_USESTDHANDLES,
-    .hStdOutput = log,
-    .hStdError  = log
-  };
+  // the command line goes in a buffer that CreateProcessW may write to
+  WCHAR * wcommand = widen(command.data);
   PROCESS_INFORMATION pi;
+  HANDLE job = NULL;
+  DWORD error = GetLastError();
   const bool started = log != INVALID_HANDLE_VALUE &&
-    CreateProcessA(NULL, command.data, NULL, NULL, TRUE, 0, NULL, NULL, &si,
-        &pi);
-  const DWORD error = GetLastError();
+    startContained(wcommand, log, &pi, &job, &error);
   if (log != INVALID_HANDLE_VALUE)
     CloseHandle(log);
+  free(wcommand);
   free(command.data);
   if (!started)
   {
@@ -2673,7 +2893,7 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
 
   printf("  Running the client command, its output goes to %s\n", logPath);
   const DWORD begin = GetTickCount();
-  bool gaveUp = false;
+  bool gaveUp = false, timedOut = false;
   char reply[512];
   while (WaitForSingleObject(pi.hProcess, 200) == WAIT_TIMEOUT)
   {
@@ -2683,10 +2903,13 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
     if (GetTickCount() - vm->lastPoll > 500)
       vmPollState(vm);
 
-    if (aborted || vm->stopped ||
-        GetTickCount() - begin > CLIENT_TIMEOUT_MS)
+    timedOut = GetTickCount() - begin > CLIENT_TIMEOUT_MS;
+    if (aborted || vm->stopped || timedOut)
     {
-      TerminateProcess(pi.hProcess, 1);
+      if (job)
+        TerminateJobObject(job, 1);
+      else
+        TerminateProcess(pi.hProcess, 1);
       WaitForSingleObject(pi.hProcess, 10000);
       gaveUp = true;
       break;
@@ -2698,11 +2921,22 @@ static bool clientCommand(struct Vm * vm, const struct Section * section,
   CloseHandle(pi.hThread);
   CloseHandle(pi.hProcess);
 
+  // anything that the command left running goes with the job
+  if (job)
+    CloseHandle(job);
+
+  // a command that is for looking runs until it is closed, and its time being
+  // up with the VM still running is how it was meant to end
+  const bool watched = vm->options->watch && timedOut && !aborted &&
+    !vm->stopped;
   jsonNumber(report, "client_exit", code);
   jsonBool(report, "client_stopped", gaveUp);
-  printf("  The client command %s (exit %lu)\n", gaveUp ?
-      "was stopped" : code == 0 ? "passed" : "failed", (unsigned long)code);
-  return !gaveUp && code == 0;
+  jsonBool(report, "client_watched", watched);
+  printf("  The client command %s (exit %lu)\n", watched ?
+      "ran until its time was up, as one for watching does" :
+      gaveUp ? "was stopped" : code == 0 ? "passed" : "failed",
+      (unsigned long)code);
+  return watched || (!gaveUp && code == 0);
 }
 
 // with --client: the guest installs the Looking Glass IDD, which serves the
@@ -3211,9 +3445,19 @@ static unsigned newestSchema(const char * doc)
   return newest;
 }
 
+// set when the probe has torn its VMs down and written its report
+static HANDLE finished;
+
 static BOOL WINAPI onConsoleCtrl(DWORD type)
 {
   InterlockedExchange(&aborted, 1);
+
+  // Windows ends the process when this returns, after five seconds for a
+  // close of the console, and for a logoff or a shutdown. The VMs, and what
+  // was added to the disk's DACL, are cleaned up and the report is written by
+  // the probe's own thread, which sees aborted, and gets this long to do it
+  if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT && finished)
+    WaitForSingleObject(finished, 4000);
   return TRUE;
 }
 
@@ -3225,7 +3469,9 @@ static void usage(void)
     "Checks whether this PC can share memory with a Hyper-V VM the way\n"
     "IVSHMEM does for Looking Glass. It boots disposable Linux VMs through\n"
     "the Host Compute Service and leaves nothing on the host but its output\n"
-    "folder. Run it from an elevated prompt.\n"
+    "folder, apart from what Windows records of its own accord, and what it\n"
+    "adds to the permissions of a disk that it boots, which it takes away\n"
+    "when it ends. Run it from an elevated prompt.\n"
     "\n"
     "  --kernel PATH   Linux kernel to boot (default: WSL's, in\n"
     "                  %%ProgramFiles%%\\WSL\\tools\\kernel)\n"
@@ -3241,18 +3487,26 @@ static void usage(void)
     "                  Manager, by its ID ((Get-VM NAME).Id): whether the\n"
     "                  HCS opens it and lets this PC add shared memory to\n"
     "                  it, which the probe removes again. The VM keeps\n"
-    "                  running.\n"
+    "                  running. This acts on a VM that the probe did not\n"
+    "                  make, so it also needs --allow-foreign-vm.\n"
     "  --windows-disk PATH\n"
     "                  boot a disposable Windows guest from this disk\n"
     "                  instead, which runs lg-hyperv-ivshmem on COM1, and\n"
     "                  check the IVSHMEM driver over a SharedMemory region.\n"
-    "                  The guest writes to the disk.\n"
+    "                  The guest writes to the disk, so it must be one that\n"
+    "                  hcs_probe_windows_disk.ps1 made, which writes PATH.lgprobe\n"
+    "                  when it has finished; --allow-foreign-disk boots any\n"
+    "                  other.\n"
     "  --client COMMAND\n"
     "                  with --windows-disk, then install the Looking Glass\n"
     "                  IDD from the disk in the guest and run COMMAND here,\n"
     "                  with {section} replaced by the shared memory's name,\n"
     "                  such as the client reading the guest's frames. It\n"
-    "                  passes if COMMAND exits with 0.\n"
+    "                  passes if COMMAND exits with 0, and it is ended after\n"
+    "                  ten minutes.\n"
+    "  --watch         with --client, COMMAND is for looking at the guest and\n"
+    "                  not a test: it also passes if it is still running when\n"
+    "                  its ten minutes are up.\n"
     "  --gpu INTERFACE\n"
     "                  with --windows-disk or --hcl, also give the VMs a\n"
     "                  partition of this GPU (GPU-PV), by the Name that\n"
@@ -3270,6 +3524,17 @@ static void usage(void)
     "                  for the exit code.\n");
 }
 
+// a whole number, with nothing after it
+static bool parseWhole(const char * text, unsigned long * result)
+{
+  if (*text < '0' || *text > '9')
+    return false;
+
+  char * end;
+  *result = strtoul(text, &end, 10);
+  return !*end;
+}
+
 static void parseOptions(int argc, char ** argv, struct Options * options)
 {
   memset(options, 0, sizeof(*options));
@@ -3279,10 +3544,9 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
   options->shm           = true;
   bool only = false, timeout = false;
 
-  for(int i = 1; i < argc; i += 2)
+  for(int i = 1; i < argc; ++i)
   {
-    const char * arg   = argv[i];
-    const char * value = argv[i + 1];
+    const char * arg = argv[i];
 
     if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0)
     {
@@ -3290,6 +3554,25 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
       exit(0);
     }
 
+    // the options that take nothing
+    if (strcmp(arg, "--allow-foreign-vm") == 0)
+    {
+      options->foreignVm = true;
+      continue;
+    }
+    if (strcmp(arg, "--allow-foreign-disk") == 0)
+    {
+      options->foreignDisk = true;
+      continue;
+    }
+    if (strcmp(arg, "--watch") == 0)
+    {
+      options->watch = true;
+      continue;
+    }
+
+    // and the ones that take a value
+    const char * value = i + 1 < argc ? argv[++i] : NULL;
     if (!value)
     {
       usage();
@@ -3303,8 +3586,8 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
       snprintf(options->out, sizeof(options->out), "%s", value);
     else if (strcmp(arg, "--size-mib") == 0)
     {
-      const unsigned long mib = strtoul(value, NULL, 10);
-      if (!mib || mib > 1024 || (mib & (mib - 1)))
+      unsigned long mib;
+      if (!parseWhole(value, &mib) || !mib || mib > 1024 || (mib & (mib - 1)))
         fail("--size-mib takes a power of two up to 1024");
       options->size = (uint64_t)mib << 20;
     }
@@ -3360,8 +3643,8 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
     }
     else if (strcmp(arg, "--timeout") == 0)
     {
-      const unsigned long seconds = strtoul(value, NULL, 10);
-      if (!seconds || seconds > 3600)
+      unsigned long seconds;
+      if (!parseWhole(value, &seconds) || !seconds || seconds > 3600)
         fail("--timeout takes 1 to 3600 seconds");
       options->bootTimeoutMs = seconds * 1000;
       timeout = true;
@@ -3378,7 +3661,20 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
     if (only)
       fail("--vm and --only do not go together");
     options->hdv = options->shm = false;
+
+    // it opens a VM that something else made and runs, adds shared memory to
+    // it and takes it away, which is not for a VM that matters
+    if (!options->foreignVm)
+      fail("--vm acts on a VM that this probe did not make: it opens the VM, "
+          "adds shared memory to it and removes it again. Add "
+          "--allow-foreign-vm if that is what you want, on a VM that you can "
+          "afford to lose");
   }
+  else if (options->foreignVm)
+    fail("--allow-foreign-vm goes with --vm");
+
+  if (options->foreignDisk && !options->windowsDisk[0])
+    fail("--allow-foreign-disk goes with --windows-disk");
 
   if (options->windowsDisk[0])
   {
@@ -3392,6 +3688,9 @@ static void parseOptions(int argc, char ** argv, struct Options * options)
   }
   else if (options->client[0])
     fail("--client goes with --windows-disk");
+
+  if (options->watch && !options->client[0])
+    fail("--watch goes with --client");
 
   // the paravisor's VMs boot nothing of the probe's
   if (options->hcl[0])
@@ -3428,6 +3727,21 @@ static bool prepare(struct Options * options)
     if (!disk || !fileExists(disk))
     {
       printf("The disk %s does not exist\n", options->windowsDisk);
+      free(disk);
+      return false;
+    }
+
+    // the guest writes to the disk, and the probe boots it as a VM of its
+    // own, so it must be one that hcs_probe_windows_disk.ps1 made, which says
+    // so in a file next to it when it has finished
+    char marker[MAX_PATH * 3 + 16];
+    snprintf(marker, sizeof(marker), "%s.lgprobe", disk);
+    if (!options->foreignDisk && !fileExists(marker))
+    {
+      printf("The disk %s was not made by hcs_probe_windows_disk.ps1, which "
+          "writes %s next to a disk when it has finished it. The guest "
+          "writes to the disk. Add --allow-foreign-disk to boot this one "
+          "anyway, if you can afford to lose it.\n", disk, marker);
       free(disk);
       return false;
     }
@@ -3545,11 +3859,34 @@ static bool prepare(struct Options * options)
   return true;
 }
 
+// the command line as UTF-8, which is what everything here takes and widen()
+// turns to UTF-16: the arguments of main are in the ANSI code page, so a name
+// with an accent would reach widen() as bytes that are not UTF-8, and the
+// disk or the command would not be found
+static char ** utf8Args(int * argc)
+{
+  int count = 0;
+  WCHAR ** wide = CommandLineToArgvW(GetCommandLineW(), &count);
+  if (!wide)
+    fail("Cannot read the command line");
+
+  char ** args = calloc((size_t)count + 1, sizeof(*args));
+  if (!args)
+    fail("Out of memory");
+  for(int i = 0; i < count; ++i)
+    args[i] = narrow(wide[i]);
+
+  LocalFree(wide);
+  *argc = count;
+  return args;
+}
+
 int main(int argc, char ** argv)
 {
   // progress shows as it happens, also through a pipe
   setvbuf(stdout, NULL, _IONBF, 0);
 
+  argv = utf8Args(&argc);
   struct Options options;
   parseOptions(argc, argv, &options);
 
@@ -3564,6 +3901,7 @@ int main(int argc, char ** argv)
   if (!loadHcs() || !prepare(&options))
     return 2;
 
+  finished = CreateEventW(NULL, TRUE, FALSE, NULL);
   SetConsoleCtrlHandler(onConsoleCtrl, TRUE);
 
   char version[32];
@@ -3580,6 +3918,8 @@ int main(int argc, char ** argv)
 
   struct Json report = { 0 };
   jsonOpen(&report, NULL, '{');
+  reportOptions     = &options;
+  report.checkpoint = reportCheckpoint;
   jsonString(&report, "probe", "lg-windows-client-hcs-probe");
   jsonNumber(&report, "report_version", 1);
   jsonString(&report, "windows", version);
@@ -3635,12 +3975,13 @@ int main(int argc, char ** argv)
   free(systems);
   jsonClose(&report, ']');
   jsonBool(&report, "aborted", aborted);
+  jsonBool(&report, "complete", true);
   jsonClose(&report, '}');
   strAdd(&report.s, "\n", 1);
 
   char reportPath[MAX_PATH * 3];
   outPath(&options, "report.json", reportPath, sizeof(reportPath));
-  if (!writeFile(reportPath, report.s.data, report.s.len))
+  if (!reportWrite(&options, report.s.data, report.s.len))
     printf("Cannot write %s\n", reportPath);
   free(report.s.data);
 
@@ -3662,9 +4003,10 @@ int main(int argc, char ** argv)
         "%s\n", hclPassed ? "a VM with them ran" : "no VM with them ran");
   printf("Report: %s\n", reportPath);
 
-  if (aborted)
-    return 1;
-  return (!options.hdv || hdvPassed) && (!options.shm || shmPassed) &&
-    (!options.vm[0] || vmPassed) &&
+  const int status = !aborted && (!options.hdv || hdvPassed) &&
+    (!options.shm || shmPassed) && (!options.vm[0] || vmPassed) &&
     (!options.windowsDisk[0] || windowsPassed) ? 0 : 1;
+  if (finished)
+    SetEvent(finished);
+  return status;
 }

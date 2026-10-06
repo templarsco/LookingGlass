@@ -14,7 +14,9 @@ captured, and reconnects.
 
 It can read frames over LGMP from a named shared memory section on the PC,
 the Windows counterpart of the KVMFR device on Linux. It refuses a section
-that accounts other than yours can open.
+that any account but you, SYSTEM, the Administrators and Hyper-V virtual
+machines can map or modify; it accepts any virtual machine's account, so
+the one that makes the section decides which machine gets it.
 
 ## What does not work yet
 

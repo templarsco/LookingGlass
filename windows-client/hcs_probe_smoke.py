@@ -97,6 +97,7 @@ def print_value(key, value, indent):
 def check_vm(args):
   """The probe's check of an existing VM, which only the HCS's answers show."""
   result = run([args.probe, '--vm', args.vm, '--out', args.output] +
+      (['--allow-foreign-vm'] if args.allow_foreign_vm else []) +
       (['--size-mib', str(args.size_mib)] if args.size_mib else []), 600)
   out = result.stdout + result.stderr
   if result.returncode == 2 and 'computecore.dll is missing' in out:
@@ -281,6 +282,9 @@ def main():
       help='an x86_64 Linux kernel with Hyper-V support for the VMs to boot')
   parser.add_argument('--vm',
       help='the ID of an existing VM for the probe to check instead')
+  parser.add_argument('--allow-foreign-vm', action='store_true',
+      help='with --vm, lets the probe act on a VM that it did not make: it '
+      'adds shared memory to it and removes it again')
   parser.add_argument('--size-mib', type=int,
       help='the size of the shared memory for --vm, --windows-disk or --hcl')
   parser.add_argument('--windows-disk', type=Path,
@@ -293,6 +297,9 @@ def main():
       help='the isolation type, auto or default, for the probe to try VMs '
       'with the HCS\'s paravisor setting instead')
   args = parser.parse_args()
+  if args.vm and not args.allow_foreign_vm:
+    parser.error('--vm acts on a VM that the probe did not make, so it needs '
+        '--allow-foreign-vm')
   args.probe  = args.probe.resolve()
   args.output = args.output.resolve()
   kernel = args.kernel.resolve() if args.kernel else args.probe
