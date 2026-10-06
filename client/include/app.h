@@ -109,6 +109,12 @@ bool app_getProp(LG_DSProperty prop, void * ret);
  */
 bool app_getHDRDescFailed(void);
 
+/**
+ * For a renderer that presents by itself: it has submitted the frame that the
+ * display server let it render.
+ */
+void app_frameSubmitted(void);
+
 #ifdef ENABLE_EGL
 EGLDisplay app_getEGLDisplay(void);
 EGLNativeWindowType app_getEGLNativeWindow(void);

@@ -1506,6 +1506,13 @@ static bool win32GetProp(LG_DSProperty prop, void * ret)
   }
 }
 
+static void win32FrameSubmitted(void)
+{
+  // the frame that waitFrame let the render thread go for is submitted
+  if (win32.vblank)
+    win32VBlank_frameSubmitted(win32.vblank);
+}
+
 #ifdef ENABLE_OPENGL
 static LG_DSGLContext win32GLCreateContext(void)
 {
@@ -1548,10 +1555,7 @@ static void win32GLSetSwapInterval(int interval)
 static void win32GLSwapBuffers(void)
 {
   SwapBuffers(win32.dc);
-
-  // the frame that waitFrame let the render thread go for is submitted
-  if (win32.vblank)
-    win32VBlank_frameSubmitted(win32.vblank);
+  win32FrameSubmitted();
 }
 #endif
 
@@ -1792,6 +1796,7 @@ struct LG_DisplayServerOps LGDS_Win32 =
   .skipFrame           = win32SkipFrame,
   .stopWaitFrame       = win32StopWaitFrame,
   .getFramePeriod      = win32GetFramePeriod,
+  .frameSubmitted      = win32FrameSubmitted,
   .guestPointerUpdated = win32GuestPointerUpdated,
   .setPointer          = win32SetPointer,
   .grabPointer         = win32GrabPointer,

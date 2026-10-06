@@ -229,6 +229,11 @@ struct LG_DisplayServerOps
   /* Returns the current presentation period in nanoseconds when known. */
   bool (*getFramePeriod)(uint64_t * period);
 
+  /* Called by a renderer that presents by itself, and not with a swap call of
+   * this display server, when it has submitted the frame that waitFrame let it
+   * render. Optional. */
+  void (*frameSubmitted)(void);
+
   /* dm specific cursor implementations */
   void (*guestPointerUpdated)(double x, double y, double localX, double localY);
   void (*setPointer)(LG_DSPointer pointer);
