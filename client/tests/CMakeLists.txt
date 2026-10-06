@@ -64,6 +64,16 @@ target_link_libraries(placement-tests
 add_test(NAME placement-tests COMMAND placement-tests)
 set_tests_properties(placement-tests PROPERTIES TIMEOUT 20)
 
+add_executable(clipboard-format-tests
+  clipboard_format_test.c
+  ../displayservers/Win32/clipboard_format.c
+)
+target_link_libraries(clipboard-format-tests
+  ${EXE_FLAGS}
+)
+add_test(NAME clipboard-format-tests COMMAND clipboard-format-tests)
+set_tests_properties(clipboard-format-tests PROPERTIES TIMEOUT 60)
+
 if(WIN32)
   add_executable(watchdog-tests watchdog_test.c)
   target_link_libraries(watchdog-tests
