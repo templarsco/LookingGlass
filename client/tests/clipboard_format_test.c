@@ -569,6 +569,51 @@ static void testBitmapFuzz(void)
   free(good.data);
 }
 
+/* PNG files */
+
+static size_t chunk(uint8_t * out, const char * name, size_t length)
+{
+  out[0] = (uint8_t)(length >> 24);
+  out[1] = (uint8_t)(length >> 16);
+  out[2] = (uint8_t)(length >> 8);
+  out[3] = (uint8_t)length;
+  memcpy(out + 4, name, 4);
+  memset(out + 8, 0xAB, length + 4);   // the data and a CRC that nobody checks
+  return length + 12;
+}
+
+static void testPng(void)
+{
+  uint8_t png[512];
+  static const uint8_t signature[8] =
+    { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+  memcpy(png, signature, 8);
+  size_t at = 8;
+  at += chunk(png + at, "IHDR", 13);
+  at += chunk(png + at, "IDAT", 100);
+  at += chunk(png + at, "IEND", 0);
+  const size_t real = at;
+  memset(png + at, 0, sizeof(png) - at);   // what Windows pads it with
+
+  CHECK(lgClipboardPngLength(png, sizeof(png)) == real);
+  CHECK(lgClipboardPngLength(png, real) == real);
+  CHECK(lgClipboardPngLength(png, real + 3) == real);
+
+  // not a PNG, or one that is cut off, or whose chunk is longer than the rest:
+  // the buffer, whole
+  CHECK(lgClipboardPngLength(png + 1, 100) == 100);
+  CHECK(lgClipboardPngLength(png, 4) == 4);
+  CHECK(lgClipboardPngLength(png, real - 1) == real - 1);
+  CHECK(lgClipboardPngLength(png, 40) == 40);
+  png[8 + 3] = 0xFF;                           // IHDR claims 255 bytes
+  png[8 + 2] = 0xFF;
+  png[8 + 1] = 0xFF;
+  png[8 + 0] = 0xFF;                           // and then 4 GiB
+  CHECK(lgClipboardPngLength(png, sizeof(png)) == sizeof(png));
+  CHECK(lgClipboardPngLength(NULL, 10) == 10);
+  CHECK(lgClipboardPngLength(png, 0) == 0);
+}
+
 int main(void)
 {
   testFromWindows();
@@ -579,6 +624,7 @@ int main(void)
   testRefused();
   testRefusedFiles();
   testBitmapFuzz();
+  testPng();
   puts("clipboard format tests passed");
   return EXIT_SUCCESS;
 }

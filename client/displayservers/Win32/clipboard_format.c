@@ -390,3 +390,33 @@ uint8_t * lgClipboardDibFromBmp(const uint8_t * bmp, size_t size,
     *v5 = info.v5;
   return out;
 }
+
+/* PNG files */
+
+size_t lgClipboardPngLength(const uint8_t * data, size_t size)
+{
+  static const uint8_t signature[8] =
+    { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+
+  if (!data || size < sizeof(signature) ||
+      memcmp(data, signature, sizeof(signature)) != 0)
+    return size;
+
+  // chunks of a length, a name, that many bytes and a CRC, the last of them IEND
+  size_t at = sizeof(signature);
+  while (size - at >= 12)
+  {
+    const uint64_t length = ((uint64_t)data[at] << 24) |
+      ((uint64_t)data[at + 1] << 16) | ((uint64_t)data[at + 2] << 8) |
+      data[at + 3];
+    if (length > size - at - 12)
+      return size;
+
+    const size_t end = at + 12 + (size_t)length;
+    if (memcmp(data + at + 4, "IEND", 4) == 0)
+      return end;
+    at = end;
+  }
+
+  return size;
+}

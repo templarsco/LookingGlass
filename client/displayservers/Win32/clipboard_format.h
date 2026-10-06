@@ -70,4 +70,10 @@ uint8_t * lgClipboardBmpFromDib(const uint8_t * dib, size_t size,
 uint8_t * lgClipboardDibFromBmp(const uint8_t * bmp, size_t size,
     size_t * dibSize, bool * v5);
 
+/* The length of a PNG file in the buffer that holds it: up to the end of its
+ * last chunk, as Windows gives a buffer that is larger than the data that was
+ * put in it. A buffer that is not a PNG file, or whose chunks do not fit it, is
+ * returned in full, as nothing here knows better. */
+size_t lgClipboardPngLength(const uint8_t * data, size_t size);
+
 #endif
