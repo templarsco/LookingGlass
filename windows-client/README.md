@@ -130,10 +130,12 @@ testing, not for use, until those come.
 - The swap chain is the size of the window's client area in pixels, read from
   Windows when the core says the window changed, and it is not the size
   that the core computes with the scale, which can be a pixel off.
-- A frame is read when it is drawn, as OpenGL does, a row at a time from the
-  shared memory that it arrived in into a dynamic texture (after waiting for
-  the guest to have written all of it, so that a frame that is cut short is not
-  shown), and one triangle draws it into the part of the window that the core
+- A frame is read when it is drawn, as OpenGL does, a row at a time, as soon as
+  the guest has written each, from the shared memory that it arrived in into a
+  dynamic texture. There are two: the next frame goes into the one that is not
+  drawn, and is drawn only when all of it has been copied, so a frame that the
+  guest is too slow with is not shown in part, and is tried again at the next
+  render. One triangle draws it into the part of the window that the core
   says the screen goes in, the rest of the window being black. BGRA, RGBA, RGB10
   and 16 bit floating point frames are textures as they are, and the 24 bit ones
   (`RGB_24` and `BGR_32`) get a fourth byte, as Direct3D has no format of
