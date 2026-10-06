@@ -3,11 +3,12 @@ project(renderer_D3D11 LANGUAGES C)
 
 add_library(renderer_D3D11 STATIC
   d3d11.c
+  shader.c
 )
 
-# d3d11.dll and dxgi.dll are loaded when the renderer is made, and not linked
-# in, so that a Windows that has neither only loses this renderer. dxguid has
-# the interface identifiers and nothing to load.
+# d3d11.dll and d3dcompiler_47.dll are loaded when the renderer is made and
+# started, and not linked in, so that a Windows that has neither only loses this
+# renderer. dxguid has the interface identifiers and nothing to load.
 target_link_libraries(renderer_D3D11
   dxguid
   lg_common

@@ -19,26 +19,35 @@
 # Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
 """Runs the Windows client with the Direct3D 11 renderer (app:renderer=D3D11)
-and checks what the renderer does by itself:
+and checks what the renderer does by itself, with the frames of the client's test
+transport:
 
   warp      it makes a device on WARP, Windows' software rasterizer, which needs
             no GPU and no OpenGL driver, a flip model swap chain for the
-            window, and composes it: the capture is as large as the window and
-            all of one colour (the frames are not drawn yet)
+            window, and draws the test frame in it: every pixel of the capture
+            that the client takes of its window is the one that was generated
   auto      the same with the adapter that the renderer picks, which is the GPU
             when there is one that works and WARP when there is not
   hardware  the same on the GPU, which a PC without one refuses with a message
             (the test passes), unless --require-hardware says it must have one
-  resize    the window is made several sizes while frames arrive, and the
-            swap chain follows each: the capture is as large as the window is
-            at the end, and the client neither fails nor stops answering
+  larger    the window is made several sizes while frames arrive, the last
+            larger than the frame and of another shape: the swap chain follows
+            each, and the frame is where the core says the screen is, made
+            larger, with the bars around it black
+  smaller   the same with the last size smaller than the frame, which the frame
+            is made to fit
   refused   an adapter that is not one is refused before the client starts
+
+The frames are checked by the colour that client/transports/Test/test.c
+generates at each pixel. Where the frame is not drawn pixel for pixel, as it is
+not in a window of another size, the colours that are checked are those of
+points where the colour is the same around them, so that the way that a frame is
+made larger or smaller does not matter, and where it goes does.
 
 The window does not take the focus and is up for a few seconds. It needs
 Windows, and does not run elsewhere."""
 
 import argparse
-import collections
 import ctypes
 import os
 import subprocess
@@ -49,28 +58,35 @@ from ctypes import wintypes
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from client_smoke_test import (CAPTURE_MAGIC, CAPTURE_RGBA8,  # noqa: E402
-    CAPTURE_VERSION, FRAME_TYPE_BGRA, HEADER)
+from client_smoke_test import (CAPTURE_BOTTOM_UP, CAPTURE_MAGIC,  # noqa: E402
+    CAPTURE_RGBA8, CAPTURE_VERSION, FRAME_TYPE_BGRA, HEADER, HEIGHT, WIDTH,
+    check_capture, expected_color)
 
 WINDOW_CLASS = 'LookingGlassClient'
-
-WIDTH, HEIGHT = 256, 160
-
-# what the renderer clears the window to, 0.03 0.03 0.05 of 255, as the
-# swap chain's 8 bits keep it
-CLEAR = (8, 8, 13, 255)
 
 SWP_NOZORDER     = 0x0004
 SWP_NOACTIVATE   = 0x0010
 
-# the sizes that the window is made, in pixels
-RESIZES = [(400, 300), (200, 120), (640, 360), (180, 100), (320, 200)]
+# the frame that is captured is the last one that the test transport makes
+FRAMES = 20
+
+# The sizes that the window is made, in pixels. The last is not the frame's
+# shape (4:3 and 5:4, and the frame is 8:5), so the frame has bars around it, and
+# it is larger than the frame in one case and smaller than it in the other.
+LARGER  = [(400, 300), (200, 120), (640, 360), (180, 100), (320, 240)]
+SMALLER = [(400, 300), (200, 120), (640, 360), (320, 240), (200, 160)]
 
 REFUSAL = 'The adapter must be auto, hardware or warp'
 
 # what the renderer logs when something it needs fails
 FAILURES = ('Could not', 'Present failed', 'no back buffer',
-            'no window to draw in', 'is not available')
+            'no window to draw in', 'is not available', 'Retrying',
+            'Unsupported frame type')
+
+# how far a pixel of a frame that was made larger or smaller may be from the
+# colour that was generated, which a gradient and the way that the frame is made
+# larger or smaller leave a few steps of
+TOLERANCE = 6
 
 
 class RECT(ctypes.Structure):
@@ -136,11 +152,12 @@ def client_command(args, adapter, capture, frames, rate, extra=()):
   ] + list(extra) + args.client_args
 
 
-def check_capture(path, width, height):
-  """The capture is as large as the window and one colour. Returns the errors."""
+def read_capture(path, width, height, serial):
+  """The header of the capture checked, and its pixels as a function of the
+  position in the window, from the top. Returns (errors, function)."""
   data = Path(path).read_bytes()
   if len(data) < HEADER.size:
-    return ['the capture is shorter than its header']
+    return ['the capture is shorter than its header'], None
 
   (magic, version, headerSize, frameSerial, sourceType, captureFormat,
    got_width, got_height, stride, flags, dataSize) = HEADER.unpack_from(data)
@@ -153,6 +170,7 @@ def check_capture(path, width, height):
   expect('magic', magic, CAPTURE_MAGIC)
   expect('version', version, CAPTURE_VERSION)
   expect('headerSize', headerSize, HEADER.size)
+  expect('frameSerial', frameSerial, serial)
   expect('sourceType', sourceType, FRAME_TYPE_BGRA)
   expect('captureFormat', captureFormat, CAPTURE_RGBA8)
   expect('width', got_width, width)
@@ -160,16 +178,72 @@ def check_capture(path, width, height):
   expect('stride', stride, width * 4)
   expect('dataSize', dataSize, len(data) - HEADER.size)
   if errors:
+    return errors, None
+
+  pixels    = data[HEADER.size:]
+  bottom_up = flags & CAPTURE_BOTTOM_UP
+
+  def pixel(x, y):
+    offset = ((height - 1 - y if bottom_up else y) * width + x) * 4
+    return tuple(pixels[offset:offset + 3])
+
+  return [], pixel
+
+
+def screen_rect(width, height):
+  """Where the core puts the frame in a window, as core_updatePositionInfo does:
+  as large as fits, in the middle."""
+  if height / width < HEIGHT / WIDTH:
+    w, h = int(height * WIDTH / HEIGHT), height
+    return (width >> 1) - (w >> 1), 0, w, h
+  w, h = width, int(width * HEIGHT / WIDTH)
+  return 0, (height >> 1) - (h >> 1), w, h
+
+
+def check_placed(path, width, height, serial):
+  """The frame is where the core says the screen is in the window of this size,
+  made larger or smaller to fit it, and everywhere else the window is black."""
+  errors, pixel = read_capture(path, width, height, serial)
+  if errors:
     return errors
 
-  pixels = data[HEADER.size:]
-  colors = collections.Counter(zip(pixels[0::4], pixels[1::4], pixels[2::4],
-      pixels[3::4]))
-  off = [(color, count) for color, count in colors.items()
-         if max(abs(a - b) for a, b in zip(color, CLEAR)) > 1]
-  if off:
-    errors.append(f'{sum(count for _, count in off)} of {width * height} '
-        f'pixels are not {CLEAR}, such as {off[0][0]}')
+  x0, y0, w, h = screen_rect(width, height)
+  margin       = 2   # the edge of the frame is not checked to the pixel
+
+  # nothing but black around the frame
+  stray = [(x, y) for y in range(height) for x in range(width)
+           if not (x0 - margin <= x < x0 + w + margin and
+                   y0 - margin <= y < y0 + h + margin) and pixel(x, y) != (0, 0, 0)]
+  if stray:
+    errors.append(f'{len(stray)} pixels outside the frame, such as {stray[0]} '
+        f'{pixel(*stray[0])}, are not black ({x0},{y0} {w}x{h} is the frame)')
+
+  # the frame, where its colour is the same for a pixel or two around the point
+  # that the pixel is the middle of, whichever way the frame was made to fit
+  checked, wrong = 0, []
+  for y in range(y0 + 3, y0 + h - 3, 3):
+    for x in range(x0 + 3, x0 + w - 3, 3):
+      sx = (x + 0.5 - x0) * WIDTH  / w
+      sy = (y + 0.5 - y0) * HEIGHT / h
+      around = [expected_color(int(sx + dx), int(sy + dy), WIDTH, HEIGHT, serial)
+                for dx in (-1.5, 0, 1.5) for dy in (-1.5, 0, 1.5)
+                if 0 <= sx + dx < WIDTH and 0 <= sy + dy < HEIGHT]
+      if max(max(abs(a - b) for a, b in zip(color, around[0]))
+             for color in around) > TOLERANCE:
+        continue
+
+      wanted = expected_color(int(sx), int(sy), WIDTH, HEIGHT, serial)
+      got    = pixel(x, y)
+      checked += 1
+      if max(abs(a - b) for a, b in zip(got, wanted)) > TOLERANCE:
+        wrong.append(((x, y), got, wanted))
+
+  if checked < 100:
+    errors.append(f'only {checked} points of the frame could be checked')
+  if wrong:
+    errors.append(f'{len(wrong)} of {checked} points of the frame are not the '
+        f'colour that was generated, such as {wrong[0][0]}, which is '
+        f'{wrong[0][1]} and not {wrong[0][2]}')
   return errors
 
 
@@ -216,18 +290,7 @@ def run_client(args, output, name, command, resizes=()):
   return status, size, log.read_text(errors='replace')
 
 
-def test_draw(args, output, adapter):
-  """The renderer starts, draws and ends on an adapter. Returns (errors, note)."""
-  capture = output / f'{adapter}.lgcapture'
-  capture.unlink(missing_ok=True)
-
-  status, size, text = run_client(args, output, adapter,
-      client_command(args, adapter, capture, frames=20, rate=20))
-
-  if adapter == 'hardware' and status not in (0, None) and \
-      'No Direct3D 11 device on a GPU' in text and not args.require_hardware:
-    return [], 'this PC has no GPU that Direct3D 11 can use, which it said'
-
+def common_errors(status, text):
   errors = []
   if status != 0:
     errors.append('the client timed out' if status is None else
@@ -235,44 +298,56 @@ def test_draw(args, output, adapter):
   for wanted in ('Using Renderer: D3D11', 'Swap chain'):
     if wanted not in text:
       errors.append(f'the client did not log "{wanted}"')
+  return errors + [f'the client logged "{failure}"' for failure in FAILURES
+                   if failure in text]
+
+
+def test_draw(args, output, adapter):
+  """The renderer starts, draws and ends on an adapter. Returns (errors, note)."""
+  capture = output / f'{adapter}.lgcapture'
+  capture.unlink(missing_ok=True)
+
+  status, size, text = run_client(args, output, adapter,
+      client_command(args, adapter, capture, frames=FRAMES, rate=20))
+
+  if adapter == 'hardware' and status not in (0, None) and \
+      'No Direct3D 11 device on a GPU' in text and not args.require_hardware:
+    return [], 'this PC has no GPU that Direct3D 11 can use, which it said'
+
+  errors = common_errors(status, text)
   if adapter == 'warp' and ', software' not in text:
     errors.append('the adapter that was logged is not a software one')
-  errors += [f'the client logged "{failure}"' for failure in FAILURES
-             if failure in text]
 
   if not capture.exists():
     errors.append('the client did not write a capture')
+  elif size == (WIDTH, HEIGHT):
+    # the frame is drawn pixel for pixel, so every pixel is checked
+    errors += check_capture(capture, WIDTH, HEIGHT, FRAMES)
   elif size is not None:
-    errors += check_capture(capture, *size)
+    # a display that scales its windows makes the frame larger
+    errors += check_placed(capture, *size, FRAMES)
 
   line = next((l for l in text.splitlines() if 'Adapter' in l), 'no adapter')
   return errors, line.split('|')[-1].strip()
 
 
-def test_resize(args, output):
-  capture = output / 'resize.lgcapture'
+def test_resize(args, output, name, sizes):
+  capture = output / f'{name}.lgcapture'
   capture.unlink(missing_ok=True)
 
-  status, size, text = run_client(args, output, 'resize',
-      client_command(args, 'warp', capture, frames=80, rate=20),
-      resizes=RESIZES)
+  status, size, text = run_client(args, output, name,
+      client_command(args, 'warp', capture, frames=4 * FRAMES, rate=20),
+      resizes=sizes)
 
-  errors = []
-  if status != 0:
-    errors.append('the client timed out' if status is None else
-        f'the client exited with status {status}')
-  if size != RESIZES[-1]:
-    errors.append(f'the window is {size} at the end, and was made '
-        f'{RESIZES[-1]}')
-  errors += [f'the client logged "{failure}"' for failure in FAILURES
-             if failure in text]
+  errors = common_errors(status, text)
+  if size != sizes[-1]:
+    errors.append(f'the window is {size} at the end, and was made {sizes[-1]}')
 
   if not capture.exists():
     errors.append('the client did not write a capture')
   elif size is not None:
-    errors += check_capture(capture, *size)
-  return errors, f'{len(RESIZES)} sizes, the last {RESIZES[-1][0]}x' \
-    f'{RESIZES[-1][1]}'
+    errors += check_placed(capture, *size, 4 * FRAMES)
+  return errors, f'{len(sizes)} sizes, the last {sizes[-1][0]}x{sizes[-1][1]}'
 
 
 def test_refused(args, output):
@@ -280,7 +355,7 @@ def test_refused(args, output):
   capture.unlink(missing_ok=True)
 
   status, size, text = run_client(args, output, 'refused',
-      client_command(args, 'bogus', capture, frames=20, rate=20))
+      client_command(args, 'bogus', capture, frames=FRAMES, rate=20))
 
   errors = []
   if status in (0, None):
@@ -316,7 +391,8 @@ def main():
       ('warp'    , lambda: test_draw(args, output, 'warp')),
       ('auto'    , lambda: test_draw(args, output, 'auto')),
       ('hardware', lambda: test_draw(args, output, 'hardware')),
-      ('resize'  , lambda: test_resize(args, output)),
+      ('larger'  , lambda: test_resize(args, output, 'larger', LARGER)),
+      ('smaller' , lambda: test_resize(args, output, 'smaller', SMALLER)),
       ('refused' , lambda: test_refused(args, output))):
     errors, note = test()
     if errors:
@@ -329,7 +405,8 @@ def main():
   if failed:
     return 1
 
-  print('pass: the Direct3D 11 renderer drew, resized and refused as it should')
+  print('pass: the Direct3D 11 renderer drew the frame, resized and refused as '
+        'it should')
   return 0
 
 
