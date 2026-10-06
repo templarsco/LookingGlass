@@ -1289,8 +1289,13 @@ static bool createWindow(void)
     startVBlank();
 
   atomic_store(&win32.ready, true);
-  ShowWindow(win32.window, params->maximize ? SW_SHOWMAXIMIZED : SW_SHOW);
-  SetForegroundWindow(win32.window);
+  if (params->showInactive)
+    ShowWindow(win32.window, SW_SHOWNOACTIVATE);
+  else
+  {
+    ShowWindow(win32.window, params->maximize ? SW_SHOWMAXIMIZED : SW_SHOW);
+    SetForegroundWindow(win32.window);
+  }
 
   if (params->fullscreen)
     applyFullscreen(true);

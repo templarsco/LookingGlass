@@ -330,6 +330,14 @@ static struct Option options[] =
     .type           = OPTION_TYPE_BOOL,
     .value.x_bool   = false
   },
+  {
+    .module         = "win",
+    .name           = "showInactive",
+    .description    = "Show the window without taking the focus, on Windows, "
+                      "as automated tests need",
+    .type           = OPTION_TYPE_BOOL,
+    .value.x_bool   = false
+  },
 
   // input options
   {
@@ -692,6 +700,7 @@ bool config_load(int argc, char * argv[])
   g_params.jitRender              = option_get_bool  ("win", "jitRender"         );
   g_params.requestActivation      = option_get_bool  ("win", "requestActivation" );
   g_params.disableWaitingMessage  = option_get_bool  ("win", "disableWaitingMessage");
+  g_params.showInactive           = option_get_bool  ("win", "showInactive"      );
 
   if (g_params.noScreensaver && g_params.autoScreensaver)
   {

@@ -130,6 +130,10 @@ typedef struct LG_DSInitParams
   bool largeCursorDot;
   bool allowNoInput;
 
+  // show the window without taking the focus: it is for automated tests, and
+  // only the Windows display server has it
+  bool showInactive;
+
   // if true the renderer requires an OpenGL context
   bool opengl;
 
