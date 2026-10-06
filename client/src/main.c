@@ -4316,6 +4316,10 @@ int main(int argc, char * argv[])
 #ifdef _WIN32
   // the default resolution is too coarse for frame pacing
   windowsSetTimerResolution();
+  if (windowsDisablePowerThrottling())
+    DEBUG_INFO("Power throttling is off for the client");
+  else
+    DEBUG_WARN("Windows did not take the request to not throttle the client");
 #else
   if (getuid() == 0)
   {

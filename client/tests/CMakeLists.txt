@@ -72,6 +72,14 @@ if(WIN32)
   )
   add_test(NAME watchdog-tests COMMAND watchdog-tests)
   set_tests_properties(watchdog-tests PROPERTIES TIMEOUT 60)
+
+  add_executable(power-tests power_test.c)
+  target_link_libraries(power-tests
+    ${EXE_FLAGS}
+    lg_common
+  )
+  add_test(NAME power-tests COMMAND power-tests)
+  set_tests_properties(power-tests PROPERTIES TIMEOUT 20)
 endif()
 
 target_compile_definitions(font-tests PRIVATE
