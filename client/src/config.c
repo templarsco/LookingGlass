@@ -29,7 +29,10 @@
 
 #include <errno.h>
 #include <limits.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#include <wchar.h>
+#else
 #include <pwd.h>
 #endif
 #include <string.h>
@@ -585,6 +588,31 @@ void config_init(void)
   option_register(options);
 }
 
+#ifdef _WIN32
+/* The configuration that is next to the program, as UTF-8 in out: for a copy
+ * of the client that is carried about, as the zip of a release is. */
+static bool programConfig(char * out, size_t size)
+{
+  wchar_t path[MAX_PATH];
+  const DWORD length = GetModuleFileNameW(NULL, path, ARRAYSIZE(path));
+  if (!length || length >= ARRAYSIZE(path))
+    return false;
+
+  wchar_t * slash = wcsrchr(path, L'\\');
+  if (!slash)
+    return false;
+  *slash = L'\0';
+
+  wchar_t file[MAX_PATH + 16];
+  if (_snwprintf(file, ARRAYSIZE(file), L"%ls\\client.ini", path) < 0)
+    return false;
+  file[ARRAYSIZE(file) - 1] = L'\0';
+
+  return WideCharToMultiByte(CP_UTF8, 0, file, -1, out, (int)size, NULL,
+      NULL) > 0;
+}
+#endif
+
 bool config_load(int argc, char * argv[])
 {
   struct stat st;
@@ -621,6 +649,19 @@ bool config_load(int argc, char * argv[])
       }
     }
     free(localFile);
+  }
+#endif
+
+#ifdef _WIN32
+  /* Next to the program, first, so that what is in the user's own folder,
+   * which is read after it, wins */
+  char programFile[MAX_PATH * 3];
+  if (programConfig(programFile, sizeof(programFile)) &&
+      stat(programFile, &st) >= 0 && S_ISREG(st.st_mode))
+  {
+    DEBUG_INFO("Loading config from: %s", programFile);
+    if (!option_load(programFile))
+      return false;
   }
 #endif
 

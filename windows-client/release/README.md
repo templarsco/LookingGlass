@@ -61,9 +61,10 @@ Start `looking-glass-client.exe`. A window with a moving test pattern opens.
 - `looking-glass-client.exe test:input=yes` logs the keyboard and mouse
   input that the client would send to a virtual machine.
 - `looking-glass-client.exe --help` lists every option. Options can also go
-  in `%APPDATA%\looking-glass\client.ini`, which must be saved as UTF-8
-  (Notepad's default; PowerShell 5.1's `>` and `Out-File` write UTF-16,
-  which the client refuses, and says so).
+  in a `client.ini` next to the program, or in
+  `%APPDATA%\looking-glass\client.ini`, which wins over it. The file must be
+  saved as UTF-8 (Notepad's default; PowerShell 5.1's `>` and `Out-File` write
+  UTF-16, which the client refuses, and says so).
 
 The client opens no console window. Started from Explorer or a shortcut, it
 writes its messages to `%LOCALAPPDATA%\looking-glass\client.log` (the run

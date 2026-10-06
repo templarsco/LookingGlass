@@ -137,6 +137,11 @@ jobs:
         GALLIUM_DRIVER=llvmpipe python windows-client/client_startup_test.py \
           --output smoke/startup \
           "$(cygpath -w "$(echo unpacked/*/looking-glass-client.exe)")"
+    - name: Check where the packaged client reads its configuration from
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_config_test.py \
+          --output smoke/config \
+          "$(cygpath -w "$(echo unpacked/*/looking-glass-client.exe)")"
     - name: Check a frame from the packaged producer
       run: |
         dir=$(echo unpacked/*)

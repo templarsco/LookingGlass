@@ -850,6 +850,10 @@ jobs:
       run: |
         GALLIUM_DRIVER=llvmpipe python windows-client/client_startup_test.py \
           --output startup client/build/looking-glass-client.exe
+    - name: Check where the client reads its configuration from
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_config_test.py \
+          --output config client/build/looking-glass-client.exe
     - name: Check frame formats, strides and upload paths in a Windows window
       run: |
         # Mesa has no GL_AMD_pinned_memory, so this only covers the ordinary
@@ -867,6 +871,7 @@ jobs:
           pacing/
           sessions/
           startup/
+          config/
           idle/
           formats/
 
