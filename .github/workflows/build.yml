@@ -715,10 +715,12 @@ jobs:
           "%RUNNER_TEMP%\lg-pc-test\client" || exit /b 1
         set "PATH=%MSYS2_LOCATION%\mingw64\bin;%PATH%"
         set GALLIUM_DRIVER=llvmpipe
-        rem as the bundle's README says to run it
+        rem as the bundle's README says to run it. The runner's temp folder can
+        rem be changed by every user, so the script says so and stops, unless
+        rem it is told to lock the folders, which this does and so tests
         powershell -NoProfile -ExecutionPolicy Bypass ^
           -File "%RUNNER_TEMP%\lg-pc-test\hcs_probe_pc.ps1" -NoGpu ^
-          -WorkDir "%RUNNER_TEMP%\pc-test"
+          -LockFolders -WorkDir "%RUNNER_TEMP%\pc-test"
     - name: Check the PC test's zip
       if: always()
       run: |
