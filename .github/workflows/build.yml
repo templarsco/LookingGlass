@@ -866,6 +866,30 @@ jobs:
         # what it can try. A PC with a GPU runs it with --require-hardware.
         python windows-client/client_d3d11_test.py \
           --output d3d11 client/build/looking-glass-client.exe
+    - name: Run the other tests of the client with the Direct3D 11 renderer
+      run: |
+        # on WARP too, the frames a test transport and a producer serve, the
+        # formats and strides, the changes of resolution and a window that is
+        # minimized
+        python windows-client/client_smoke_test.py \
+          --output smoke/d3d11-test client/build/looking-glass-client.exe \
+          app:renderer=D3D11 d3d11:adapter=warp
+        python windows-client/client_smoke_test.py \
+          --producer windows-client/build/lg-windows-client-producer.exe \
+          --output smoke/d3d11-lgmp client/build/looking-glass-client.exe \
+          app:renderer=D3D11 d3d11:adapter=warp
+        python windows-client/client_format_test.py \
+          --output formats-d3d11 client/build/looking-glass-client.exe \
+          app:renderer=D3D11 d3d11:adapter=warp
+        python windows-client/client_session_test.py \
+          --producer windows-client/build/lg-windows-client-producer.exe \
+          --output sessions-d3d11 client/build/looking-glass-client.exe \
+          app:renderer=D3D11 d3d11:adapter=warp
+        python windows-client/client_idle_test.py \
+          --producer windows-client/build/lg-windows-client-producer.exe \
+          --size 1920x1080 --fps 60 \
+          --output idle-d3d11 client/build/looking-glass-client.exe \
+          app:renderer=D3D11 d3d11:adapter=warp
     - name: Upload Windows client smoke test output
       if: failure()
       uses: actions/upload-artifact@v6
@@ -881,6 +905,9 @@ jobs:
           idle/
           formats/
           d3d11/
+          formats-d3d11/
+          sessions-d3d11/
+          idle-d3d11/
 
   idd:
     runs-on: windows-2022

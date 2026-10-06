@@ -116,11 +116,9 @@ own software rasterizer. OpenGL is still the renderer that the client starts
 with, and the one that is tried first; `-DENABLE_D3D11=OFF` leaves the new one
 out of the build.
 
-**It does not draw the guest's frames yet.** What exists is the part that the
-rest stands on: the device, the swap chain for the window, following the
-window's size, a clear and a present on every render, and the readback that
-the tests use. Frames, the cursor and the overlays come next, so it is for
-testing, not for use.
+**It draws the guest's frames, and not yet the cursor, the overlays (the
+settings, the graphs and the splash) or a way to see HDR**, so it is for
+testing, not for use, until those come.
 
 - `d3d11:adapter` is `auto` (the GPU, and WARP if there is none that works),
   `hardware` (the GPU only) or `warp`. `d3d11:vsync` waits for the vertical
@@ -132,18 +130,45 @@ testing, not for use.
 - The swap chain is the size of the window's client area in pixels, read from
   Windows when the core says the window changed, and it is not the size
   that the core computes with the scale, which can be a pixel off.
+- A frame is read when it is drawn, as OpenGL does, a row at a time from the
+  shared memory that it arrived in into a dynamic texture (after waiting for
+  the guest to have written all of it, so that a frame that is cut short is not
+  shown), and one triangle draws it into the part of the window that the core
+  says the screen goes in, the rest of the window being black. BGRA, RGBA, RGB10
+  and 16 bit floating point frames are textures as they are, and the 24 bit ones
+  (`RGB_24` and `BGR_32`) get a fourth byte, as Direct3D has no format of
+  three. The HDR ones are drawn as OpenGL draws them, with their values as they
+  are, so they look as that does: a pixel for pixel capture of each of the six
+  formats is the same from both renderers. A frame's alpha is not shown, and a
+  guest's rotation is not applied (OpenGL does not either).
+- Pixels stay pixels (point sampling) unless the frame is made smaller to fit,
+  when the sampling is bilinear. There is no mipmap, so a frame that is made much
+  smaller aliases more than with `opengl:mipmap`.
+- The shaders are HLSL, compiled when the renderer starts with
+  `d3dcompiler_47.dll` from System32, which every Windows 10 has. The compiler
+  is not in the build and its output is not in the source. Without it the renderer
+  does not start, and says so.
 - A GPU that is removed or reset ends the client with a message that says so.
   It is not recovered from yet.
 
 [client_d3d11_test.py](client_d3d11_test.py) checks it on the client's test
 transport, on each adapter, with the capture that the client takes of its
-window: the capture is as large as the window and the colour that the renderer
-clears to. It also makes the window five sizes while frames arrive, and
-checks that the capture is the last size, that the client logs no failure
-and exits, and that an adapter that is not one is refused before the client
-starts. On the developer's PC (Windows 11, an RX 9070 XT) all five cases pass,
-and `auto` picks the RX 9070 XT. CI has no GPU: it covers WARP, and accepts
-the refusal of `hardware`.
+window: every pixel of the test frame is the one that was generated. It also
+makes the window five sizes while frames arrive, the last one larger than the
+frame and of another shape, and again with the last one smaller, and checks
+that the swap chain followed, that the frame is where the core says the screen
+is, made larger or smaller, with black around it, that the client logs no
+failure and exits, and that an adapter that is not one is refused before the
+client starts. The other tests, the 25 cases of `client_format_test.py`
+included, run with it as well, with `-- app:renderer=D3D11`. On the developer's
+PC (Windows 11, an RX 9070 XT) they pass on the RX 9070 XT and on WARP, and
+`auto` picks the RX 9070 XT. CI has no GPU: it covers WARP, and accepts the
+refusal of `hardware`.
+
+With `win:jitRender` on the 240 Hz display, the frame was submitted 0.14 ms
+after the blank at the median (OpenGL: 0.07), and it was 0.13 of a core of CPU at
+1920x1080 and 240 frames per second (OpenGL: 0.18). Neither says what the GPU
+did, or when the frame was on the display.
 
 ### Running
 
@@ -397,15 +422,20 @@ window across two displays, and Windows builds other than 11 were not tried.
   ```
 
 - [client_idle_test.py](client_idle_test.py) serves frames at a rate, 120 per
-  second at 256x160 unless told otherwise, and measures the CPU time that the
-  client's process uses (kernel and user, as Windows counts it) with its
-  window up, minimized and restored. The client renders nothing for a window
-  that cannot be seen: it logs that it paused, and uses under a third of the
-  CPU time that it used visible. After the window is restored the client must
-  log that it resumed and compose the last frame with every pixel as
-  generated. On a PC with an RX 9070 XT the client's process used 0.198 of a
-  core at 1920x1080 and 240 frames per second, and 0.005 minimized; 0.073 and
-  0.010 at 1280x720 and 144. It says nothing of what the GPU did, which was not
+  second at 1280x720 unless told otherwise, and measures the CPU time that the
+  client's process uses with its window up, minimized and restored. The client
+  renders nothing for a window that cannot be seen: it logs that it paused, and
+  uses under a third of the CPU time that it used visible. After the window is
+  restored the client must log that it resumed and compose the last frame with
+  every pixel as generated. The time is counted in the cycles that the process
+  ran (`QueryProcessCycleTime`) against the cycles that a busy core runs in a
+  second, and not in the time that Windows charges by the tick, which charges a
+  whole tick to a program that wakes a few times a second: the same minimized
+  client read between 0 and 0.042 of a core in it, and 0.013 every time in
+  cycles. On a PC with an RX 9070 XT (Ryzen 7 9800X3D, 4.7 GHz) the OpenGL
+  renderer used 0.18 of a core at 1920x1080 and 240 frames per second and 0.078
+  at 1280x720 and 144, and the Direct3D 11 renderer 0.13 and 0.054, and each
+  used 0.013 minimized. It says nothing of what the GPU did, which was not
   measured. CI runs it on Windows, with software OpenGL.
 
   ```sh
@@ -429,7 +459,8 @@ window across two displays, and Windows builds other than 11 were not tried.
   arrive, and checks an adapter that is not one; see [Direct3D 11
   Renderer](#direct3d-11-renderer). `--require-hardware` fails a PC that has no
   GPU that Direct3D can use, which is what a PC with one should run it with.
-  CI runs it on Windows, where it only has WARP.
+  CI runs it on Windows, where it only has WARP. The other tests above run
+  the renderer too, with `-- app:renderer=D3D11` after the client's path.
 
   ```sh
   python windows-client/client_d3d11_test.py client/build/looking-glass-client.exe
@@ -826,9 +857,10 @@ keeps the shared code covered there.
   host has not run in a Hyper-V guest yet.
 - The LGMP path copies each frame through the CPU into an OpenGL texture.
   There is no zero-copy import on Windows; DMA-BUF is Linux only.
-- The Direct3D 11 renderer draws no frames yet, and only the device, the swap
-  chain and the resize have been tried, on an RX 9070 XT and on WARP; no other
-  GPU, and no PC that lacks an OpenGL driver, which is what it is for.
+- The Direct3D 11 renderer draws the guest's frames but no cursor and no
+  overlays, and has no HDR output, and it was tried on an RX 9070 XT and on
+  WARP; no other GPU, and no PC that lacks an OpenGL driver, which is what it is
+  for.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
 - There is no audio or SPICE support on Windows, and no files on the
