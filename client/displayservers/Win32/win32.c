@@ -44,6 +44,8 @@
 
 #include "input_event.h"
 #include "keymap.h"
+#include "vblank.h"
+#include "vblank_source.h"
 
 #include "resources/no-input-cursor/16.xcur.h"
 #include "resources/no-input-cursor/32.xcur.h"
@@ -87,6 +89,13 @@ static struct Win32DS
 
   PFNWGLSWAPINTERVALEXTPROC swapInterval;
   bool                      swapIntervalChecked;
+
+  /* the pacing of waitFrame, made when win:jitRender is on. The window thread
+   * makes it and frees it with the display server, and the render thread
+   * waits on it */
+  Win32VBlank    * vblank;
+  Win32KmtSource * kmt;
+  uint64_t         nominalPeriod;  // window thread only
 
   /* shared with other threads */
   _Atomic(bool)      ready;
@@ -606,12 +615,99 @@ static void updateFramePeriod(void)
   DEVMODEW mode = { .dmSize = sizeof(mode) };
   uint64_t period = 0;
 
-  if (GetMonitorInfoW(win32.monitor, (MONITORINFO *)&info) &&
+  const bool haveMonitor = GetMonitorInfoW(win32.monitor,
+      (MONITORINFO *)&info);
+  if (haveMonitor &&
       EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
       mode.dmDisplayFrequency > 1)
     period = UINT64_C(1000000000) / mode.dmDisplayFrequency;
 
   atomic_store(&win32.framePeriod, period);
+
+  // the blanks that waitFrame waits for are the display's that the window is
+  // on, which may not be the one that it was on or that was set up, and its
+  // mode may have changed. The mode's rate is a whole number of hertz, so
+  // what is measured takes over once there is enough of it
+  if (haveMonitor && win32.kmt)
+    win32KmtSource_retarget(win32.kmt, info.szDevice);
+  if (win32.vblank && period != win32.nominalPeriod)
+    win32VBlank_setNominalPeriod(win32.vblank, period);
+  win32.nominalPeriod = period;
+}
+
+/* the thread that waits for the blanks has to wake as soon as one comes */
+static void vblankThreadStart(void)
+{
+  if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST))
+    DEBUG_WINERROR("Failed to raise the priority of the vertical blank thread",
+        GetLastError());
+}
+
+/* window thread */
+static void startVBlank(void)
+{
+  MONITORINFOEXW info = { .cbSize = sizeof(info) };
+  Win32VBlankParams params =
+  {
+    .nominalPeriod = atomic_load(&win32.framePeriod),
+    .threadStart   = vblankThreadStart,
+  };
+
+  if (GetMonitorInfoW(win32.monitor, (MONITORINFO *)&info))
+  {
+    win32.kmt = win32KmtSource_create(info.szDevice);
+    if (win32.kmt)
+      params.sources[params.sourceCount++] = (Win32VBlankSource)
+        { "graphics kernel", win32KmtSource_wait, win32.kmt };
+  }
+
+  // for a session that cannot ask the graphics kernel, such as a remote one
+  params.sources[params.sourceCount++] = (Win32VBlankSource)
+    { "DWM", win32DwmSource_wait, NULL };
+
+  win32.nominalPeriod = params.nominalPeriod;
+  if (!win32VBlank_create(&params, &win32.vblank))
+  {
+    DEBUG_WARN("Failed to start the vertical blank pacing, waitFrame wakes by "
+        "the clock");
+    win32KmtSource_destroy(win32.kmt);
+    win32.kmt = NULL;
+  }
+}
+
+static void stopVBlank(void)
+{
+  if (!win32.vblank)
+    return;
+
+  Win32VBlankStats stats;
+  win32VBlank_getStats(win32.vblank, &stats);
+  if (stats.ticks)
+    DEBUG_INFO("Vertical blank by %s: %lu blanks, %.4f ms (%.3f Hz)%s, "
+        "p50 %.4f p95 %.4f p99 %.4f max %.4f ms, %lu missed, %lu early",
+        stats.source ? stats.source : "the clock",
+        stats.ticks, stats.period / 1e6, 1e9 / (double)stats.period,
+        stats.measured ? " measured" : " of the display mode",
+        stats.p50 / 1e6, stats.p95 / 1e6, stats.p99 / 1e6, stats.max / 1e6,
+        stats.missed, stats.early);
+
+  if (stats.stalls)
+    DEBUG_WARN("The vertical blank stalled %lu times: no blank came for a long while",
+        stats.stalls);
+
+  if (stats.frames)
+    DEBUG_INFO("Render after the blank: let go at p50 %.4f p95 %.4f p99 "
+        "%.4f max %.4f ms, frame submitted at p50 %.4f p95 %.4f p99 %.4f "
+        "max %.4f ms; %lu of %lu frames took over a period",
+        stats.wakeP50 / 1e6, stats.wakeP95 / 1e6, stats.wakeP99 / 1e6,
+        stats.wakeMax / 1e6, stats.submitP50 / 1e6, stats.submitP95 / 1e6,
+        stats.submitP99 / 1e6, stats.submitMax / 1e6, stats.late,
+        stats.frames);
+
+  // a source that does not return keeps its thread, and what it uses
+  if (win32VBlank_destroy(&win32.vblank))
+    win32KmtSource_destroy(win32.kmt);
+  win32.kmt = NULL;
 }
 
 static void updateMonitor(void)
@@ -1189,6 +1285,8 @@ static bool createWindow(void)
   atomic_store(&win32.keyboardLayout,
       (uintptr_t)GetKeyboardLayout(GetCurrentThreadId()));
   updateFramePeriod();
+  if (params->jitRender)
+    startVBlank();
 
   atomic_store(&win32.ready, true);
   ShowWindow(win32.window, params->maximize ? SW_SHOWMAXIMIZED : SW_SHOW);
@@ -1320,6 +1418,7 @@ static void win32Shutdown(void)
 static void win32Free(void)
 {
   win32Shutdown();
+  stopVBlank();
 
   if (win32.thread)
   {
@@ -1388,17 +1487,52 @@ static void win32GLSetSwapInterval(int interval)
 static void win32GLSwapBuffers(void)
 {
   SwapBuffers(win32.dc);
+
+  // the frame that waitFrame let the render thread go for is submitted
+  if (win32.vblank)
+    win32VBlank_frameSubmitted(win32.vblank);
 }
 #endif
 
 static bool win32GetFramePeriod(uint64_t * period)
 {
+  // measured from the blanks when there are enough, which the display mode's
+  // whole hertz is not, and which the frame scheduler sums over time
+  if (win32.vblank && win32VBlank_getPeriod(win32.vblank, period))
+    return true;
+
   const uint64_t value = atomic_load(&win32.framePeriod);
   if (!value)
     return false;
 
   *period = value;
   return true;
+}
+
+static LG_DSWaitFrameResult win32WaitFrame(void)
+{
+  if (win32.vblank)
+    return win32VBlank_wait(win32.vblank);
+
+  // no pacing could be made, and this is called only with win:jitRender: wake
+  // at the display's rate, and without claiming that it is the display's
+  // cadence
+  uint64_t period = 0;
+  if (!win32GetFramePeriod(&period))
+    period = UINT64_C(16666667);
+  nsleep(period);
+  return LG_DS_WAIT_FRAME_NONE;
+}
+
+static void win32SkipFrame(void)
+{
+  // there is nothing to arm again: the blanks come either way
+}
+
+static void win32StopWaitFrame(void)
+{
+  if (win32.vblank)
+    win32VBlank_interrupt(win32.vblank);
 }
 
 static void win32SetCursorPos(double x, double y)
@@ -1593,6 +1727,9 @@ struct LG_DisplayServerOps LGDS_Win32 =
   .glSetSwapInterval   = win32GLSetSwapInterval,
   .glSwapBuffers       = win32GLSwapBuffers,
 #endif
+  .waitFrame           = win32WaitFrame,
+  .skipFrame           = win32SkipFrame,
+  .stopWaitFrame       = win32StopWaitFrame,
   .getFramePeriod      = win32GetFramePeriod,
   .guestPointerUpdated = win32GuestPointerUpdated,
   .setPointer          = win32SetPointer,
