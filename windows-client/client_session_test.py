@@ -184,6 +184,8 @@ def main():
   parser.add_argument('--dwell', type=int, default=500,
       help='milliseconds that the producer waits after a step (default 500)')
   parser.add_argument('--fps', type=int, default=60)
+  parser.add_argument('--amd-pinned-mem', choices=('yes', 'no'), default='yes',
+      help='exercise the default pinned-memory path when the GPU supports it')
   parser.add_argument('client_args', nargs='*',
       help='extra client options, after --')
   args = parser.parse_args()
