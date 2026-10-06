@@ -69,6 +69,14 @@ typedef enum LG_DSProperty
    * return data type: bool
    */
   LG_DS_WINDOW_HIDDEN,
+
+  /**
+   * returns the handle of the window that the platform's own graphics API
+   * draws into, as Direct3D does with the HWND on Windows
+   * if not implemented LG assumes that there is no such window
+   * return data type: void *
+   */
+  LG_DS_NATIVE_WINDOW,
 }
 LG_DSProperty;
 
