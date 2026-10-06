@@ -492,7 +492,7 @@ static bool process_option_line(const char * module, const char * name,
     if (value)
     {
       //rtrim
-      while (valueLen > 1 && isspace(value[valueLen-1]))
+      while (valueLen > 1 && isspace((unsigned char)value[valueLen-1]))
         --valueLen;
 
       value[valueLen] = '\0';
@@ -509,6 +509,24 @@ bool option_load(const char * filename)
   FILE * fp = fopen(filename, "r");
   if (!fp)
     return false;
+
+  /* The text is UTF-8, which Notepad writes with a byte order mark, and
+   * PowerShell 5.1 writes its redirections and Out-File in UTF-16 with one,
+   * whose every other byte is a NUL that no option name has. The mark of
+   * UTF-8 is not part of the first line, and a file in UTF-16 is refused
+   * with the reason, as its text would be read as nothing at all. */
+  unsigned char mark[3];
+  const size_t  marked = fread(mark, 1, sizeof(mark), fp);
+  if (marked >= 2 && ((mark[0] == 0xFF && mark[1] == 0xFE) ||
+                      (mark[0] == 0xFE && mark[1] == 0xFF)))
+  {
+    DEBUG_ERROR("%s is UTF-16 text, save it as UTF-8", filename);
+    fclose(fp);
+    return false;
+  }
+
+  if (marked != 3 || mark[0] != 0xEF || mark[1] != 0xBB || mark[2] != 0xBF)
+    rewind(fp);
 
   bool   result      = true;
   int    lineno      = 1;
@@ -607,7 +625,7 @@ bool option_load(const char * filename)
           }
 
           //rtrim
-          while (nameLen > 1 && isspace(name[nameLen-1]))
+          while (nameLen > 1 && isspace((unsigned char)name[nameLen-1]))
             --nameLen;
           name[nameLen] = '\0';
           expectValue   = true;
@@ -640,8 +658,9 @@ bool option_load(const char * filename)
         // fallthrough
 
       default:
-        // ignore non-typeable ascii characters
-        if (c < 32 || c > 126)
+        // ignore the control characters, the bytes of UTF-8 text are the
+        // value's
+        if (c < 32 || c == 127)
           continue;
 
         if (expectLine)

@@ -41,6 +41,14 @@ target_link_libraries(time-tests
 add_test(NAME time-tests COMMAND time-tests)
 set_tests_properties(time-tests PROPERTIES TIMEOUT 20)
 
+add_executable(option-tests option_test.c)
+target_link_libraries(option-tests
+  ${EXE_FLAGS}
+  lg_common
+)
+add_test(NAME option-tests COMMAND option-tests)
+set_tests_properties(option-tests PROPERTIES TIMEOUT 20)
+
 target_compile_definitions(font-tests PRIVATE
   FONT_TEST_FILE="${PROJECT_TOP}/repos/gui/cimgui/imgui/misc/fonts/DroidSans.ttf"
 )
