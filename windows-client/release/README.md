@@ -28,7 +28,10 @@ the one that makes the section decides which machine gets it.
   its built-in test transport, which draws a moving test pattern. There is
   no SPICE on Windows.
 - Frames are copied through the CPU; there is no zero-copy path on Windows.
-- There is no audio, clipboard or file transfer.
+- There is no audio or file transfer. Text and images of the clipboard are
+  copied both ways when there is a guest, which has not been tried: it was
+  tested on Windows' own clipboard, in a window station of its own, and
+  against the client's core with a core that the test makes.
 - It has run in CI on Windows, with Mesa's software OpenGL, under Wine, and
   on one physical PC: Windows 11 (build 26200), an AMD Radeon RX 9070 XT, a
   240 Hz and a 144 Hz display, with the test pattern and with the test

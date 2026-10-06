@@ -61,6 +61,50 @@ no extra DLLs. It renders with the OpenGL renderer through WGL. EGL, audio,
 clipboard file transfer, evdev input and SPICE are left out of the Windows
 build.
 
+### Clipboard
+
+Text and images that are copied on the PC are offered to the guest, which asks
+for them when it pastes, and what the guest copies is put on the PC's
+clipboard as an offer that nothing fills in until a program pastes it. It
+goes over the LGMP clipboard queue, with the types that the Windows guest's
+`LGIddHelper` uses: UTF-8 text with an LF at the end of a line (the clipboard
+has UTF-16 with a CR and an LF), PNG (the registered format `PNG`), BMP files
+(a bitmap of the clipboard, `CF_DIBV5` or `CF_DIB`, with the header of a file)
+and TIFF and JPEG (`JFIF`) as they are. `clipboard:toVM` and
+`clipboard:toLocal` turn each direction off.
+
+- The messages of the clipboard go to a window of its own, with a thread of
+  its own, as Windows holds the program that pastes until that window has
+  filled the clipboard in. The hooks that the core calls do not call
+  Windows and do not wait.
+- What the guest copied is not kept in Windows' clipboard history or sent to
+  its cloud (the formats `CanIncludeInClipboardHistory`,
+  `CanUploadToCloudClipboard` and
+  `ExcludeClipboardContentFromMonitorProcessing` say so), as it may be a
+  password. A program that pastes waits 5 seconds at most for the guest.
+- If the client ends while it holds an offer that nothing has pasted, it asks the guest
+  for it and leaves it on the clipboard.
+- A PNG that the guest copied is put on the clipboard as a PNG, and as a
+  bitmap made of it by Windows' own imaging codec (WIC), a 32 bit one with an
+  alpha channel, so that a program that reads only bitmaps sees it; the guest is
+  asked for it once. A BMP is put there as a bitmap, and Windows makes
+  the other formats of it. Files are not copied.
+
+[clipboard_format_test.c](../client/tests/clipboard_format_test.c) tests the
+conversions, with the bytes that a guest that is not to be trusted can send,
+[clipboard_wic_test.c](../client/tests/clipboard_wic_test.c) the decoding of a PNG
+(and of bytes that are not one), and
+[win32_clipboard_test.c](../client/tests/win32_clipboard_test.c) the logic, with a
+clipboard and a core that the test makes. Both pass under AddressSanitizer,
+UndefinedBehaviorSanitizer and, for the second, ThreadSanitizer on Linux.
+[win32_clipboard_real_test.c](../client/tests/win32_clipboard_real_test.c) uses
+Windows' own clipboard, in a window station that it makes and moves the process
+to, so that it is not the PC's: another program copies, pastes, and
+is pasted from. **Not tested: a guest.** No LGMP host that speaks the clipboard
+exists in these tools, so the path from the core to the LGMP queue and the Windows
+guest's helper is covered by the client's existing tests of those, and not
+by this one.
+
 ### Running
 
 `looking-glass-client.exe` starts on the `test` transport and shows an
@@ -728,7 +772,9 @@ keeps the shared code covered there.
   There is no zero-copy import on Windows; DMA-BUF is Linux only.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
-- There is no audio, clipboard or SPICE support on Windows.
+- There is no audio or SPICE support on Windows, and no files on the
+  clipboard. Text and images are covered in [Clipboard](#clipboard), and were
+  not tried with a guest.
 - The client has run with software OpenGL in CI, under Wine, and on one
   physical Windows PC, with an RX 9070 XT (OpenGL 4.6 Compatibility Profile
   Context 26.9.1.260826), where `client_format_test.py` passes its 25 cases

@@ -799,6 +799,12 @@ jobs:
       run: |
         cd client/build
         ctest --output-on-failure -j$(nproc)
+    - name: Check the clipboard on Windows' own, in a window station of its own
+      run: |
+        # ctest passes the test if it cannot make a station, which is a
+        # reason to look, and this step does not
+        client/build/tests/win32-clipboard-real-tests.exe | tee clipboard-real.txt
+        grep -q "real tests passed" clipboard-real.txt
     - name: Build the test frame producer
       run: |
         mkdir windows-client/build
@@ -833,8 +839,12 @@ jobs:
           --output sessions client/build/looking-glass-client.exe
     - name: Check that the client renders nothing for a window that is minimized
       run: |
+        # software rendering of a stream this size costs the client far more
+        # than the threads that poll the guest do, which is what makes it
+        # tell a client that is drawing from one that is not
         GALLIUM_DRIVER=llvmpipe python windows-client/client_idle_test.py \
           --producer windows-client/build/lg-windows-client-producer.exe \
+          --size 1920x1080 --fps 60 \
           --output idle client/build/looking-glass-client.exe
     - name: Check where the client's messages go when it has no console
       run: |

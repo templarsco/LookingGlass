@@ -64,6 +64,31 @@ target_link_libraries(placement-tests
 add_test(NAME placement-tests COMMAND placement-tests)
 set_tests_properties(placement-tests PROPERTIES TIMEOUT 20)
 
+add_executable(clipboard-format-tests
+  clipboard_format_test.c
+  ../displayservers/Win32/clipboard_format.c
+)
+target_link_libraries(clipboard-format-tests
+  ${EXE_FLAGS}
+)
+add_test(NAME clipboard-format-tests COMMAND clipboard-format-tests)
+set_tests_properties(clipboard-format-tests PROPERTIES TIMEOUT 60)
+
+add_executable(win32-clipboard-tests
+  win32_clipboard_test.c
+  ../displayservers/Win32/clipboard.c
+  ../displayservers/Win32/clipboard_format.c
+)
+target_include_directories(win32-clipboard-tests PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+)
+target_link_libraries(win32-clipboard-tests
+  ${EXE_FLAGS}
+  lg_common
+)
+add_test(NAME win32-clipboard-tests COMMAND win32-clipboard-tests)
+set_tests_properties(win32-clipboard-tests PROPERTIES TIMEOUT 60)
+
 if(WIN32)
   add_executable(watchdog-tests watchdog_test.c)
   target_link_libraries(watchdog-tests
@@ -80,6 +105,38 @@ if(WIN32)
   )
   add_test(NAME power-tests COMMAND power-tests)
   set_tests_properties(power-tests PROPERTIES TIMEOUT 20)
+
+  # Windows' own codec decodes a PNG that the guest copied
+  add_executable(clipboard-wic-tests
+    clipboard_wic_test.c
+    ../displayservers/Win32/clipboard_wic.c
+    ../displayservers/Win32/clipboard_format.c
+  )
+  target_link_libraries(clipboard-wic-tests
+    ${EXE_FLAGS}
+    ole32
+  )
+  add_test(NAME clipboard-wic-tests COMMAND clipboard-wic-tests)
+  set_tests_properties(clipboard-wic-tests PROPERTIES TIMEOUT 60)
+
+  # Windows' own clipboard, in a window station that the test makes
+  add_executable(win32-clipboard-real-tests
+    win32_clipboard_real_test.c
+    ../displayservers/Win32/clipboard.c
+    ../displayservers/Win32/clipboard_format.c
+    ../displayservers/Win32/clipboard_wic.c
+    ../displayservers/Win32/clipboard_win32.c
+  )
+  target_include_directories(win32-clipboard-real-tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+  )
+  target_link_libraries(win32-clipboard-real-tests
+    ${EXE_FLAGS}
+    lg_common
+    user32
+  )
+  add_test(NAME win32-clipboard-real-tests COMMAND win32-clipboard-real-tests)
+  set_tests_properties(win32-clipboard-real-tests PROPERTIES TIMEOUT 120)
 endif()
 
 target_compile_definitions(font-tests PRIVATE
