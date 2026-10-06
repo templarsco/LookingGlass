@@ -50,6 +50,8 @@
 #include <string.h>
 #include <strings.h>
 
+#include "cimgui.h"
+
 #include "common/debug.h"
 #include "common/framebuffer.h"
 #include "common/locking.h"
@@ -59,6 +61,14 @@
 #include "common/util.h"
 
 #include "shader.h"
+
+/* Dear ImGui's Direct3D 11 backend, which lg_gui builds. Its functions have C
+ * linkage, and cimgui has no header for them. */
+bool ImGui_ImplDX11_Init(ID3D11Device * device,
+    ID3D11DeviceContext * deviceContext);
+void ImGui_ImplDX11_Shutdown(void);
+void ImGui_ImplDX11_NewFrame(void);
+void ImGui_ImplDX11_RenderDrawData(ImDrawData * drawData);
 
 #define BUFFER_COUNT 2
 
@@ -221,6 +231,12 @@ struct Inst
   ID3D11Texture2D          * cursorTexture[2]; // the color, or the AND and XOR
   ID3D11ShaderResourceView * cursorView[2];
   unsigned                   screenW, screenH; // of the guest's screen
+
+  // the overlays are Dear ImGui's, drawn by its backend, which makes the
+  // textures of its own, and the images that they show are made here
+  bool                        imguiStarted;
+  ID3D11ShaderResourceView ** images;
+  size_t                      imageCount;
 };
 
 /* what the frames can be, and how a texture holds them */
@@ -546,6 +562,13 @@ static void d3d11_deinitialize(LG_Renderer * renderer)
   releasePipeline(this);
   releaseBackBuffer(this);
   free(this->mouseData);
+
+  // the backend lets go of its own, and the images that were not given back
+  if (this->imguiStarted)
+    ImGui_ImplDX11_Shutdown();
+  for (size_t i = 0; i < this->imageCount; ++i)
+    ID3D11ShaderResourceView_Release(this->images[i]);
+  free(this->images);
   if (this->context)
   {
     // so that nothing refers to the swap chain's buffers when it goes
@@ -807,6 +830,14 @@ static bool d3d11_renderStartup(LG_Renderer * renderer, bool useDMA)
     hr = E_FAIL;
     goto out;
   }
+
+  if (!ImGui_ImplDX11_Init(this->device, this->context))
+  {
+    DEBUG_ERROR("Failed to initialize ImGui");
+    hr = E_FAIL;
+    goto out;
+  }
+  this->imguiStarted = true;
 
   DEBUG_INFO("Swap chain   : %ux%u, flip model", this->backWidth,
       this->backHeight);
@@ -1509,6 +1540,15 @@ static bool d3d11_render(LG_Renderer * renderer, LG_RendererRotate rotate,
   updateMouseShape(this);
   drawFrame(this);
   drawCursor(this);
+
+  // what the overlays have to show, which is not nothing if it has a rectangle
+  // or the whole window to draw
+  if (app_renderOverlay(NULL, 0) != 0)
+  {
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplDX11_RenderDrawData(igGetDrawData());
+  }
+
   preSwap(udata);
 
   const uint64_t swapStart = nanotime();
@@ -1595,19 +1635,82 @@ static bool d3d11_capture(LG_Renderer * renderer, LG_RendererCapture * capture)
   return true;
 }
 
-/* what the overlays use, which are not drawn yet */
-
-static char noTexture;
-
+/* The images that the overlays show (the logo of the splash, and the like), as
+ * the 32 bit pictures that they are given. What an overlay holds, and shows
+ * with Dear ImGui, is the shader resource view of its texture, which is what
+ * the backend draws with. */
 static void * d3d11_createTexture(LG_Renderer * renderer, int width,
     int height, uint8_t * data)
 {
-  // something that is not NULL, as the overlays take that for a failure
-  return &noTexture;
+  struct Inst * this = UPCAST(struct Inst, renderer);
+
+  if (width <= 0 || height <= 0 || (unsigned)width > this->maxTextureSize ||
+      (unsigned)height > this->maxTextureSize)
+  {
+    DEBUG_ERROR("An image of %dx%d cannot be a texture", width, height);
+    return NULL;
+  }
+
+  ID3D11ShaderResourceView ** images = realloc(this->images,
+      (this->imageCount + 1) * sizeof(*images));
+  if (!images)
+  {
+    DEBUG_ERROR("Out of memory");
+    return NULL;
+  }
+  this->images = images;
+
+  const D3D11_TEXTURE2D_DESC desc =
+  {
+    .Width      = width,
+    .Height     = height,
+    .MipLevels  = 1,
+    .ArraySize  = 1,
+    .Format     = DXGI_FORMAT_R8G8B8A8_UNORM,
+    .SampleDesc = { .Count = 1 },
+    .Usage      = D3D11_USAGE_IMMUTABLE,
+    .BindFlags  = D3D11_BIND_SHADER_RESOURCE,
+  };
+  const D3D11_SUBRESOURCE_DATA init =
+  {
+    .pSysMem     = data,
+    .SysMemPitch = width * 4,
+  };
+
+  ID3D11Texture2D          * texture = NULL;
+  ID3D11ShaderResourceView * view    = NULL;
+  HRESULT hr = ID3D11Device_CreateTexture2D(this->device, &desc, &init,
+      &texture);
+  if (SUCCEEDED(hr))
+  {
+    hr = ID3D11Device_CreateShaderResourceView(this->device,
+        (ID3D11Resource *)texture, NULL, &view);
+
+    // the view keeps the texture
+    ID3D11Texture2D_Release(texture);
+  }
+  if (FAILED(hr))
+  {
+    DEBUG_ERROR("Could not make a texture of %dx%d (0x%08lx)", width, height,
+        (unsigned long)hr);
+    return NULL;
+  }
+
+  this->images[this->imageCount++] = view;
+  return view;
 }
 
 static void d3d11_freeTexture(LG_Renderer * renderer, void * texture)
 {
+  struct Inst * this = UPCAST(struct Inst, renderer);
+
+  for (size_t i = 0; i < this->imageCount; ++i)
+    if (this->images[i] == texture)
+    {
+      ID3D11ShaderResourceView_Release(this->images[i]);
+      this->images[i] = this->images[--this->imageCount];
+      return;
+    }
 }
 
 static void d3d11_swSurfaceConfigure(LG_Renderer * renderer, int width,
