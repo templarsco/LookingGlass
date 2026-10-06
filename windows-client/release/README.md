@@ -29,12 +29,18 @@ the one that makes the section decides which machine gets it.
   no SPICE on Windows.
 - Frames are copied through the CPU; there is no zero-copy path on Windows.
 - There is no audio, clipboard or file transfer.
-- It has run on Windows only in CI, with Mesa's software OpenGL, and under
-  Wine. It has not been checked on a physical Windows PC yet.
+- It has run in CI on Windows, with Mesa's software OpenGL, under Wine, and
+  on one physical PC: Windows 11 (build 26200), an AMD Radeon RX 9070 XT, a
+  240 Hz and a 144 Hz display, with the test pattern and with the test
+  producer's frames. No Intel or NVIDIA graphics, no Windows 10 and no other
+  PC has been tried.
 
 ## Requirements
 
-- 64-bit Windows 10 version 1703 or later.
+- 64-bit Windows 10 version 1903 or later. The program starts on versions
+  1703 to 1809 too, but they ignore the manifest's UTF-8 code page, so a path
+  with an accent in it, as the name of a user may have, is not found, and
+  the client says so when it starts.
 - A graphics driver with OpenGL 3.2, or OpenGL 2.0 with `GL_ARB_sync`.
 
 The program is not code signed, so Windows SmartScreen may warn before it
@@ -46,11 +52,15 @@ Start `looking-glass-client.exe`. A window with a moving test pattern opens.
 
 - Scroll Lock captures and releases the mouse. Scroll Lock+F toggles
   fullscreen, Scroll Lock+O opens the settings overlay and Scroll Lock+Q
-  quits.
+  quits. A keyboard without a Scroll Lock key, as most laptops have, needs
+  another one: put `escapeKey=KEY_RIGHTCTRL` under `[input]` in
+  `client.ini`, or pass `input:escapeKey=KEY_RIGHTCTRL`.
 - `looking-glass-client.exe test:input=yes` logs the keyboard and mouse
   input that the client would send to a virtual machine.
 - `looking-glass-client.exe --help` lists every option. Options can also go
-  in `%APPDATA%\looking-glass\client.ini`.
+  in `%APPDATA%\looking-glass\client.ini`, which must be saved as UTF-8
+  (Notepad's default; PowerShell 5.1's `>` and `Out-File` write UTF-16,
+  which the client refuses, and says so).
 
 `lg-windows-client-producer.exe` is a test tool that stands in for a
 virtual machine: it creates a shared memory section that only you can open
