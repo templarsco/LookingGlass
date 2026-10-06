@@ -121,7 +121,13 @@ animated test pattern. Some useful options:
 
 Options can also go in `%APPDATA%\looking-glass\client.ini`, saved as UTF-8
 with or without a byte order mark. A file in UTF-16, which PowerShell 5.1
-writes for `>` and `Out-File`, is refused and the client says so.
+writes for `>` and `Out-File`, is refused and the client says so. A
+`client.ini` next to `looking-glass-client.exe` is read first, so that a copy that
+is carried about has its configuration with it: the one in `%APPDATA%` is read
+after it and wins, and `app:configFile` and the command line win over both.
+[client_config_test.py](client_config_test.py) checks all of that with the
+title of the window, which has an accent, a dash and a character of another
+script.
 
 The client is a program of the GUI subsystem, so Explorer or a shortcut opens
 no console window with it. Where its messages go depends on how it was
