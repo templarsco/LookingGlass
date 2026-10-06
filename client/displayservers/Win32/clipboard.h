@@ -97,6 +97,12 @@ typedef struct Win32ClipboardApi
   /* Says that what the guest copied is to stay out of the clipboard's history
    * and the cloud's: it may be a password. */
   bool (*setPrivate)(void * opaque);
+
+  /* The packed bitmap of a PNG, which free() takes, or NULL if it cannot be
+   * made. Without it, a PNG that the guest copied is offered as a PNG only, and
+   * a program that reads only bitmaps does not see it. */
+  uint8_t * (*pngToDib)(void * opaque, const uint8_t * png, size_t size,
+      size_t * dibSize);
 }
 Win32ClipboardApi;
 

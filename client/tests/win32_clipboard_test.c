@@ -65,6 +65,7 @@ struct Clipboard
   unsigned    empties;
   unsigned    gets;
   bool        getBumpsSequence;  // what a program that renders late does
+  unsigned    pngToDibCalls;
 };
 
 static void clear(struct Clipboard * cb)
@@ -210,6 +211,27 @@ static bool apiSetPrivate(void * o)
   return true;
 }
 
+// a bitmap of one pixel, whatever the PNG is: the converter is not the test's
+static const uint8_t g_fakeDib[] =
+{
+  40, 0, 0, 0,  1, 0, 0, 0,  1, 0, 0, 0,  1, 0, 32, 0,
+  0, 0, 0, 0,  4, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,
+  0, 0, 0, 0,  0, 0, 0, 0,  0xAA, 0xBB, 0xCC, 0xDD,
+};
+
+static uint8_t * apiPngToDib(void * o, const uint8_t * png, size_t size,
+    size_t * dibSize)
+{
+  struct Clipboard * cb = o;
+  ++cb->pngToDibCalls;
+
+  uint8_t * copy = malloc(sizeof(g_fakeDib));
+  CHECK(copy);
+  memcpy(copy, g_fakeDib, sizeof(g_fakeDib));
+  *dibSize = sizeof(g_fakeDib);
+  return copy;
+}
+
 /* the core of the test */
 
 enum Reply
@@ -342,7 +364,7 @@ struct Setup
   struct Core      core;
 };
 
-static struct Setup * setup(unsigned timeoutMs)
+static struct Setup * setupWith(unsigned timeoutMs, bool decoder)
 {
   struct Setup * s = calloc(1, sizeof(*s));
   CHECK(s);
@@ -363,6 +385,7 @@ static struct Setup * setup(unsigned timeoutMs)
     .set        = apiSet,
     .setDelayed = apiSetDelayed,
     .setPrivate = apiSetPrivate,
+    .pngToDib   = decoder ? apiPngToDib : NULL,
   };
   const Win32ClipboardCore coreTable =
   {
@@ -377,6 +400,11 @@ static struct Setup * setup(unsigned timeoutMs)
   s->cb.lib = win32Clipboard_create(&api, &coreTable, timeoutMs);
   CHECK(s->cb.lib);
   return s;
+}
+
+static struct Setup * setup(unsigned timeoutMs)
+{
+  return setupWith(timeoutMs, false);
 }
 
 static void finish(struct Setup * s)
@@ -698,6 +726,87 @@ static void testGuestImage(void)
   finish(s);
 }
 
+static void testGuestPng(void)
+{
+  struct Setup * s = setupWith(1000, true);
+  static const uint8_t png[] = { 0x89, 'P', 'N', 'G', 1, 2, 3, 4 };
+  s->core.reply     = REPLY_NOW;
+  s->core.replyData = png;
+  s->core.replySize = sizeof(png);
+
+  // the PNG, and the bitmap that Windows has no PNG to ask for
+  win32Clipboard_notice(s->cb.lib, LG_CLIPBOARD_DATA_PNG);
+  win32Clipboard_process(s->cb.lib);
+  CHECK(s->cb.count == 2);
+  CHECK(find(&s->cb, FORMAT_PNG) && find(&s->cb, FORMAT_PNG)->delayed);
+  CHECK(find(&s->cb, WIN32_CF_DIB) && find(&s->cb, WIN32_CF_DIB)->delayed);
+
+  // the bitmap is made of what the guest sent
+  CHECK(win32Clipboard_render(s->cb.lib, WIN32_CF_DIB));
+  CHECK(s->core.requests == 1 && s->cb.pngToDibCalls == 1);
+  struct Item * item = find(&s->cb, WIN32_CF_DIB);
+  CHECK(item && !item->delayed && item->size == sizeof(g_fakeDib));
+  CHECK(memcmp(item->data, g_fakeDib, sizeof(g_fakeDib)) == 0);
+
+  // and the PNG is not asked for again
+  CHECK(win32Clipboard_render(s->cb.lib, FORMAT_PNG));
+  CHECK(s->core.requests == 1 && s->cb.pngToDibCalls == 1);
+  item = find(&s->cb, FORMAT_PNG);
+  CHECK(item && !item->delayed && item->size == sizeof(png));
+  CHECK(memcmp(item->data, png, sizeof(png)) == 0);
+
+  // a version 5 bitmap asked for is made of it, as Windows may ask for it
+  CHECK(win32Clipboard_render(s->cb.lib, WIN32_CF_DIBV5));
+  CHECK(s->core.requests == 1 && s->cb.pngToDibCalls == 2);
+
+  // another offer is not the one that was kept
+  win32Clipboard_notice(s->cb.lib, LG_CLIPBOARD_DATA_PNG);
+  win32Clipboard_process(s->cb.lib);
+  CHECK(win32Clipboard_render(s->cb.lib, FORMAT_PNG));
+  CHECK(s->core.requests == 2);
+
+  finish(s);
+}
+
+static void testGuestPngWithoutADecoder(void)
+{
+  struct Setup * s = setupWith(1000, false);
+  static const uint8_t png[] = { 0x89, 'P', 'N', 'G' };
+  s->core.reply     = REPLY_NOW;
+  s->core.replyData = png;
+  s->core.replySize = sizeof(png);
+
+  // only a PNG can be offered, and a bitmap is not asked for
+  win32Clipboard_notice(s->cb.lib, LG_CLIPBOARD_DATA_PNG);
+  win32Clipboard_process(s->cb.lib);
+  CHECK(s->cb.count == 1 && find(&s->cb, FORMAT_PNG));
+  CHECK(!win32Clipboard_render(s->cb.lib, WIN32_CF_DIB));
+  CHECK(s->core.requests == 0);
+  CHECK(win32Clipboard_render(s->cb.lib, FORMAT_PNG));
+
+  finish(s);
+}
+
+static void testGuestPngKeptWhenTheWindowGoes(void)
+{
+  struct Setup * s = setupWith(1000, true);
+  static const uint8_t png[] = { 0x89, 'P', 'N', 'G', 9 };
+  s->core.reply     = REPLY_NOW;
+  s->core.replyData = png;
+  s->core.replySize = sizeof(png);
+
+  win32Clipboard_notice(s->cb.lib, LG_CLIPBOARD_DATA_PNG);
+  win32Clipboard_process(s->cb.lib);
+
+  // both formats are filled in, from one answer of the guest
+  win32Clipboard_renderAll(s->cb.lib);
+  CHECK(find(&s->cb, FORMAT_PNG) && !find(&s->cb, FORMAT_PNG)->delayed);
+  CHECK(find(&s->cb, WIN32_CF_DIB) && !find(&s->cb, WIN32_CF_DIB)->delayed);
+  CHECK(s->core.requests == 1);
+
+  finish(s);
+}
+
 static void testGuestOfferReplaced(void)
 {
   struct Setup * s = setup(1000);
@@ -959,6 +1068,9 @@ int main(void)
   testStart();
   testGuestText();
   testGuestImage();
+  testGuestPng();
+  testGuestPngWithoutADecoder();
+  testGuestPngKeptWhenTheWindowGoes();
   testGuestOfferReplaced();
   testGuestRelease();
   testGuestReleaseAfterACopy();

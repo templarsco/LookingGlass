@@ -84,6 +84,8 @@ struct Win32Clipboard
   // what only the thread of the window uses
   bool               haveRemote;     // an offer of the guest is on the clipboard
   LG_ClipboardData   remoteType;
+  uint8_t          * remoteData;     // a PNG that the guest sent, as there are two
+  size_t             remoteSize;     // formats of it to fill in, one from the other
   bool               emptying;       // our own EmptyClipboard is going on
   bool               localKnown;     // localSequence is that of an offer
   bool               localOffered;   // the guest has been told of the types
@@ -116,6 +118,10 @@ static bool formatServes(const Win32Clipboard * c, LG_ClipboardData type,
     return false;
   if (type == LG_CLIPBOARD_DATA_BMP)
     return format == WIN32_CF_DIB || format == WIN32_CF_DIBV5;
+  // a PNG is a bitmap too, when there is a way to make one of it
+  if (type == LG_CLIPBOARD_DATA_PNG && c->api.pngToDib &&
+      (format == WIN32_CF_DIB || format == WIN32_CF_DIBV5))
+    return true;
   return format == wanted;
 }
 
@@ -213,6 +219,7 @@ void win32Clipboard_destroy(Win32Clipboard * c)
     return;
 
   atomic_store(&c->stopped, true);
+  free(c->remoteData);
   free(c);
 }
 
@@ -282,6 +289,13 @@ void win32Clipboard_requestCancel(Win32Clipboard * c,
 
 /* what the guest copies, for Windows to paste */
 
+static void forgetRemoteData(Win32Clipboard * c)
+{
+  free(c->remoteData);
+  c->remoteData = NULL;
+  c->remoteSize = 0;
+}
+
 static void publishRemote(Win32Clipboard * c, LG_ClipboardData type)
 {
   const unsigned format = formatOf(c, type);
@@ -299,6 +313,8 @@ static void publishRemote(Win32Clipboard * c, LG_ClipboardData type)
   c->emptying = false;
 
   ok = ok && c->api.setDelayed(c->api.opaque, format);
+  if (ok && type == LG_CLIPBOARD_DATA_PNG && c->api.pngToDib)
+    ok = c->api.setDelayed(c->api.opaque, WIN32_CF_DIB);
   if (ok)
     c->api.setPrivate(c->api.opaque);
   c->api.close(c->api.opaque);
@@ -310,6 +326,7 @@ static void publishRemote(Win32Clipboard * c, LG_ClipboardData type)
     return;
   }
 
+  forgetRemoteData(c);
   c->haveRemote = true;
   c->remoteType = type;
 
@@ -324,6 +341,7 @@ static void dropRemote(Win32Clipboard * c)
   if (!c->haveRemote)
     return;
   c->haveRemote = false;
+  forgetRemoteData(c);
 
   if (!c->api.open(c->api.opaque))
     return;
@@ -377,6 +395,7 @@ void win32Clipboard_changed(Win32Clipboard * c)
 
   // another program owns the clipboard: the offer of the guest is gone
   c->haveRemote = false;
+  forgetRemoteData(c);
 
   /* Pasting what a program has not rendered yet makes it render it, which
    * is a change that Windows tells of. It is not another copy. */
@@ -408,7 +427,10 @@ void win32Clipboard_lost(Win32Clipboard * c)
 {
   // our own EmptyClipboard says it to us when we replace an offer
   if (!c->emptying)
+  {
     c->haveRemote = false;
+    forgetRemoteData(c);
+  }
 }
 
 /* The data of a type that the clipboard holds, which is of a size that the
@@ -578,6 +600,19 @@ static bool renderSet(Win32Clipboard * c, LG_ClipboardData type,
       break;
     }
 
+    case LG_CLIPBOARD_DATA_PNG:
+      if (format == c->api.formatPng)
+        ok = c->api.set(c->api.opaque, format, data, size);
+      else if (c->api.pngToDib)
+      {
+        size_t dibSize;
+        uint8_t * dib = c->api.pngToDib(c->api.opaque, data, size, &dibSize);
+        if (dib)
+          ok = c->api.set(c->api.opaque, format, dib, dibSize);
+        free(dib);
+      }
+      break;
+
     default:
       ok = c->api.set(c->api.opaque, format, data, size);
       break;
@@ -588,23 +623,20 @@ static bool renderSet(Win32Clipboard * c, LG_ClipboardData type,
   return ok;
 }
 
-bool win32Clipboard_render(Win32Clipboard * c, unsigned format)
+// asks the guest for what it copied, and waits for it. NULL if it does not come
+static uint8_t * fetchRemote(Win32Clipboard * c, LG_ClipboardData type,
+    size_t * size)
 {
-  if (atomic_load(&c->stopped) || !c->haveRemote ||
-      !formatServes(c, c->remoteType, format))
-    return false;
-
-  const LG_ClipboardData type = c->remoteType;
   struct Wait * wait = waitCreate(type);
   if (!wait)
-    return false;
+    return NULL;
 
   // the reply may come before this returns, and the core cannot call it off
   if (!c->core.request(c->core.opaque, type, replyFn, wait))
   {
     waitUnref(wait);
     waitUnref(wait);
-    return false;
+    return NULL;
   }
 
   lgWaitEvent(wait->event, c->renderTimeoutMs);
@@ -613,19 +645,42 @@ bool win32Clipboard_render(Win32Clipboard * c, unsigned format)
   if (!wait->done)
     wait->abandoned = true;
   uint8_t * data = wait->data;
-  const size_t size = wait->size;
+  *size = wait->size;
   wait->data = NULL;
   LG_UNLOCK(wait->lock);
   waitUnref(wait);
 
   if (!data)
-  {
     DEBUG_WARN("Could not get what the guest copied");
+  return data;
+}
+
+bool win32Clipboard_render(Win32Clipboard * c, unsigned format)
+{
+  if (atomic_load(&c->stopped) || !c->haveRemote ||
+      !formatServes(c, c->remoteType, format))
     return false;
-  }
+
+  const LG_ClipboardData type = c->remoteType;
+
+  /* A picture that the guest copied as a PNG is the PNG and a bitmap, and a
+   * program may ask for one after the other: the guest is asked once. */
+  if (type == LG_CLIPBOARD_DATA_PNG && c->remoteData)
+    return renderSet(c, type, format, c->remoteData, c->remoteSize);
+
+  size_t size = 0;
+  uint8_t * data = fetchRemote(c, type, &size);
+  if (!data)
+    return false;
 
   const bool ok = renderSet(c, type, format, data, size);
-  free(data);
+  if (type == LG_CLIPBOARD_DATA_PNG)
+  {
+    c->remoteData = data;
+    c->remoteSize = size;
+  }
+  else
+    free(data);
   return ok;
 }
 
@@ -640,8 +695,15 @@ void win32Clipboard_renderAll(Win32Clipboard * c)
   if (c->api.open(c->api.opaque))
   {
     if (c->api.isOwner(c->api.opaque))
+    {
       win32Clipboard_render(c, formatOf(c, type));
+
+      // the bitmap of a PNG is the other format that was offered
+      if (type == LG_CLIPBOARD_DATA_PNG && c->api.pngToDib)
+        win32Clipboard_render(c, WIN32_CF_DIB);
+    }
     c->api.close(c->api.opaque);
   }
   c->haveRemote = false;
+  forgetRemoteData(c);
 }

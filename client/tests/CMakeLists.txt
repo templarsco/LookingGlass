@@ -106,11 +106,25 @@ if(WIN32)
   add_test(NAME power-tests COMMAND power-tests)
   set_tests_properties(power-tests PROPERTIES TIMEOUT 20)
 
+  # Windows' own codec decodes a PNG that the guest copied
+  add_executable(clipboard-wic-tests
+    clipboard_wic_test.c
+    ../displayservers/Win32/clipboard_wic.c
+    ../displayservers/Win32/clipboard_format.c
+  )
+  target_link_libraries(clipboard-wic-tests
+    ${EXE_FLAGS}
+    ole32
+  )
+  add_test(NAME clipboard-wic-tests COMMAND clipboard-wic-tests)
+  set_tests_properties(clipboard-wic-tests PROPERTIES TIMEOUT 60)
+
   # Windows' own clipboard, in a window station that the test makes
   add_executable(win32-clipboard-real-tests
     win32_clipboard_real_test.c
     ../displayservers/Win32/clipboard.c
     ../displayservers/Win32/clipboard_format.c
+    ../displayservers/Win32/clipboard_wic.c
     ../displayservers/Win32/clipboard_win32.c
   )
   target_include_directories(win32-clipboard-real-tests PRIVATE

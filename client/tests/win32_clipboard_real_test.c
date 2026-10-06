@@ -31,6 +31,7 @@
 #include "common/debug.h"
 #include "../displayservers/Win32/clipboard_win32.h"
 #include "../displayservers/Win32/clipboard_format.h"
+#include "clipboard_png_sample.h"
 
 #include <windows.h>
 
@@ -226,6 +227,11 @@ static bool bitmapOnClipboard(void)
   return IsClipboardFormatAvailable(CF_DIB) != FALSE;
 }
 
+static bool pngOnClipboard(void)
+{
+  return IsClipboardFormatAvailable(RegisterClipboardFormatW(L"PNG")) != FALSE;
+}
+
 static bool ownedByUs(void)
 {
   return GetClipboardOwner() != NULL;
@@ -360,6 +366,41 @@ static void testImages(void)
   free(pasted);
 }
 
+static void testGuestPng(void)
+{
+  g_core.replyData = g_samplePng;
+  g_core.replySize = sizeof(g_samplePng);
+  const LONG requests = g_core.requests;
+
+  win32CBNotice(LG_CLIPBOARD_DATA_PNG);
+  CHECK(eventually(pngOnClipboard));
+  CHECK(eventually(ownedByUs));
+
+  // a program that reads only bitmaps is given one, made of the PNG by
+  // Windows' own codec: version 5 of the header, 32 bits, from the top down
+  size_t size = 0;
+  uint8_t * dib = pasteAs(CF_DIB, &size);
+  CHECK(dib);
+  CHECK(size >= sizeof(BITMAPV5HEADER) + sizeof(g_samplePngBgra));
+  BITMAPV5HEADER header;
+  memcpy(&header, dib, sizeof(header));
+  CHECK(header.bV5Size == sizeof(header) && header.bV5Width == 3 &&
+      header.bV5Height == -2 && header.bV5BitCount == 32);
+  CHECK(memcmp(dib + sizeof(header), g_samplePngBgra,
+        sizeof(g_samplePngBgra)) == 0);
+  free(dib);
+  CHECK(g_core.requests == requests + 1);
+
+  // and one that reads the PNG is given the guest's own bytes, without another
+  // request for it
+  uint8_t * png = pasteAs(RegisterClipboardFormatW(L"PNG"), &size);
+  CHECK(png);
+  CHECK(size >= sizeof(g_samplePng));
+  CHECK(memcmp(png, g_samplePng, sizeof(g_samplePng)) == 0);
+  free(png);
+  CHECK(g_core.requests == requests + 1);
+}
+
 static void testKeptWhenTheClientEnds(void)
 {
   static const char reply[] = "kept\nafter";
@@ -403,6 +444,7 @@ static int run(void)
   testText();
   testGuestText();
   testImages();
+  testGuestPng();
   testKeptWhenTheClientEnds();
 
   puts("win32 clipboard real tests passed");

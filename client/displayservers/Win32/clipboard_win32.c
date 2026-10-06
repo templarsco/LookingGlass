@@ -21,6 +21,7 @@
 #include "clipboard_win32.h"
 #include "clipboard.h"
 #include "clipboard_format.h"
+#include "clipboard_wic.h"
 
 #include "common/debug.h"
 #include "common/event.h"
@@ -185,6 +186,12 @@ static bool apiSetPrivate(void * opaque)
   return ok;
 }
 
+static uint8_t * apiPngToDib(void * opaque, const uint8_t * png, size_t size,
+    size_t * dibSize)
+{
+  return lgClipboardDibFromImage(png, size, dibSize);
+}
+
 /* the window */
 
 static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam,
@@ -316,6 +323,7 @@ bool win32CBStart(const Win32ClipboardCore * core)
     .set        = apiSet,
     .setDelayed = apiSetDelayed,
     .setPrivate = apiSetPrivate,
+    .pngToDib   = apiPngToDib,
   };
 
   Win32Clipboard * clipboard = win32Clipboard_create(&api, core, 0);
