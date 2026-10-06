@@ -189,7 +189,8 @@ is, made larger or smaller, with black around it, and the test transport's
 cursor on it, made larger or smaller too, that the client logs no failure and
 exits, and that an adapter that is not one is refused before the client
 starts. The other tests, the 25 cases of `client_format_test.py`
-included, run with it as well, with `-- app:renderer=D3D11`. On the developer's
+included, run with it as well, with `app:renderer=D3D11` after the client's
+path. On the developer's
 PC (Windows 11, an RX 9070 XT) they pass on the RX 9070 XT and on WARP, and
 `auto` picks the RX 9070 XT. CI has no GPU: it covers WARP, and accepts the
 refusal of `hardware`.
@@ -489,7 +490,7 @@ window across two displays, and Windows builds other than 11 were not tried.
   Renderer](#direct3d-11-renderer). `--require-hardware` fails a PC that has no
   GPU that Direct3D can use, which is what a PC with one should run it with.
   CI runs it on Windows, where it only has WARP. The other tests above run
-  the renderer too, with `-- app:renderer=D3D11` after the client's path.
+  the renderer too, with `app:renderer=D3D11` after the client's path.
 
   ```sh
   python windows-client/client_d3d11_test.py client/build/looking-glass-client.exe
