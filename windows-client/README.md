@@ -122,6 +122,15 @@ lg-windows-client-producer.exe Local\looking-glass
 looking-glass-client.exe app:transport=lgmp lgmp:shmDevice=Local\looking-glass
 ```
 
+A section lives as long as any process has it open, and the client is one:
+it opens the section when it starts and keeps it through host restarts and a
+creator that has gone. A creator that starts again while a client runs
+finds that the section already exists, and has to decide whether to take
+it over, by opening it and checking its owner and DACL as the client does, or
+to wait for the clients to close it. The producer refuses (tried: it logs
+`The section ... already exists` and exits with status 1). A client that
+starts before the section exists exits.
+
 `Local\` names live in the user's session. `Global\` names are visible to
 services such as Hyper-V's, and creating one needs administrator rights.
 The producer also takes `--size=WxH`, `--fps=N` and `--frames=N`, and
