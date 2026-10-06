@@ -44,6 +44,13 @@ add_feature_info(ENABLE_OPENGL ENABLE_OPENGL "Legacy OpenGL renderer.")
 option(ENABLE_EGL    "Enable the EGL renderer"          ${PLATFORM_DEFAULT})
 add_feature_info(ENABLE_EGL ENABLE_EGL "EGL renderer.")
 
+# Direct3D 11 needs no OpenGL driver, which a virtual machine or a remote
+# session may not have. It is only used when it is asked for, with
+# app:renderer=D3D11.
+cmake_dependent_option(ENABLE_D3D11 "Enable the Direct3D 11 renderer" ON
+  "WIN32" OFF)
+add_feature_info(ENABLE_D3D11 ENABLE_D3D11 "Direct3D 11 renderer, Windows only.")
+
 if(WIN32 AND ENABLE_EGL)
   message(FATAL_ERROR "The EGL renderer is not supported on Windows")
 endif()
