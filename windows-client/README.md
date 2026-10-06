@@ -75,7 +75,29 @@ animated test pattern. Some useful options:
   client also takes keys such as Alt+Tab and the Windows key, unless
   `input:grabKeyboard=no`.
 
-Options can also go in `%APPDATA%\looking-glass\client.ini`.
+Options can also go in `%APPDATA%\looking-glass\client.ini`, saved as UTF-8
+with or without a byte order mark. A file in UTF-16, which PowerShell 5.1
+writes for `>` and `Out-File`, is refused and the client says so.
+
+The client is a program of the GUI subsystem, so Explorer or a shortcut opens
+no console window with it. Where its messages go depends on how it was
+started:
+
+- With its standard error redirected to a file or a pipe, as the tests and
+  other programs start it, they go there.
+- From a terminal that is not redirected, they go to the terminal. The prompt
+  comes back at once, as it does for any GUI program, and the messages come
+  after it. Ctrl+C at a PowerShell prompt does not reach the client (PowerShell
+  reads it as a key then, not as a signal); close the window, or use the
+  escape key and Q.
+- Otherwise, as when Explorer starts it, they go to
+  `%LOCALAPPDATA%\looking-glass\client.log`, and the log of the run before
+  is kept as `client.log.1`. If the client stops with an error, a message
+  box shows the last lines of the log and where the whole log is.
+
+`client_startup_test.py` checks the first and the last of these. The terminal
+was tried by hand, in PowerShell, and in a console of its own whose screen
+buffer was read back.
 
 ### Shared Memory
 
@@ -275,6 +297,17 @@ window across two displays, and Windows builds other than 11 were not tried.
     client/build/looking-glass-client.exe
   ```
 
+- [client_startup_test.py](client_startup_test.py) starts the client as
+  Explorer does, with no console and no standard handles, and as a test does,
+  with its output redirected, and checks where its messages go: a log file and
+  its rotation, a message box with the reason when an option is refused, and
+  no log and no box when the output is redirected. The box is on the desktop
+  for about a second and takes the focus, as a box does. CI runs it on
+  Windows.
+
+  ```sh
+  python windows-client/client_startup_test.py client/build/looking-glass-client.exe
+  ```
 - [client_binary_test.py](client_binary_test.py) reads the executable, on any
   host, and checks what a PC that is not the one that built it needs from
   it: that it imports only DLLs that Windows has (so no MinGW or MSYS2

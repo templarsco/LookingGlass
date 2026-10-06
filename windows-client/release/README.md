@@ -62,6 +62,13 @@ Start `looking-glass-client.exe`. A window with a moving test pattern opens.
   (Notepad's default; PowerShell 5.1's `>` and `Out-File` write UTF-16,
   which the client refuses, and says so).
 
+The client opens no console window. Started from Explorer or a shortcut, it
+writes its messages to `%LOCALAPPDATA%\looking-glass\client.log` (the run
+before is kept as `client.log.1`), and if it stops with an error it shows a
+message box with the last lines of the log. Started from a terminal it writes
+to the terminal, and the prompt comes back at once, as it does for any GUI
+program. Attach `client.log` to a report of a problem.
+
 `lg-windows-client-producer.exe` is a test tool that stands in for a
 virtual machine: it creates a shared memory section that only you can open
 and serves the same moving test pattern on it. To see frames arrive over
