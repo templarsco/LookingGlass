@@ -131,8 +131,8 @@ static void fakeRelease(struct Fake * fake)
   lgSignalEvent(fake->event);
 }
 
-static Win32VBlank * make(struct Fake ** fakes, unsigned count,
-    uint64_t nominal)
+static Win32VBlank * makeRetrying(struct Fake ** fakes, unsigned count,
+    uint64_t nominal, uint64_t retryDelay)
 {
   // a stall is for its own test, as these wait far longer than for one
   Win32VBlankParams params =
@@ -140,6 +140,7 @@ static Win32VBlank * make(struct Fake ** fakes, unsigned count,
     .nominalPeriod = nominal,
     .now           = fakeNow,
     .stallMin      = NS_MS(60000),
+    .retryDelay    = retryDelay,
   };
   for (unsigned i = 0; i < count; ++i)
     params.sources[params.sourceCount++] = (Win32VBlankSource)
@@ -149,6 +150,13 @@ static Win32VBlank * make(struct Fake ** fakes, unsigned count,
   CHECK(win32VBlank_create(&params, &vblank));
   CHECK(vblank);
   return vblank;
+}
+
+// the delay to ask a source again is the default one, which no test lasts for
+static Win32VBlank * make(struct Fake ** fakes, unsigned count,
+    uint64_t nominal)
+{
+  return makeRetrying(fakes, count, nominal, 0);
 }
 
 static bool fakeReturned(void * opaque)
@@ -455,6 +463,117 @@ static void testFallback(void)
   fakeFree(&second);
 }
 
+// a source that failed is asked again after a while, and is used when it can
+// say, as a display that was unplugged and is plugged in again
+static void testRetry(void)
+{
+  struct Fake first, second;
+  fakeInit(&first, "first");
+  fakeInit(&second, "second");
+  struct Fake * fakes[] = { &first, &second };
+  Win32VBlank * vblank = makeRetrying(fakes, 2, PERIOD_240, NS_MS(100));
+
+  blank(&first, vblank, NS_MS(4000));
+  atomic_store(&first.failAfter, 1);
+  struct SourceCheck onSecond = { vblank, "second" };
+  CHECK(eventually(sourceIs, &onSecond));
+
+  // it is back: the second gives blanks as a display does, which is when the
+  // thread is free to ask
+  atomic_store(&first.failAfter, -1);
+  fakeBlanks(&first, 50);
+  struct SourceCheck onFirst = { vblank, "first" };
+  bool back = false;
+  for (unsigned i = 0; i < 300 && !back; ++i)
+  {
+    fakeBlanks(&second, 1);
+    usleep(10000);
+    back = sourceIs(&onFirst);
+  }
+  CHECK(back);
+
+  // and its blanks are the cadence again, measured from the start
+  Win32VBlankStats stats;
+  win32VBlank_getStats(vblank, &stats);
+  CHECK(stats.ticks >= 1);
+  struct TickCheck more = { vblank, 5 };
+  CHECK(eventually(ticksReached, &more));
+
+  fakeRelease(&first);
+  fakeRelease(&second);
+  CHECK(win32VBlank_destroy(&vblank));
+  fakeFree(&first);
+  fakeFree(&second);
+}
+
+// a source that stays broken is asked now and then, which does not start the
+// measuring over each time that it is: the second's period stays measured
+static void testRetryStays(void)
+{
+  struct Fake first, second;
+  fakeInit(&first, "first");
+  fakeInit(&second, "second");
+  atomic_store(&first.failAfter, 0);
+  struct Fake * fakes[] = { &first, &second };
+  Win32VBlank * vblank = makeRetrying(fakes, 2, PERIOD_240, NS_MS(50));
+
+  struct SourceCheck onSecond = { vblank, "second" };
+  CHECK(eventually(sourceIs, &onSecond));
+
+  unsigned long fed  = 0;
+  const uint64_t end = nanotime() + NS_MS(600);
+  while (nanotime() < end)
+  {
+    fakeBlanks(&second, 1);
+    ++fed;
+    usleep(5000);
+  }
+  CHECK(eventually(sourceIs, &onSecond));
+
+  Win32VBlankStats stats;
+  struct TickCheck seen = { vblank, fed * 3 / 4 };
+  CHECK(eventually(ticksReached, &seen));
+  win32VBlank_getStats(vblank, &stats);
+  CHECK(stats.source && strcmp(stats.source, "second") == 0);
+
+  // it was asked again, about every 50 ms, and not at every blank
+  const int calls = atomic_load(&first.calls);
+  CHECK(calls >= 4);
+  CHECK(calls <= 30);
+
+  fakeRelease(&second);
+  CHECK(win32VBlank_destroy(&vblank));
+  fakeFree(&first);
+  fakeFree(&second);
+}
+
+static bool noSource(void * opaque)
+{
+  Win32VBlankStats stats;
+  win32VBlank_getStats(opaque, &stats);
+  return stats.source == NULL;
+}
+
+// when no source can say and the pacing wakes by the clock, they are asked too
+static void testRetryFromClock(void)
+{
+  struct Fake fake;
+  fakeInit(&fake, "fake");
+  atomic_store(&fake.failAfter, 0);
+  struct Fake * fakes[] = { &fake };
+  Win32VBlank * vblank = makeRetrying(fakes, 1, PERIOD_240, NS_MS(100));
+  CHECK(eventually(noSource, vblank));
+
+  atomic_store(&fake.failAfter, -1);
+  fakeBlanks(&fake, 20);
+  struct SourceCheck onFake = { vblank, "fake" };
+  CHECK(eventually(sourceIs, &onFake));
+
+  fakeRelease(&fake);
+  CHECK(win32VBlank_destroy(&vblank));
+  fakeFree(&fake);
+}
+
 // no source can say: wake at the rate of the display, and not as its cadence
 static void testClock(void)
 {
@@ -650,6 +769,9 @@ static const struct Test tests[] =
   { "period"   , testPeriod    },
   { "reset"    , testReset     },
   { "fallback" , testFallback  },
+  { "retry"    , testRetry     },
+  { "retry-stays", testRetryStays },
+  { "retry-clock", testRetryFromClock },
   { "clock"    , testClock     },
   { "submit"   , testSubmit    },
   { "stall"    , testStall     },

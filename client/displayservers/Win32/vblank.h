@@ -44,9 +44,10 @@ typedef struct Win32VBlankSource
 
   /* Blocks until the next vertical blank of the display, and returns true. It
    * returns false if this source cannot say, such as when the display went
-   * away or the session cannot ask, and is not asked again. It may block for
-   * as long as the display is off, so the pacing does not wait for it to
-   * return when it stops. */
+   * away or the session cannot ask, and is asked again after a while, when
+   * the display is back or the session can ask. It may block for as long as
+   * the display is off, so the pacing does not wait for it to return when it
+   * stops. */
   bool   (*wait)(void * opaque);
   void * opaque;
 }
@@ -69,6 +70,12 @@ typedef struct Win32VBlankParams
    * when zero. Eight periods is the other least. Real time, and not that of
    * the clock, which is for the time of a blank */
   uint64_t          stallMin;
+
+  /* how long to use a source that is not the first before asking those that
+   * could not say again, in nanoseconds of real time: 5 s when zero. A
+   * display that is unplugged, a driver that is reset and a session that
+   * is locked make a source fail, and none of them is for good */
+  uint64_t          retryDelay;
 
   /* called on the thread that waits, before its first wait */
   void            (*threadStart)(void);

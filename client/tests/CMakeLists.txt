@@ -822,6 +822,9 @@ set(VBLANK_CASES
   period
   reset
   fallback
+  retry
+  retry-stays
+  retry-clock
   clock
   submit
   stall
