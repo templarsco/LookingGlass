@@ -118,3 +118,47 @@ void windowsSetTimerResolution(void)
   NtSetTimerResolution(1, true, &actualResolution);
   DEBUG_INFO("System timer resolution: %.1f μs", actualResolution / 10.0);
 }
+
+/* PROCESS_POWER_THROTTLING_STATE and its flags are not in the headers that
+ * the build uses, which ask for Windows 7, and the function that takes them
+ * does not exist there: they are written out, and it is looked up */
+struct PowerThrottling
+{
+  ULONG version;
+  ULONG controlMask;
+  ULONG stateMask;
+};
+
+#define POWER_THROTTLING_VERSION       1
+#define POWER_THROTTLING_EXECUTION     0x1
+#define POWER_THROTTLING_TIMER         0x4
+#define PROCESS_POWER_THROTTLING_CLASS 4
+
+bool windowsDisablePowerThrottling(void)
+{
+  typedef BOOL (WINAPI * SetProcessInformationFn)(HANDLE, int, LPVOID, DWORD);
+
+  const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+  const SetProcessInformationFn set = kernel ?
+    (SetProcessInformationFn)(void *)GetProcAddress(kernel,
+        "SetProcessInformation") : NULL;
+  if (!set)
+    return false;
+
+  /* A mask is control over the flags that it has, and a state of none is
+   * the flags off. Windows 10 does not know the flag of the timer, and
+   * refuses a request that has it. */
+  struct PowerThrottling state =
+  {
+    .version     = POWER_THROTTLING_VERSION,
+    .controlMask = POWER_THROTTLING_EXECUTION | POWER_THROTTLING_TIMER,
+    .stateMask   = 0,
+  };
+  if (set(GetCurrentProcess(), PROCESS_POWER_THROTTLING_CLASS, &state,
+        sizeof(state)))
+    return true;
+
+  state.controlMask = POWER_THROTTLING_EXECUTION;
+  return set(GetCurrentProcess(), PROCESS_POWER_THROTTLING_CLASS, &state,
+      sizeof(state)) != FALSE;
+}

@@ -29,6 +29,12 @@
 #include <windows.h>
 
 void windowsSetTimerResolution(void);
+
+/* Asks Windows not to throttle this process as one that is in the background:
+ * its threads slower, and since Windows 11 a timer resolution that is not
+ * kept while its window is minimized or covered. Returns true if Windows took
+ * the request, which it does not before Windows 10. */
+bool windowsDisablePowerThrottling(void);
 NTSYSCALLAPI NTSTATUS NTAPI NtDelayExecution(
   _In_ BOOLEAN Alertable,
   _In_opt_ PLARGE_INTEGER DelayInterval
