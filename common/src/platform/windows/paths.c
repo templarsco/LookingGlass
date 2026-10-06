@@ -87,19 +87,29 @@ static void appDir(const wchar_t * env, REFKNOWNFOLDERID folder,
     exit(2);
   }
 
-  const int err = SHCreateDirectoryExW(NULL, path, NULL);
+  /* SHCreateDirectoryEx only makes a folder that has a full path, and a
+   * variable that a test or a portable setup sets may not give one */
+  wchar_t full[MAX_PATH];
+  const DWORD fullLength = GetFullPathNameW(path, ARRAYSIZE(full), full, NULL);
+  if (!fullLength || fullLength >= ARRAYSIZE(full))
+  {
+    DEBUG_ERROR("The %ls directory path is too long", env);
+    exit(2);
+  }
+
+  const int err = SHCreateDirectoryExW(NULL, full, NULL);
   if (err != ERROR_SUCCESS && err != ERROR_ALREADY_EXISTS &&
       err != ERROR_FILE_EXISTS)
     DEBUG_WINERROR("Failed to create the directory", err);
 
-  const DWORD attrib = GetFileAttributesW(path);
+  const DWORD attrib = GetFileAttributesW(full);
   if (attrib != INVALID_FILE_ATTRIBUTES && !(attrib & FILE_ATTRIBUTE_DIRECTORY))
   {
-    DEBUG_ERROR("Expected to be a directory: %ls", path);
+    DEBUG_ERROR("Expected to be a directory: %ls", full);
     exit(2);
   }
 
-  if (!WideCharToMultiByte(CP_UTF8, 0, path, -1, out, size, NULL, NULL))
+  if (!WideCharToMultiByte(CP_UTF8, 0, full, -1, out, size, NULL, NULL))
   {
     DEBUG_WINERROR("Failed to convert the directory path", GetLastError());
     exit(2);

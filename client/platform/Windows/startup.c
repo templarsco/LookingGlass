@@ -94,8 +94,16 @@ static bool logFolder(wchar_t * folder, size_t count)
     base = known;
   }
 
-  const int length = _snwprintf(folder, count, L"%ls\\looking-glass", base);
-  if (length < 0 || (size_t)length >= count)
+  // SHCreateDirectoryEx only makes a folder that has a full path, and a
+  // variable that a test or a portable setup sets may not give one
+  wchar_t relative[MAX_PATH];
+  const int length = _snwprintf(relative, ARRAYSIZE(relative),
+      L"%ls\\looking-glass", base);
+  if (length < 0 || (size_t)length >= ARRAYSIZE(relative))
+    return false;
+
+  const DWORD full = GetFullPathNameW(relative, (DWORD)count, folder, NULL);
+  if (!full || full >= count)
     return false;
 
   const int error = SHCreateDirectoryExW(NULL, folder, NULL);
