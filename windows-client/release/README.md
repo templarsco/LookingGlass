@@ -69,6 +69,10 @@ message box with the last lines of the log. Started from a terminal it writes
 to the terminal, and the prompt comes back at once, as it does for any GUI
 program. Attach `client.log` to a report of a problem.
 
+While its window is minimized the client renders nothing, and says so in the
+log; it renders again when the window is back. It also asks Windows not to
+throttle it as a program in the background.
+
 `lg-windows-client-producer.exe` is a test tool that stands in for a
 virtual machine: it creates a shared memory section that only you can open
 and serves the same moving test pattern on it. To see frames arrive over

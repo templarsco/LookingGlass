@@ -61,6 +61,14 @@ typedef enum LG_DSProperty
    * return data type: LG_DSHDRWhiteLevels
    */
   LG_DS_HDR_WHITE_LEVELS,
+
+  /**
+   * returns true if nobody can see the window, as when it is minimized, so
+   * that nothing is rendered for it
+   * if not implemented LG assumes that the window can be seen
+   * return data type: bool
+   */
+  LG_DS_WINDOW_HIDDEN,
 }
 LG_DSProperty;
 

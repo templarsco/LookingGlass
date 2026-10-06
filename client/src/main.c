@@ -905,6 +905,38 @@ static int cursorRepaintThread(void * unused)
   return 0;
 }
 
+// how often the render thread of a window that cannot be seen looks again
+#define HIDDEN_POLL_NS UINT64_C(50000000)
+
+/* Nothing is rendered for a window that cannot be seen, as when it is
+ * minimized: the copy of every frame, its upload and its draw would be for
+ * nobody, at the rate of the guest. The frames that arrive meanwhile replace
+ * the one that is pending, which the renderer takes once the window is back.
+ * Returns true if the render thread slept, and has to look again. */
+static bool renderPaused(void)
+{
+  static bool paused = false;
+
+  bool hidden = false;
+  if (!app_getProp(LG_DS_WINDOW_HIDDEN, &hidden))
+    hidden = false;
+
+  if (hidden != paused)
+  {
+    paused = hidden;
+    if (hidden)
+      DEBUG_INFO("The window cannot be seen, rendering is paused");
+    else
+      DEBUG_INFO("The window can be seen, rendering resumes");
+  }
+
+  if (!hidden)
+    return false;
+
+  nsleep(HIDDEN_POLL_NS);
+  return true;
+}
+
 static int renderThread(void * unused)
 {
   if (!RENDERER(renderStartup, g_state.useDMA))
@@ -948,6 +980,9 @@ static int renderThread(void * unused)
 
   while(likely(app_getState() != APP_STATE_SHUTDOWN))
   {
+    if (unlikely(renderPaused()))
+      continue;
+
     LG_RendererFrameToken cadenceToken = LG_RENDERER_FRAME_TOKEN_NONE;
 
     if (g_state.jitRender)

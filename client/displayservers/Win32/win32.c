@@ -1482,6 +1482,11 @@ static bool win32GetProp(LG_DSProperty prop, void * ret)
       *(enum LG_DSWarpSupport *)ret = LG_DS_WARP_SCREEN;
       return true;
 
+    case LG_DS_WINDOW_HIDDEN:
+      // a minimized window is shown by nothing, however fast it is drawn
+      *(bool *)ret = IsIconic(win32.window);
+      return true;
+
     default:
       return false;
   }

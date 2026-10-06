@@ -297,6 +297,23 @@ window across two displays, and Windows builds other than 11 were not tried.
     client/build/looking-glass-client.exe
   ```
 
+- [client_idle_test.py](client_idle_test.py) serves frames at a rate, 120 per
+  second at 256x160 unless told otherwise, and measures the CPU time that the
+  client's process uses (kernel and user, as Windows counts it) with its
+  window up, minimized and restored. The client renders nothing for a window
+  that cannot be seen: it logs that it paused, and uses under a third of the
+  CPU time that it used visible. After the window is restored the client must
+  log that it resumed and compose the last frame with every pixel as
+  generated. On a PC with an RX 9070 XT the client's process used 0.198 of a
+  core at 1920x1080 and 240 frames per second, and 0.005 minimized; 0.073 and
+  0.010 at 1280x720 and 144. It says nothing of what the GPU did, which was not
+  measured. CI runs it on Windows, with software OpenGL.
+
+  ```sh
+  python windows-client/client_idle_test.py \
+    --producer windows-client/build/lg-windows-client-producer.exe \
+    client/build/looking-glass-client.exe
+  ```
 - [client_startup_test.py](client_startup_test.py) starts the client as
   Explorer does, with no console and no standard handles, and as a test does,
   with its output redirected, and checks where its messages go: a log file and
