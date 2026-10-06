@@ -105,6 +105,24 @@ if(WIN32)
   )
   add_test(NAME power-tests COMMAND power-tests)
   set_tests_properties(power-tests PROPERTIES TIMEOUT 20)
+
+  # Windows' own clipboard, in a window station that the test makes
+  add_executable(win32-clipboard-real-tests
+    win32_clipboard_real_test.c
+    ../displayservers/Win32/clipboard.c
+    ../displayservers/Win32/clipboard_format.c
+    ../displayservers/Win32/clipboard_win32.c
+  )
+  target_include_directories(win32-clipboard-real-tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../include"
+  )
+  target_link_libraries(win32-clipboard-real-tests
+    ${EXE_FLAGS}
+    lg_common
+    user32
+  )
+  add_test(NAME win32-clipboard-real-tests COMMAND win32-clipboard-real-tests)
+  set_tests_properties(win32-clipboard-real-tests PROPERTIES TIMEOUT 120)
 endif()
 
 target_compile_definitions(font-tests PRIVATE
