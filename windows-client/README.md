@@ -113,8 +113,15 @@ flip model swap chain that the window manager shows without copying it. It
 needs no OpenGL driver, which is what a virtual machine or a remote session
 often lacks: with no GPU that Direct3D can use, it draws with WARP, Windows'
 own software rasterizer. OpenGL is still the renderer that the client starts
-with, and the one that is tried first; `-DENABLE_D3D11=OFF` leaves the new one
-out of the build.
+with, and the one that is tried first, but **when OpenGL cannot be used on the PC
+and no renderer was asked for, the client uses this one**: before it makes its
+window, the display server makes a context of its own on a window that is only
+there for that, and asks the driver what it is (a PC with no driver for its GPU
+has only Microsoft's software OpenGL 1.1, which cannot be used); if the driver
+is not one that the renderer can use, or no context can be made, the client says
+so and goes on to the next renderer. With `app:renderer=OpenGL` it stops
+instead, with that message. `-DENABLE_D3D11=OFF` leaves the new renderer out of
+the build.
 
 **It draws the guest's frames, its cursor and the overlays, and not yet a way
 to see HDR**, so it is for testing, and not yet what a person with an HDR guest
@@ -501,6 +508,21 @@ window across two displays, and Windows builds other than 11 were not tried.
   ```sh
   python windows-client/client_cursor_test.py client/build/looking-glass-client.exe
   python windows-client/client_cursor_test.py client/build/looking-glass-client.exe app:renderer=D3D11
+  ```
+- [client_fallback_test.py](client_fallback_test.py) runs the client from a copy
+  of itself, alone in a folder, where the OpenGL that it finds may not be one that
+  can be used, and checks that with no renderer asked for it says that OpenGL
+  cannot be used, uses the Direct3D 11 renderer, and composes the test frame
+  with every pixel as generated, and that with OpenGL asked for it stops with
+  that message and no window. `--require-fallback` fails a PC where OpenGL could
+  be used (CI's runners have no GPU, so Microsoft's software OpenGL 1.1 is all
+  that they have, and CI runs it that way). `--simulate` tells a client built
+  with `ENABLE_TESTS`, with an environment variable, that OpenGL cannot be used,
+  which is how it was run on the developer's PC, that has a driver. It was not
+  run on a PC that has none.
+
+  ```sh
+  python windows-client/client_fallback_test.py --simulate client/build/looking-glass-client.exe
   ```
 - [client_overlay_test.py](client_overlay_test.py) runs the client with each
   renderer on a shared memory section that has no host in it, so that it waits

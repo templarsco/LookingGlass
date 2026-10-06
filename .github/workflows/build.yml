@@ -897,6 +897,14 @@ jobs:
       run: |
         GALLIUM_DRIVER=llvmpipe python windows-client/client_cursor_test.py \
           --output cursor client/build/looking-glass-client.exe
+    - name: Check that the client uses Direct3D 11 where there is no OpenGL driver
+      run: |
+        # the runner has no GPU, so the OpenGL that Windows has is Microsoft's
+        # software 1.1, and the client is run from a folder where Mesa's, which
+        # the steps above put next to it, is not
+        python windows-client/client_fallback_test.py --require-fallback \
+          --output fallback client/build/looking-glass-client.exe \
+          d3d11:adapter=warp
     - name: Check the splash that each renderer draws
       run: |
         # OpenGL is Mesa's, and Direct3D 11 is WARP, as the runner has no GPU
@@ -923,6 +931,7 @@ jobs:
           idle-d3d11/
           cursor/
           cursor-d3d11/
+          fallback/
           overlay/
 
   idd:
