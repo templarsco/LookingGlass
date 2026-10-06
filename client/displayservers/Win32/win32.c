@@ -43,6 +43,7 @@
 #include "common/windebug.h"
 
 #include "input_event.h"
+#include "clipboard_win32.h"
 #include "keymap.h"
 #include "placement.h"
 #include "vblank.h"
@@ -1459,6 +1460,9 @@ static void win32Shutdown(void)
 
 static void win32Free(void)
 {
+  // its window gives back what the guest copied before the program goes
+  win32CBFree();
+
   win32Shutdown();
   stopVBlank();
 
@@ -1793,6 +1797,12 @@ struct LG_DisplayServerOps LGDS_Win32 =
   .realignPointer      = win32RealignPointer,
   .isValidPointerPos   = win32IsValidPointerPos,
   .requestActivation   = win32RequestActivation,
+  .cbInit              = win32CBInit,
+  .cbNotice            = win32CBNotice,
+  .cbRelease           = win32CBRelease,
+  .cbRequest           = win32CBRequest,
+  .cbRequestReady      = win32CBRequestReady,
+  .cbRequestCancel     = win32CBRequestCancel,
   .inhibitIdle         = win32InhibitIdle,
   .uninhibitIdle       = win32UninhibitIdle,
   .wait                = win32Wait,

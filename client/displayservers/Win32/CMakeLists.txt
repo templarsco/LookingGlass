@@ -3,6 +3,10 @@ project(displayserver_Win32 LANGUAGES C)
 
 add_library(displayserver_Win32 STATIC
   win32.c
+  clipboard.c
+  clipboard_core.c
+  clipboard_format.c
+  clipboard_win32.c
   input_event.c
   keymap.c
   vblank.c
