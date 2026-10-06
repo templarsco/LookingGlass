@@ -32,6 +32,15 @@ target_link_libraries(sw-surface-tests
 )
 add_test(NAME sw-surface-tests COMMAND sw-surface-tests)
 set_tests_properties(sw-surface-tests PROPERTIES TIMEOUT 10)
+
+add_executable(time-tests time_test.c)
+target_link_libraries(time-tests
+  ${EXE_FLAGS}
+  lg_common
+)
+add_test(NAME time-tests COMMAND time-tests)
+set_tests_properties(time-tests PROPERTIES TIMEOUT 20)
+
 target_compile_definitions(font-tests PRIVATE
   FONT_TEST_FILE="${PROJECT_TOP}/repos/gui/cimgui/imgui/misc/fonts/DroidSans.ttf"
 )

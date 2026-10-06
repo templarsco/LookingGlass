@@ -37,6 +37,17 @@ NTSYSCALLAPI NTSTATUS NTAPI NtDelayExecution(
 
 typedef struct LGTimer LGTimer;
 
+/* The microseconds in a count of ticks of a clock that runs at freq Hz. The
+ * frequency is not a whole number of MHz on every PC: the performance counter
+ * runs at 3.579545 MHz on some, and 19.2 MHz on some Arm ones. The product of
+ * ticks and a million would wrap a 64 bit number for a counter that has run a
+ * few months at 10 MHz, so the seconds and what is left of one are scaled
+ * apart. */
+static inline uint64_t ticksToMicroseconds(uint64_t ticks, uint64_t freq)
+{
+  return ticks / freq * 1000000ULL + ticks % freq * 1000000ULL / freq;
+}
+
 /* Windows reads the performance counter. A unit test that sets the clock by
  * defining clock_gettime(), as the Linux ones do, defines LG_TEST_MOCK_CLOCK
  * to read that instead, see client/tests/windows/mock_clock.h. */
@@ -44,19 +55,19 @@ typedef struct LGTimer LGTimer;
 static inline uint64_t microtime(void)
 {
 #if defined(_WIN32) && !defined(LG_TEST_MOCK_CLOCK)
-  static unsigned long div = 0;
-  if (unlikely(div == 0))
+  static uint64_t frequency = 0;
+  if (unlikely(frequency == 0))
   {
     LARGE_INTEGER freq = { .QuadPart = 0LL };
     QueryPerformanceFrequency(&freq);
-    div = freq.QuadPart / 1000000LL;
-    if(div == 0)
+    if (freq.QuadPart <= 0)
       abort();
+    frequency = (uint64_t)freq.QuadPart;
   }
 
   LARGE_INTEGER time;
   QueryPerformanceCounter(&time);
-  return time.QuadPart / div;
+  return ticksToMicroseconds((uint64_t)time.QuadPart, frequency);
 #else
   struct timespec time;
   clock_gettime(CLOCK_MONOTONIC, &time);
