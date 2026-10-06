@@ -897,6 +897,12 @@ jobs:
       run: |
         GALLIUM_DRIVER=llvmpipe python windows-client/client_cursor_test.py \
           --output cursor client/build/looking-glass-client.exe
+    - name: Check the splash that each renderer draws
+      run: |
+        # OpenGL is Mesa's, and Direct3D 11 is WARP, as the runner has no GPU
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_overlay_test.py \
+          --output overlay client/build/looking-glass-client.exe \
+          d3d11:adapter=warp
     - name: Upload Windows client smoke test output
       if: failure()
       uses: actions/upload-artifact@v6
@@ -917,6 +923,7 @@ jobs:
           idle-d3d11/
           cursor/
           cursor-d3d11/
+          overlay/
 
   idd:
     runs-on: windows-2022

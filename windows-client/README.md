@@ -116,9 +116,9 @@ own software rasterizer. OpenGL is still the renderer that the client starts
 with, and the one that is tried first; `-DENABLE_D3D11=OFF` leaves the new one
 out of the build.
 
-**It draws the guest's frames and its cursor, and not yet the overlays (the
-settings, the graphs and the splash) or a way to see HDR**, so it is for
-testing, not for use, until those come.
+**It draws the guest's frames, its cursor and the overlays, and not yet a way
+to see HDR**, so it is for testing, and not yet what a person with an HDR guest
+should use, until that comes.
 
 - `d3d11:adapter` is `auto` (the GPU, and WARP if there is none that works),
   `hardware` (the GPU only) or `warp`. `d3d11:vsync` waits for the vertical
@@ -156,6 +156,15 @@ testing, not for use, until those come.
   all zeros, so they are blend factors (the destination times the mask, and the
   mask times the inverse of the destination plus the destination times the
   inverse of the mask) and not a logic operation, which not every GPU has.
+- The overlays (the splash, the settings, the alerts, the graphs) are Dear
+  ImGui's, which the core draws and the renderer shows with Dear ImGui's own
+  Direct3D 11 backend, built into the client with its call of `D3DCompile`
+  renamed to a function that loads `d3dcompiler_47.dll` when the backend first
+  needs it, so that the client does not need that DLL to start. The images that
+  the overlays show (the logo) are textures that the renderer makes for them. The
+  splash is the same pixel for pixel as OpenGL draws it (see
+  [client_overlay_test.py](client_overlay_test.py) below), and the other overlays
+  go through the same backend, and have not been looked at one by one.
 - The shaders are HLSL, compiled when the renderer starts with
   `d3dcompiler_47.dll` from System32, which every Windows 10 has. The compiler
   is not in the build and its output is not in the source. Without it the renderer
@@ -492,6 +501,19 @@ window across two displays, and Windows builds other than 11 were not tried.
   ```sh
   python windows-client/client_cursor_test.py client/build/looking-glass-client.exe
   python windows-client/client_cursor_test.py client/build/looking-glass-client.exe app:renderer=D3D11
+  ```
+- [client_overlay_test.py](client_overlay_test.py) runs the client with each
+  renderer on a shared memory section that has no host in it, so that it waits
+  for one with its splash up (a gradient from purple to near black, the logo, a
+  tagline and a version and copyright), and captures it with
+  `test:captureFrame=0`, a capture that waits for no frame. It checks the part
+  of the capture that each of those is, and compares the renderers: the Direct3D
+  11 renderer's splash is identical to OpenGL's in red, green and blue for all of
+  its 230400 pixels on the RX 9070 XT (and within 1 on WARP). CI runs it on
+  Windows.
+
+  ```sh
+  python windows-client/client_overlay_test.py client/build/looking-glass-client.exe
   ```
 - [client_binary_test.py](client_binary_test.py) reads the executable, on any
   host, and checks what a PC that is not the one that built it needs from
@@ -885,10 +907,12 @@ keeps the shared code covered there.
   host has not run in a Hyper-V guest yet.
 - The LGMP path copies each frame through the CPU into an OpenGL texture.
   There is no zero-copy import on Windows; DMA-BUF is Linux only.
-- The Direct3D 11 renderer draws the guest's frames and its cursor but no
+- The Direct3D 11 renderer draws the guest's frames, its cursor and the
   overlays, and has no HDR output, and it was tried on an RX 9070 XT and on
   WARP; no other GPU, and no PC that lacks an OpenGL driver, which is what it is
-  for. Its cursor was checked with the test transport's cursors, not a guest's.
+  for. Its cursor was checked with the test transport's cursors, not a guest's,
+  and its overlays with the splash only: the settings window, the graphs and the
+  alerts need a keyboard to be shown, which was not used on the PC.
   The XOR half of a masked color cursor is not drawn, by either renderer.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
