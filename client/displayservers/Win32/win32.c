@@ -1173,7 +1173,7 @@ static wchar_t * utf8ToWide(const char * str)
   return out;
 }
 
-static bool setPixelFormat(void)
+static bool setPixelFormat(HDC dc)
 {
   PIXELFORMATDESCRIPTOR pfd =
   {
@@ -1186,14 +1186,14 @@ static bool setPixelFormat(void)
     .iLayerType = PFD_MAIN_PLANE,
   };
 
-  const int format = ChoosePixelFormat(win32.dc, &pfd);
-  if (!format || !SetPixelFormat(win32.dc, format, &pfd))
+  const int format = ChoosePixelFormat(dc, &pfd);
+  if (!format || !SetPixelFormat(dc, format, &pfd))
   {
     DEBUG_WINERROR("Failed to set the OpenGL pixel format", GetLastError());
     return false;
   }
 
-  if (DescribePixelFormat(win32.dc, format, sizeof(pfd), &pfd) &&
+  if (DescribePixelFormat(dc, format, sizeof(pfd), &pfd) &&
       (pfd.dwFlags & PFD_GENERIC_FORMAT) &&
       !(pfd.dwFlags & PFD_GENERIC_ACCELERATED))
     DEBUG_WARN("No OpenGL driver found, only the software renderer is "
@@ -1318,7 +1318,7 @@ static bool createWindow(void)
   if (params->opengl)
   {
     win32.dc = GetDC(win32.window);
-    if (!win32.dc || !setPixelFormat())
+    if (!win32.dc || !setPixelFormat(win32.dc))
     {
       DestroyWindow(win32.window);
       win32.window = NULL;
@@ -1514,6 +1514,67 @@ static void win32FrameSubmitted(void)
 }
 
 #ifdef ENABLE_OPENGL
+/* What the OpenGL driver says that it is, from a context made on a window that
+ * is only there for that, before the client's own window is, so that the
+ * renderer can be changed for another if there is no driver (there is only
+ * Microsoft's software OpenGL 1.1 then, which the pixel format says) or the one
+ * there is cannot make a context. A window of the system's own class is enough
+ * for a pixel format, and it is gone when this returns, with the context. */
+static LG_DSGLProbeResult win32GLProbe(LG_DSGLProbe * probe)
+{
+  memset(probe, 0, sizeof(*probe));
+
+  HWND window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 1, 1, NULL,
+      NULL, GetModuleHandleW(NULL), NULL);
+  if (!window)
+  {
+    DEBUG_WINERROR("Failed to make a window to probe OpenGL with",
+        GetLastError());
+    return LG_DS_GL_PROBE_FAILED;
+  }
+
+  LG_DSGLProbeResult result  = LG_DS_GL_PROBE_FAILED;
+  HGLRC              context = NULL;
+  HDC                dc      = GetDC(window);
+  if (dc && setPixelFormat(dc))
+  {
+    context = wglCreateContext(dc);
+    if (!context)
+      DEBUG_WINERROR("wglCreateContext failed for the OpenGL probe",
+          GetLastError());
+  }
+
+  if (context && wglMakeCurrent(dc, context))
+  {
+    // glGetString answers NULL for what it cannot, which is a driver with
+    // nothing to say, and not a reason to fail here
+    const char * vendor     = (const char *)glGetString(GL_VENDOR    );
+    const char * renderer   = (const char *)glGetString(GL_RENDERER  );
+    const char * version    = (const char *)glGetString(GL_VERSION   );
+    const char * extensions = (const char *)glGetString(GL_EXTENSIONS);
+
+    snprintf(probe->vendor, sizeof(probe->vendor), "%s",
+        vendor ? vendor : "");
+    snprintf(probe->renderer, sizeof(probe->renderer), "%s",
+        renderer ? renderer : "");
+    snprintf(probe->version, sizeof(probe->version), "%s",
+        version ? version : "");
+    probe->extensions = strdup(extensions ? extensions : "");
+
+    wglMakeCurrent(NULL, NULL);
+    result = probe->extensions ? LG_DS_GL_PROBE_OK : LG_DS_GL_PROBE_FAILED;
+  }
+  else if (context)
+    DEBUG_WINERROR("wglMakeCurrent failed for the OpenGL probe", GetLastError());
+
+  if (context)
+    wglDeleteContext(context);
+  if (dc)
+    ReleaseDC(window, dc);
+  DestroyWindow(window);
+  return result;
+}
+
 static LG_DSGLContext win32GLCreateContext(void)
 {
   HGLRC context = wglCreateContext(win32.dc);
@@ -1786,6 +1847,7 @@ struct LG_DisplayServerOps LGDS_Win32 =
   .free                = win32Free,
   .getProp             = win32GetProp,
 #ifdef ENABLE_OPENGL
+  .glProbe             = win32GLProbe,
   .glCreateContext     = win32GLCreateContext,
   .glDeleteContext     = win32GLDeleteContext,
   .glMakeCurrent       = win32GLMakeCurrent,

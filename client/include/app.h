@@ -124,6 +124,7 @@ bool app_eglSwapBuffers(EGLDisplay display, EGLSurface surface,
 #endif
 
 #ifdef ENABLE_OPENGL
+LG_DSGLProbeResult app_glProbe(LG_DSGLProbe * probe);
 LG_DSGLContext app_glCreateContext(void);
 void app_glDeleteContext(LG_DSGLContext context);
 void app_glMakeCurrent(LG_DSGLContext context);

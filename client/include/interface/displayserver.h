@@ -30,6 +30,28 @@
 #include "common/debug.h"
 #include "interface/clipboard.h"
 
+#ifdef ENABLE_OPENGL
+/* What an OpenGL driver says that it is, which a display server can ask of a
+ * context that it makes for the purpose before there is a window, so that
+ * a renderer can tell whether OpenGL can be used at all. */
+typedef struct LG_DSGLProbe
+{
+  char   vendor  [128];
+  char   renderer[128];
+  char   version [128];
+  char * extensions;     // allocated, and freed by the one who asked
+}
+LG_DSGLProbe;
+
+typedef enum LG_DSGLProbeResult
+{
+  LG_DS_GL_PROBE_UNKNOWN, // the display server cannot say before the window
+  LG_DS_GL_PROBE_FAILED,  // it could not make an OpenGL context
+  LG_DS_GL_PROBE_OK       // it could, and the probe says what it is
+}
+LG_DSGLProbeResult;
+#endif
+
 typedef enum LG_DSProperty
 {
   /**
@@ -208,6 +230,11 @@ struct LG_DisplayServerOps
 #endif
 
 #ifdef ENABLE_OPENGL
+  /* Optional: find out what OpenGL there is before the window is made, which is
+   * after a renderer has been chosen, and so lets one that finds it unusable
+   * be left for another. */
+  LG_DSGLProbeResult (*glProbe)(LG_DSGLProbe * probe);
+
   /* opengl platform specific methods */
   LG_DSGLContext (*glCreateContext)(void);
   void (*glDeleteContext)(LG_DSGLContext context);
