@@ -4302,6 +4302,12 @@ static void lg_shutdown(void)
   free(g_state.imGuiIni);
 }
 
+#ifdef _WIN32
+/* The program's entry point is in platform/Windows/startup.c, which decides
+ * where the messages go, with no console to put them on, and calls this one. */
+#define main lgClientMain
+#endif
+
 int main(int argc, char * argv[])
 {
   // initialize for DEBUG_* macros
