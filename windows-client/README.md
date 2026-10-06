@@ -223,6 +223,33 @@ window across two displays, and Windows builds other than 11 were not tried.
     --producer windows-client/build/lg-windows-client-producer.exe \
     client/build/looking-glass-client.exe
   ```
+- [client_format_test.py](client_format_test.py) makes the same check for a
+  matrix of formats, sizes, strides and upload paths: packed and padded
+  strides, odd sizes, the 24-bit formats, a 1080p frame, and sequences that
+  cycle the renderer's upload buffers, each with `opengl:amdPinnedMem` on
+  and off. Every case runs with its own empty configuration directory, so
+  the user's `client.ini` cannot change what is tested. HDR formats are not
+  covered, as the OpenGL renderer has no HDR-to-SDR path.
+
+  ```sh
+  python windows-client/client_format_test.py client/build/looking-glass-client.exe
+  ```
+
+  CI runs it with Mesa's software OpenGL, which has no
+  `GL_AMD_pinned_memory`, so the pinned cases only exercise the ordinary
+  upload path there, and the test says so. That is not enough, because the
+  pinned path once failed only on hardware: on an RX 9070 XT (OpenGL 4.6
+  Compatibility Profile Context 26.9.1.260826), the renderer's
+  `glBufferSubData` into the buffer that the driver pins left it black,
+  without a GL error, so the client showed black frames by default. The
+  renderer now writes to the pinned memory directly, and a PC with an AMD
+  GPU should run the test with `--require-pinned`, which fails a case that
+  asked for the pinned path and did not get it:
+
+  ```sh
+  python windows-client/client_format_test.py --require-pinned \
+    client/build/looking-glass-client.exe
+  ```
 - [client_session_test.py](client_session_test.py) serves frames with the
   producer while it does what a guest does, in four scenarios: the
   resolution changes twice with the session going on; the host restarts at
@@ -584,7 +611,9 @@ keeps the shared code covered there.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
 - There is no audio, clipboard or SPICE support on Windows.
-- The client has run on Windows only in CI, with software OpenGL, and
-  under Wine. No run on a physical Windows PC with a GPU driver is
-  recorded yet.
+- The client has run with software OpenGL in CI, under Wine, and on one
+  physical Windows PC, with an RX 9070 XT (OpenGL 4.6 Compatibility Profile
+  Context 26.9.1.260826), where `client_format_test.py` passes its 25 cases
+  and the 15 that ask for the pinned upload path get it. No other GPU or
+  driver has been tried.
 - Run times are not performance results.
