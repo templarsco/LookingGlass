@@ -57,6 +57,13 @@ target_link_libraries(stringutils-tests
 add_test(NAME stringutils-tests COMMAND stringutils-tests)
 set_tests_properties(stringutils-tests PROPERTIES TIMEOUT 20)
 
+add_executable(placement-tests placement_test.c)
+target_link_libraries(placement-tests
+  ${EXE_FLAGS}
+)
+add_test(NAME placement-tests COMMAND placement-tests)
+set_tests_properties(placement-tests PROPERTIES TIMEOUT 20)
+
 target_compile_definitions(font-tests PRIVATE
   FONT_TEST_FILE="${PROJECT_TOP}/repos/gui/cimgui/imgui/misc/fonts/DroidSans.ttf"
 )
