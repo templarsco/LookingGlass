@@ -230,6 +230,10 @@ jobs:
         cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake \
           -DOPTIMIZE_FOR_NATIVE=OFF ..
         make -j$(nproc)
+    - name: Check what the cross-compiled client needs and declares
+      run: |
+        python3 windows-client/client_binary_test.py \
+          client/build-windows/looking-glass-client.exe
 
   windows-client-native:
     runs-on: windows-2025
@@ -787,6 +791,10 @@ jobs:
       run: |
         cd client/build
         make -j$(nproc)
+    - name: Check what the client needs and declares
+      run: |
+        python windows-client/client_binary_test.py \
+          client/build/looking-glass-client.exe
     - name: Run the client's unit tests
       run: |
         cd client/build
