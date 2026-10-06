@@ -84,12 +84,16 @@ and TIFF and JPEG (`JFIF`) as they are. `clipboard:toVM` and
   password. A program that pastes waits 5 seconds at most for the guest.
 - If the client ends while it holds an offer that nothing has pasted, it asks the guest
   for it and leaves it on the clipboard.
-- A PNG that the guest copied is put on the clipboard as a PNG only: a program
-  that reads only bitmaps does not see it, as the client has no decoder. A
-  guest that copies a BMP is read by both. Files are not copied.
+- A PNG that the guest copied is put on the clipboard as a PNG, and as a
+  bitmap made of it by Windows' own imaging codec (WIC), a 32 bit one with an
+  alpha channel, so that a program that reads only bitmaps sees it; the guest is
+  asked for it once. A BMP is put there as a bitmap, and Windows makes
+  the other formats of it. Files are not copied.
 
 [clipboard_format_test.c](../client/tests/clipboard_format_test.c) tests the
-conversions, with the bytes that a guest that is not to be trusted can send, and
+conversions, with the bytes that a guest that is not to be trusted can send,
+[clipboard_wic_test.c](../client/tests/clipboard_wic_test.c) the decoding of a PNG
+(and of bytes that are not one), and
 [win32_clipboard_test.c](../client/tests/win32_clipboard_test.c) the logic, with a
 clipboard and a core that the test makes. Both pass under AddressSanitizer,
 UndefinedBehaviorSanitizer and, for the second, ThreadSanitizer on Linux.
