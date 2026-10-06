@@ -417,6 +417,14 @@ static bool lgmp_deviceValidator(struct Option * opt, const char ** error)
   if (!transport || strcmp(transport, "lgmp") != 0)
     return true;
 
+#ifdef _WIN32
+  // a section name, which can only be checked by opening it
+  if (!opt->value.x_string || !*opt->value.x_string)
+  {
+    *error = "The shared memory section name is empty";
+    return false;
+  }
+#else
   if (strlen(opt->value.x_string) > 3 &&
       memcmp(opt->value.x_string, "kvmfr", 5) != 0)
   {
@@ -427,12 +435,15 @@ static bool lgmp_deviceValidator(struct Option * opt, const char ** error)
       return false;
     }
   }
+#endif
   return true;
 }
 
 static StringList lgmp_deviceValues(struct Option * option)
 {
   StringList values = stringlist_new(true);
+  // Windows has no counterpart of /sys/class/kvmfr to list sections from
+#ifndef _WIN32
   DIR * dir = opendir("/sys/class/kvmfr");
   if (!dir)
     return values;
@@ -447,14 +458,20 @@ static StringList lgmp_deviceValues(struct Option * option)
     stringlist_push(values, name);
   }
   closedir(dir);
+#endif
   return values;
 }
 
 static void lgmp_setup(void)
 {
+#ifdef _WIN32
+  // a named section on the PC, created by whatever maps it into the VM
+  const char * defaultDevice = "Global\\looking-glass";
+#else
   struct stat st;
   const char * defaultDevice = stat("/dev/kvmfr0", &st) == 0 ?
     "/dev/kvmfr0" : "/dev/shm/looking-glass";
+#endif
 
   static struct Option options[] =
   {
@@ -464,7 +481,11 @@ static void lgmp_setup(void)
       .old_module     = "app",
       .old_name       = "shmFile",
       .shortopt       = 'f',
+#ifdef _WIN32
+      .description    = "Shared memory section name",
+#else
       .description    = "Shared memory file or KVMFR device path",
+#endif
       .type           = OPTION_TYPE_STRING,
       .value.x_string = NULL,
       .validator      = lgmp_deviceValidator,

@@ -390,7 +390,7 @@ static void setLocal(double x, double y)
   g_cursor.guest.y = lround(guest.y);
 }
 
-static bool near(double a, double b)
+static bool isNear(double a, double b)
 {
   return fabs(a - b) < 0.000001;
 }
@@ -405,8 +405,8 @@ static void testInsetExit(void)
 
   CHECK(count(EV_UNGRAB) == 0);
   CHECK(count(EV_WARP) == 0);
-  CHECK(near(g_cursor.exitPos.x, 9.75));
-  CHECK(near(g_cursor.exitPos.y, 19.75));
+  CHECK(isNear(g_cursor.exitPos.x, 9.75));
+  CHECK(isNear(g_cursor.exitPos.y, 19.75));
   CHECK(g_cursor.exit);
   CHECK(!g_cursor.inView);
   CHECK(!g_cursor.viewReq);
@@ -511,8 +511,8 @@ static void testExitImmediate(void)
   startExit();
   CHECK(count(EV_UNGRAB) == 0);
   CHECK(count(EV_WARP) == 0);
-  CHECK(near(g_cursor.exitPos.x, 111));
-  CHECK(near(g_cursor.exitPos.y, 50));
+  CHECK(isNear(g_cursor.exitPos.x, 111));
+  CHECK(isNear(g_cursor.exitPos.y, 50));
   CHECK(!g_cursor.inView);
   CHECK(!g_cursor.viewReq);
   CHECK(g_cursor.exit);
@@ -877,8 +877,8 @@ static void testRotateScale(void)
 
     struct DoublePoint guest;
     util_localCurToGuest(&guest);
-    CHECK(near(guest.x, 40));
-    CHECK(near(guest.y, 20));
+    CHECK(isNear(guest.x, 40));
+    CHECK(isNear(guest.y, 20));
   }
 }
 
@@ -915,13 +915,13 @@ static void testGeometry(void)
 
     struct DoublePoint local;
     CHECK(util_guestCurToLocal(&local));
-    CHECK(near(local.x, expected[rot].x));
-    CHECK(near(local.y, expected[rot].y));
+    CHECK(isNear(local.x, expected[rot].x));
+    CHECK(isNear(local.y, expected[rot].y));
 
     struct DoublePoint delta = { 1, 2 };
     util_rotatePoint(&delta);
-    CHECK(near(delta.x, rotated[rot].x));
-    CHECK(near(delta.y, rotated[rot].y));
+    CHECK(isNear(delta.x, rotated[rot].x));
+    CHECK(isNear(delta.y, rotated[rot].y));
   }
 
   static const double scales[] = { 0.5, 1.0, 2.0 };
@@ -940,15 +940,15 @@ static void testGeometry(void)
 
       struct DoublePoint round;
       util_localCurToGuest(&round);
-      CHECK(near(round.x, 40));
-      CHECK(near(round.y, 20));
+      CHECK(isNear(round.x, 40));
+      CHECK(isNear(round.y, 20));
     }
 
   g_cursor.guest.valid = false;
   struct DoublePoint local = { -1, -2 };
   CHECK(!util_guestCurToLocal(&local));
-  CHECK(near(local.x, -1));
-  CHECK(near(local.y, -2));
+  CHECK(isNear(local.x, -1));
+  CHECK(isNear(local.y, -2));
 }
 
 static struct DoublePoint inputFor(int rot, double x, double y)
@@ -1004,8 +1004,8 @@ static void testEdges(void)
       CHECK(g_cursor.exit);
       CHECK(!g_cursor.inView);
       CHECK(!g_cursor.viewReq);
-      CHECK(near(g_cursor.exitPos.x, cases[i].target.x));
-      CHECK(near(g_cursor.exitPos.y, cases[i].target.y));
+      CHECK(isNear(g_cursor.exitPos.x, cases[i].target.x));
+      CHECK(isNear(g_cursor.exitPos.y, cases[i].target.y));
     }
 }
 
@@ -1039,8 +1039,8 @@ static void testScales(void)
     CHECK(g_cursor.exit);
     CHECK(!g_cursor.inView);
     CHECK(!g_cursor.viewReq);
-    CHECK(near(g_cursor.exitPos.x, cases[i].target));
-    CHECK(near(g_cursor.exitPos.y, 50));
+    CHECK(isNear(g_cursor.exitPos.x, cases[i].target));
+    CHECK(isNear(g_cursor.exitPos.y, 50));
   }
 }
 
@@ -1075,8 +1075,8 @@ static void testBorderExit(void)
     CHECK(g_cursor.exit);
     CHECK(!g_cursor.inView);
     CHECK(!g_cursor.viewReq);
-    CHECK(near(g_cursor.exitPos.x, 111));
-    CHECK(near(g_cursor.exitPos.y, 50));
+    CHECK(isNear(g_cursor.exitPos.x, 111));
+    CHECK(isNear(g_cursor.exitPos.y, 50));
   }
 }
 

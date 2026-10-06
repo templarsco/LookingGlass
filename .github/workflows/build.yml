@@ -193,12 +193,33 @@ jobs:
         cmake ..
         make -j$(nproc)
         ctest --output-on-failure
-    - name: Cross-compile the Windows client loopback
+    - name: Cross-compile the Windows client loopback and the HCS probe
       run: |
         mkdir windows-client/build
         cd windows-client/build
         cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake ..
         make -j$(nproc)
+    - name: Check the HCS probe's guest init under QEMU with ivshmem
+      run: |
+        sudo apt-get install qemu-system-x86
+        # Ubuntu's generic kernel, unpacked rather than installed
+        mkdir guest-kernel
+        cd guest-kernel
+        image=$(apt-cache depends linux-image-virtual |
+          awk '/Depends: linux-image-[0-9]/ { print $2; exit }')
+        apt-get download "${image/linux-image-/linux-image-unsigned-}"
+        dpkg-deb -x linux-image-unsigned-*.deb .
+        cd ..
+        # the serial port opens late, as it may on Hyper-V
+        python3 windows-client/hcs_probe_guest_test.py \
+          windows-client/build/hcs-probe-guest-init guest-kernel/boot/vmlinuz-* \
+          --connect-after 10 --log guest-serial.log
+    - name: Upload the guest serial log
+      if: failure()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-hcs-guest
+        path: guest-serial.log
     - name: Cross-compile the Windows client
       run: |
         mkdir client/build-windows
@@ -226,6 +247,496 @@ jobs:
       run: |
         cd windows-client\build
         ctest --output-on-failure
+    - name: Get WSL's kernel for the HCS probe's VMs
+      id: wsl-kernel
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $kernel = "$env:ProgramFiles\WSL\tools\kernel"
+        if (-not (Test-Path $kernel)) {
+          gh release download --repo microsoft/WSL --pattern "wsl.*.x64.msi" `
+            --dir wsl
+          $msi = (Get-ChildItem wsl\*.msi | Select-Object -First 1).FullName
+          $unpack = Start-Process msiexec.exe -Wait -PassThru -ArgumentList `
+            "/a `"$msi`" /qn TARGETDIR=`"$PWD\wsl\files`" /lv `"$PWD\wsl\msi.log`""
+          if ($unpack.ExitCode -ne 0) {
+            Get-Content wsl\msi.log -Tail 40
+            exit 1
+          }
+          $kernel = (Get-ChildItem -Recurse wsl\files -File -Filter kernel |
+            Select-Object -First 1).FullName
+          if (-not $kernel) {
+            Get-ChildItem -Recurse wsl\files -File | Select-Object FullName
+            exit 1
+          }
+          Write-Output "From $msi"
+        }
+        Get-Item $kernel | Format-List FullName, Length, LastWriteTime
+        "kernel=$kernel" >> $env:GITHUB_OUTPUT
+    - name: Keep a dump when a VM worker process crashes
+      run: |
+        # each VM runs in a vmwp.exe; Windows Error Reporting writes the dump
+        $dumps = "$env:RUNNER_TEMP\vmwp-dumps"
+        New-Item -ItemType Directory -Force $dumps | Out-Null
+        icacls $dumps /grant '*S-1-1-0:(OI)(CI)F' | Out-Null
+        $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\' +
+          'LocalDumps\vmwp.exe'
+        New-Item -Force $key | Out-Null
+        Set-ItemProperty $key -Name DumpFolder -Value $dumps -Type ExpandString
+        Set-ItemProperty $key -Name DumpType -Value 1 -Type DWord
+        Set-ItemProperty $key -Name DumpCount -Value 8 -Type DWord
+    - name: Check shared memory with Hyper-V VMs that boot WSL's kernel
+      run: |
+        python windows-client\hcs_probe_smoke.py `
+          windows-client\build\lg-windows-client-hcs-probe.exe `
+          --kernel "${{ steps.wsl-kernel.outputs.kernel }}" --output hcs-probe
+    - name: Check shared memory with a VM of Hyper-V Manager
+      run: |
+        # a disposable VM without a disk, which waits in its firmware
+        $vm = New-VM -Name lg-hcs-probe-vmms -Generation 2 `
+          -MemoryStartupBytes 512MB -NoVHD -Path "$env:RUNNER_TEMP\vmms"
+        $code = 0
+        try {
+          Set-VMMemory -VM $vm -DynamicMemoryEnabled $false
+          Start-VM -VM $vm
+          # the HCS may want the region to be of some minimum size
+          foreach ($mib in 32, 1024) {
+            python windows-client\hcs_probe_smoke.py `
+              windows-client\build\lg-windows-client-hcs-probe.exe `
+              --vm $vm.Id --size-mib $mib --output hcs-probe-vm-$mib
+            if ($LASTEXITCODE -ne 0) { $code = $LASTEXITCODE }
+          }
+        } finally {
+          Stop-VM -VM $vm -TurnOff -Force -ErrorAction SilentlyContinue
+          Remove-VM -VM $vm -Force
+        }
+        exit $code
+    - name: Try VMs with the HCS's paravisor setting and shared memory
+      run: |
+        # what the HCS does with them is printed, not required
+        python windows-client\hcs_probe_smoke.py `
+          windows-client\build\lg-windows-client-hcs-probe.exe `
+          --hcl auto --output hcs-probe-hcl
+    - name: List the driver packages of a GPU for the Windows guest's disk
+      run: |
+        # the runner has no GPU to partition, so its display adapter stands
+        # in for one, by a device interface of the form that
+        # Get-VMHostPartitionableGpu shows; the disk script must list its
+        # driver's packages, or say that the driver is not in the DriverStore.
+        # Windows PowerShell runs it, as on a PC
+        $adapter = Get-PnpDevice -Class Display -PresentOnly |
+          Select-Object -First 1
+        if (-not $adapter) {
+          'This runner has no display adapter, nothing to check'
+          exit 0
+        }
+        $interface = '\\?\' + ($adapter.InstanceId -replace '\\', '#') +
+          '#{1ca05180-a699-450a-9a0c-de4fbe3ddd89}'
+        "$($adapter.FriendlyName): $interface"
+        $run = Start-Process powershell.exe -Wait -PassThru -NoNewWindow `
+          -RedirectStandardOutput gpu-packages.out `
+          -RedirectStandardError gpu-packages.err -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            'windows-client\hcs_probe_windows_disk.ps1', '-GpuPv',
+            $interface, '-ListGpuPackages')
+        $out = (Get-Content -Raw gpu-packages.out, gpu-packages.err) -join ''
+        $out
+        # Windows PowerShell may break its lines where it likes
+        if ($run.ExitCode -eq 0 -and
+            $out -match '-GpuPv\s+would\s+copy\s+[1-9]') {
+          exit 0
+        }
+        if ($run.ExitCode -ne 0 -and
+            $out -match 'is\s+not\s+in\s+the\s+DriverStore') {
+          'The script refused the driver, which is not in the DriverStore'
+          exit 0
+        }
+        exit 1
+    - name: Show the Hyper-V events from the HCS probe's VMs
+      if: always()
+      run: |
+        # what the VM workers say, such as why a VM stopped by itself
+        function Show-Events($events, $log, $length = 500) {
+          $events | Sort-Object TimeCreated | ForEach-Object {
+            $text = "$($_.Message)" -replace '\s+', ' '
+            $text = $text.Substring(0, [Math]::Min($length, $text.Length))
+            "$($_.TimeCreated.ToString('HH:mm:ss.fff')) $log $($_.Id) " +
+              "$($_.LevelDisplayName): $text"
+          }
+        }
+        $since = (Get-Date).AddMinutes(-30)
+        Get-WinEvent -ListLog *Hyper-V*, *Hcs* -ErrorAction SilentlyContinue |
+          Where-Object RecordCount -gt 0 | ForEach-Object {
+            $events = @(Get-WinEvent -LogName $_.LogName -MaxEvents 80 `
+              -ErrorAction SilentlyContinue | Where-Object TimeCreated -ge $since)
+            Show-Events $events $_.LogName
+          }
+        # a crash of the worker process shows here, and its report's bucket
+        $crashes = @(Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
+          LogName = 'Application'; StartTime = $since; Level = 1, 2 })
+        Show-Events $crashes Application
+        $reports = @(Get-WinEvent -ErrorAction SilentlyContinue -FilterHashtable @{
+          LogName = 'Application'; StartTime = $since
+          ProviderName = 'Windows Error Reporting' })
+        Show-Events $reports Application 2000
+    - name: Show where a VM worker process crashed
+      if: always()
+      run: |
+        $wer = "$env:ProgramData\Microsoft\Windows\WER"
+        Get-ChildItem $wer -Recurse -File -Filter Report.wer `
+            -ErrorAction SilentlyContinue |
+          Where-Object DirectoryName -match 'vmwp' | ForEach-Object {
+            "== $($_.FullName)"
+            Get-Content $_.FullName -Encoding Unicode |
+              Select-String '^(EventType|Sig|DynamicSig|ReportDescription)'
+          }
+        $dumps = @(Get-ChildItem "$env:RUNNER_TEMP\vmwp-dumps", $wer -Recurse `
+            -File -Include *.dmp, *.mdmp, *.hdmp -ErrorAction SilentlyContinue |
+          Where-Object FullName -match 'vmwp')
+        if (-not $dumps) {
+          'No dump of a crashed VM worker process'
+          exit 0
+        }
+        $dumps | Format-Table FullName, Length
+        $cdb = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe"
+        if (-not (Test-Path $cdb)) {
+          "No debugger at $cdb"
+          exit 0
+        }
+        # Microsoft's public symbols name the functions on the stack
+        $symbols = "srv*$env:RUNNER_TEMP\symbols*" +
+          'https://msdl.microsoft.com/download/symbols'
+        foreach ($dump in $dumps | Select-Object -First 2) {
+          "== $($dump.FullName)"
+          & $cdb -z $dump.FullName -y $symbols -i "$env:SystemRoot\System32" `
+            -c '.exr -1; .ecxr; kn 30; q' 2>&1 | Select-Object -Last 120
+        }
+        exit 0
+    - name: Upload the HCS probe's report and serial logs
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-hcs-probe
+        path: |
+          hcs-probe/report.json
+          hcs-probe/*.serial.log
+          hcs-probe-vm-*/report.json
+          hcs-probe-hcl/report.json
+          hcs-probe-hcl/*.serial.log
+        if-no-files-found: ignore
+
+  windows-client-guest:
+    name: windows-client-guest (${{ matrix.windows }})
+    # the IDD's driver package, which the Windows 11 guest installs
+    needs: idd
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Microsoft's evaluation ISOs, 64-bit, en-US: Windows Server 2025,
+          # and Windows 11 Enterprise LTSC, which is 24H2
+          - windows: server
+            iso: https://go.microsoft.com/fwlink/?linkid=2345730&clcid=0x409&culture=en-us&country=us
+          # whose Looking Glass IDD then serves its display over the shared
+          # memory to the client on the runner
+          - windows: client
+            iso: https://go.microsoft.com/fwlink/?linkid=2289029&clcid=0x409&culture=en-us&country=us
+            idd: true
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        submodules: recursive
+    - name: Install MinGW-w64, CMake and Mesa with MSYS2
+      if: matrix.idd
+      id: msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          make
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-mesa
+    - name: Build the Windows client with test capture
+      if: matrix.idd
+      shell: msys2 {0}
+      run: |
+        mkdir client/build
+        cd client/build
+        cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DOPTIMIZE_FOR_NATIVE=OFF ..
+        make -j$(nproc)
+        # the runner has no GPU, so the client uses Mesa's software OpenGL
+        cp /mingw64/bin/opengl32.dll .
+    - name: Get the Looking Glass IDD's driver package
+      if: matrix.idd
+      uses: actions/download-artifact@v6
+      with:
+        name: idd-package
+        path: ${{ runner.temp }}/idd
+    - name: Build the HCS probe and lg-hyperv-ivshmem
+      run: |
+        mkdir windows-client\build
+        cd windows-client\build
+        cmake -G "MinGW Makefiles" ..
+        mingw32-make "-j$([Environment]::ProcessorCount)" `
+          lg-windows-client-hcs-probe lg-hyperv-ivshmem
+    - name: Show the runner's memory as lg-hyperv-ivshmem reads it
+      run: |
+        windows-client\build\lg-hyperv-ivshmem.exe memory
+        $bytes = (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+        "Windows reports 0x{0:x} bytes of memory" -f $bytes
+    - name: Get the IVSHMEM driver that Looking Glass's installer bundles
+      id: driver
+      run: |
+        # relative paths, as Git's GNU tar takes D: for a host
+        cd $env:RUNNER_TEMP
+        # retried, as the host sometimes does not answer the connection
+        curl.exe -L --fail --retry 4 --retry-all-errors --silent --show-error `
+          -o ivshmem.tar.gz https://dl.quantum2.xyz/ivshmem.tar.gz
+        if ($LASTEXITCODE) {
+          exit $LASTEXITCODE
+        }
+        New-Item -ItemType Directory ivshmem-driver | Out-Null
+        tar -xzf ivshmem.tar.gz -C ivshmem-driver
+        $dir = "$env:RUNNER_TEMP\ivshmem-driver"
+        Get-ChildItem -Recurse $dir -File | Format-Table FullName, Length
+        Get-ChildItem -Recurse $dir -File -Include *.cat, *.sys |
+          Get-AuthenticodeSignature | Format-List Path, Status,
+            @{ n = 'Signer'; e = { $_.SignerCertificate.Subject } },
+            @{ n = 'Issuer'; e = { $_.SignerCertificate.Issuer } },
+            @{ n = 'Usages'; e = {
+              ($_.SignerCertificate.Extensions.EnhancedKeyUsages |
+                ForEach-Object { "$($_.FriendlyName) ($($_.Value))" }) -join
+                ', ' } }
+        # the 64-bit INF for the newest Windows in the archive
+        $infs = @(Get-ChildItem -Recurse $dir -Filter *.inf)
+        $inf = $null
+        foreach ($os in 'w11', 'win11', '2k25', '2k22', 'w10', 'win10', '') {
+          $inf = $infs | Where-Object FullName -match "$os.*(amd64|x64)" |
+            Select-Object -First 1
+          if ($inf) {
+            break
+          }
+        }
+        if (-not $inf) {
+          $inf = $infs | Select-Object -First 1
+        }
+        "Using $($inf.FullName)"
+        Get-Content $inf.FullName | Select-Object -First 80
+        "inf=$($inf.FullName)" >> $env:GITHUB_OUTPUT
+    - name: Get Windows' evaluation ISO
+      env:
+        ISO: ${{ matrix.iso }}
+      run: |
+        curl.exe -L --fail --retry 3 --silent --show-error `
+          -o "$env:RUNNER_TEMP\windows.iso" $env:ISO
+        Get-Item "$env:RUNNER_TEMP\windows.iso" | Format-List FullName, Length
+    - name: Make a Windows disk that runs lg-hyperv-ivshmem on COM1
+      shell: powershell
+      env:
+        IDD: ${{ matrix.idd }}
+      run: |
+        $idd = @{}
+        if ($env:IDD -eq 'true') {
+          $idd.Idd = "$env:RUNNER_TEMP\idd"
+        }
+        windows-client\hcs_probe_windows_disk.ps1 `
+          -Iso "$env:RUNNER_TEMP\windows.iso" `
+          -Disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
+          -Tool windows-client\build\lg-hyperv-ivshmem.exe `
+          -Inf "${{ steps.driver.outputs.inf }}" @idd
+        Remove-Item "$env:RUNNER_TEMP\windows.iso"
+    - name: Check the IVSHMEM driver over shared memory in a Windows guest
+      env:
+        IDD: ${{ matrix.idd }}
+        MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+      run: |
+        $python = (Get-Command python).Source
+        $options = @()
+        if ($env:IDD -eq 'true') {
+          # then the guest installs the IDD and the client reads its frames,
+          # with MinGW-w64's and Mesa's DLLs, and Mesa's software OpenGL
+          $env:PATH = "$env:MSYS2_LOCATION\mingw64\bin;$env:PATH"
+          $env:GALLIUM_DRIVER = 'llvmpipe'
+          $options = '--size-mib', '128', '--client',
+            ("$python windows-client\client_smoke_test.py --section " +
+              '{section} --output hcs-probe-idd-client --timeout 240 ' +
+              'client\build\looking-glass-client.exe')
+        }
+        & $python windows-client\hcs_probe_smoke.py `
+          windows-client\build\lg-windows-client-hcs-probe.exe `
+          --windows-disk "$env:RUNNER_TEMP\guest\windows.vhdx" `
+          --output hcs-probe-windows @options
+    - name: Show the Hyper-V events from the Windows guest's VMs
+      if: always()
+      run: |
+        # what the VM workers say, such as why a VM could not reset
+        $since = (Get-Date).AddMinutes(-90)
+        Get-WinEvent -ListLog *Hyper-V*, *Hcs* -ErrorAction SilentlyContinue |
+          Where-Object RecordCount -gt 0 | ForEach-Object {
+            $log = $_.LogName
+            Get-WinEvent -LogName $log -MaxEvents 100 `
+                -ErrorAction SilentlyContinue |
+              Where-Object TimeCreated -ge $since |
+              Sort-Object TimeCreated | ForEach-Object {
+                $text = "$($_.Message)" -replace '\s+', ' '
+                $text = $text.Substring(0, [Math]::Min(600, $text.Length))
+                "$($_.TimeCreated.ToString('HH:mm:ss.fff')) $log $($_.Id) " +
+                  "$($_.LevelDisplayName): $text"
+              }
+          }
+    - name: Show what the Windows guest logged
+      if: always()
+      shell: powershell
+      run: |
+        windows-client\hcs_probe_windows_disk.ps1 -Logs `
+          -Disk "$env:RUNNER_TEMP\guest\windows.vhdx"
+    - name: Upload the Windows guest's report and serial log
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-hcs-probe-windows-${{ matrix.windows }}
+        path: |
+          hcs-probe-windows/report.json
+          hcs-probe-windows/*.serial.log
+          hcs-probe-windows/client-command.log
+          hcs-probe-idd-client/
+        if-no-files-found: ignore
+
+  windows-client-pc-test-bundle:
+    # what hcs_probe_pc.ps1 runs on a PC with a GPU, in one folder
+    needs: idd
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        submodules: recursive
+    - name: Install the MinGW-w64 cross compiler
+      run: |
+        sudo apt-get update
+        sudo apt-get install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
+        # the win32 thread model, which links no winpthreads
+        sudo update-alternatives --set x86_64-w64-mingw32-gcc \
+          /usr/bin/x86_64-w64-mingw32-gcc-win32
+        sudo update-alternatives --set x86_64-w64-mingw32-g++ \
+          /usr/bin/x86_64-w64-mingw32-g++-win32
+    - name: Cross-compile the client with test capture
+      run: |
+        mkdir client/build-windows
+        cd client/build-windows
+        cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake \
+          -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON \
+          -DOPTIMIZE_FOR_NATIVE=OFF ..
+        make -j$(nproc)
+    - name: Cross-compile the HCS probe and lg-hyperv-ivshmem
+      run: |
+        mkdir windows-client/build
+        cd windows-client/build
+        cmake -DCMAKE_TOOLCHAIN_FILE=../../host/toolchain-mingw64.cmake \
+          -DCMAKE_BUILD_TYPE=Release -DOPTIMIZE_FOR_NATIVE=OFF ..
+        make -j$(nproc) lg-windows-client-hcs-probe lg-hyperv-ivshmem
+    - name: Get the Looking Glass IDD's driver package
+      uses: actions/download-artifact@v6
+      with:
+        name: idd-package
+        path: idd-package
+    - name: Bundle the PC test
+      run: |
+        python3 windows-client/package_pc_test.py \
+          client/build-windows/looking-glass-client.exe \
+          --hcs-probe windows-client/build/lg-windows-client-hcs-probe.exe \
+          --ivshmem-tool windows-client/build/lg-hyperv-ivshmem.exe \
+          --idd idd-package --commit "$GITHUB_SHA" --output lg-pc-test \
+          --notice mingw-w64-runtime=/usr/share/doc/mingw-w64-x86-64-dev/copyright \
+          --notice gcc-runtime=/usr/share/doc/gcc-mingw-w64-x86-64-win32/copyright
+    - uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-pc-test
+        path: lg-pc-test/
+        if-no-files-found: error
+
+  windows-client-pc-test:
+    # the bundle's hcs_probe_pc.ps1, run as on a PC but without a GPU, which
+    # the runner does not have
+    needs: windows-client-pc-test-bundle
+    runs-on: windows-2025
+    steps:
+    - name: Get the PC test's bundle
+      uses: actions/download-artifact@v6
+      with:
+        name: windows-client-pc-test
+        path: ${{ runner.temp }}/lg-pc-test
+    - name: Install Mesa with MSYS2
+      id: msys2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: mingw-w64-x86_64-mesa
+    - name: Check that Windows PowerShell parses the PC test's scripts
+      shell: powershell
+      run: |
+        foreach ($script in 'hcs_probe_pc.ps1', 'hcs_probe_windows_disk.ps1') {
+          $errors = $null
+          [Management.Automation.Language.Parser]::ParseFile(
+            "$env:RUNNER_TEMP\lg-pc-test\$script", [ref] $null,
+            [ref] $errors) | Out-Null
+          if ($errors) {
+            $errors | Format-List
+            exit 1
+          }
+        }
+    - name: Run the PC test without a GPU
+      shell: cmd
+      env:
+        MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+      run: |
+        rem the runner has no GPU, so the client uses Mesa's software OpenGL
+        copy "%MSYS2_LOCATION%\mingw64\bin\opengl32.dll" ^
+          "%RUNNER_TEMP%\lg-pc-test\client" || exit /b 1
+        set "PATH=%MSYS2_LOCATION%\mingw64\bin;%PATH%"
+        set GALLIUM_DRIVER=llvmpipe
+        rem as the bundle's README says to run it
+        powershell -NoProfile -ExecutionPolicy Bypass ^
+          -File "%RUNNER_TEMP%\lg-pc-test\hcs_probe_pc.ps1" -NoGpu ^
+          -WorkDir "%RUNNER_TEMP%\pc-test"
+    - name: Check the PC test's zip
+      if: always()
+      run: |
+        $zip = @(Get-ChildItem "$env:RUNNER_TEMP\pc-test\lg-pc-test-*.zip")
+        if ($zip.Count -ne 1) {
+          'The test did not leave one zip'
+          exit 1
+        }
+        $unpacked = "$env:RUNNER_TEMP\pc-test-zip"
+        Expand-Archive $zip[0].FullName $unpacked
+        Get-ChildItem -Recurse $unpacked | Format-Table FullName, Length
+        '== summary.txt'
+        Get-Content "$unpacked\summary.txt"
+        '== hyperv-events.txt'
+        Get-Content "$unpacked\hyperv-events.txt" -Tail 60
+        foreach ($file in 'pc-test.log', 'summary.txt', 'guest-logs.txt',
+            'hyperv-events.txt', 'probe\report.json', 'guest.lgcapture') {
+          if (-not (Test-Path "$unpacked\$file")) {
+            "The zip has no $file"
+            exit 1
+          }
+        }
+        # LG_TestCaptureHeader's magic
+        $capture = [IO.File]::ReadAllBytes("$unpacked\guest.lgcapture")
+        if ([BitConverter]::ToUInt64($capture, 0) -ne 0x4c47434150545552) {
+          'guest.lgcapture is not a capture of the client'
+          exit 1
+        }
+    - name: Upload the PC test's zip
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-client-pc-test-results
+        path: ${{ runner.temp }}/pc-test/lg-pc-test-*.zip
+        if-no-files-found: ignore
 
   windows-client-display:
     runs-on: windows-2025
@@ -247,21 +758,52 @@ jobs:
           mingw-w64-x86_64-gcc
           mingw-w64-x86_64-mesa
           mingw-w64-x86_64-python
-    - name: Configure Windows client with test capture
+    - name: Configure Windows client with test capture and unit tests
       run: |
         mkdir client/build
         cd client/build
-        cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DOPTIMIZE_FOR_NATIVE=OFF ..
+        cmake -G "MSYS Makefiles" -DENABLE_TESTS=ON -DENABLE_UNIT_TESTS=ON \
+          -DOPTIMIZE_FOR_NATIVE=OFF ..
     - name: Build Windows client
       run: |
         cd client/build
         make -j$(nproc)
+    - name: Run the client's unit tests
+      run: |
+        cd client/build
+        ctest --output-on-failure -j$(nproc)
+    - name: Build the test frame producer
+      run: |
+        mkdir windows-client/build
+        cd windows-client/build
+        cmake -G "MSYS Makefiles" ..
+        make -j$(nproc) lg-windows-client-producer
     - name: Check a test frame in a Windows window
       run: |
         # the runner has no GPU, so the client uses Mesa's software OpenGL
         cp /mingw64/bin/opengl32.dll client/build/
         GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
-          --output smoke client/build/looking-glass-client.exe
+          --output smoke/test client/build/looking-glass-client.exe
+    - name: Check a frame from a shared memory section in a Windows window
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
+          --producer windows-client/build/lg-windows-client-producer.exe \
+          --output smoke/lgmp client/build/looking-glass-client.exe
+    - name: Check that the client refuses a section every account can open
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_smoke_test.py \
+          --producer windows-client/build/lg-windows-client-producer.exe \
+          --world --output smoke/world client/build/looking-glass-client.exe
+    - name: Run the client paced by the display
+      run: |
+        # the runner has no display to pace by, so this only checks the run
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_pacing_test.py \
+          --seconds 3 --output pacing client/build/looking-glass-client.exe
+    - name: Run the client through resolution changes and host restarts
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_session_test.py \
+          --producer windows-client/build/lg-windows-client-producer.exe \
+          --output sessions client/build/looking-glass-client.exe
     - name: Check frame formats, strides and upload paths in a Windows window
       run: |
         # Mesa has no GL_AMD_pinned_memory, so this only covers the ordinary
@@ -275,6 +817,9 @@ jobs:
         name: windows-client-smoke
         path: |
           smoke/
+          client/build/Testing/
+          pacing/
+          sessions/
           formats/
 
   idd:
@@ -295,6 +840,17 @@ jobs:
       run: |
         cd idd
         msbuild.exe LGIdd.sln /t:Build /p:Configuration=Release /p:Platform=x64
+    - name: Upload the IDD's driver package for the Windows guest
+      uses: actions/upload-artifact@v6
+      with:
+        name: idd-package
+        path: |
+          idd/x64/Release/LGIdd/*.cat
+          idd/x64/Release/LGIdd/*.dll
+          idd/x64/Release/LGIdd/*.inf
+          idd/x64/Release/LGIdd/LGIddHelper.exe
+          idd/x64/Release/LGIdd/LGIddInstall.exe
+        if-no-files-found: error
     - name: Build NSIS Installer
       run: |
         cd idd\x64\Release\LGIdd
@@ -302,7 +858,12 @@ jobs:
     - name: Build NSIS installer with IVSHMEM drivers
       run: |
         cd idd\x64\Release
-        Invoke-WebRequest https://dl.quantum2.xyz/ivshmem.tar.gz -OutFile ivshmem.tar.gz
+        # retried, as the host sometimes does not answer the connection
+        curl.exe -L --fail --retry 4 --retry-all-errors --silent --show-error `
+          -o ivshmem.tar.gz https://dl.quantum2.xyz/ivshmem.tar.gz
+        if ($LASTEXITCODE) {
+          exit $LASTEXITCODE
+        }
         tar -xzvf ivshmem.tar.gz
         cd LGIdd
         makensis -DBUILD_32BIT -DIVSHMEM installer.nsi

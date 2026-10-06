@@ -37,9 +37,13 @@ NTSYSCALLAPI NTSTATUS NTAPI NtDelayExecution(
 
 typedef struct LGTimer LGTimer;
 
+/* Windows reads the performance counter. A unit test that sets the clock by
+ * defining clock_gettime(), as the Linux ones do, defines LG_TEST_MOCK_CLOCK
+ * to read that instead, see client/tests/windows/mock_clock.h. */
+
 static inline uint64_t microtime(void)
 {
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(LG_TEST_MOCK_CLOCK)
   static unsigned long div = 0;
   if (unlikely(div == 0))
   {
@@ -77,7 +81,7 @@ static inline void nsleep(uint64_t ns)
 
 static inline uint64_t nanotime(void)
 {
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(LG_TEST_MOCK_CLOCK)
   static double multiplier = 0.0;
   if (unlikely(!multiplier))
   {

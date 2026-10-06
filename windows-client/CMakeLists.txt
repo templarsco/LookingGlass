@@ -54,15 +54,102 @@ endif()
 add_subdirectory("${PROJECT_TOP}/common"          "${CMAKE_BINARY_DIR}/common")
 add_subdirectory("${PROJECT_TOP}/repos/LGMP/lgmp" "${CMAKE_BINARY_DIR}/lgmp"  )
 
-add_executable(lg-windows-client-loopback src/loopback.c)
+add_executable(lg-windows-client-loopback src/loopback.c src/session.c)
 target_link_libraries(lg-windows-client-loopback
   lg_common
   lgmp
 )
 
+# what the HCS probe's report says about the virtual machines of the PC
+add_executable(lg-hcs-systems-test src/hcs_systems_test.c src/hcs_systems.c)
+
 if(WIN32)
   set_target_properties(lg-windows-client-loopback PROPERTIES
     LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+
+  # serves frames on a named section, for the client's LGMP smoke test
+  add_executable(lg-windows-client-producer src/producer.c src/session.c)
+  target_link_libraries(lg-windows-client-producer
+    lg_common
+    lgmp
+    advapi32
+  )
+  set_target_properties(lg-windows-client-producer PROPERTIES
+    LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+
+  # what a display offers a client that renders in step with it
+  add_executable(lg-windows-client-vblank-probe src/vblank_probe.c)
+  target_link_libraries(lg-windows-client-vblank-probe
+    dwmapi
+    gdi32
+    user32
+  )
+  set_target_properties(lg-windows-client-vblank-probe PROPERTIES
+    LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+
+  # runs in a Windows guest, which has no MinGW runtime
+  add_executable(lg-hyperv-ivshmem src/hyperv_ivshmem.c)
+  target_include_directories(lg-hyperv-ivshmem PRIVATE
+    "${PROJECT_TOP}/vendor/ivshmem")
+  target_link_libraries(lg-hyperv-ivshmem
+    advapi32
+    cfgmgr32
+    newdev
+    setupapi
+  )
+  set_target_properties(lg-hyperv-ivshmem PROPERTIES
+    LINK_FLAGS "-municode -static -Wl,--gc-sections -Wl,--nxcompat")
+
+  # the HCS shared memory probe boots VMs with its own init, which needs a
+  # compiler for x86_64 Linux: the host's GCC when cross-compiling from
+  # Linux, else Clang with LLD
+  if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux" AND
+      CMAKE_HOST_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+    find_program(GUEST_GCC gcc)
+    if(GUEST_GCC)
+      set(GUEST_CC "${GUEST_GCC}" -fno-tree-loop-distribute-patterns)
+    endif()
+  else()
+    find_program(GUEST_CLANG clang)
+    find_program(GUEST_LLD ld.lld)
+    if(GUEST_CLANG AND GUEST_LLD)
+      set(GUEST_CC "${GUEST_CLANG}" --target=x86_64-linux-gnu -fuse-ld=lld)
+    endif()
+  endif()
+
+  if(GUEST_CC)
+    set(GUEST_INIT "${CMAKE_CURRENT_BINARY_DIR}/hcs-probe-guest-init")
+    add_custom_command(
+      OUTPUT "${GUEST_INIT}"
+      COMMAND ${GUEST_CC} -std=gnu11 -O2 -Wall -Werror -Wstrict-prototypes
+        -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector
+        -fno-pie -fno-asynchronous-unwind-tables -fno-unwind-tables
+        -ffunction-sections -fdata-sections -Wl,--gc-sections
+        -Wl,--build-id=none -Wl,-z,noexecstack -s
+        -o "${GUEST_INIT}" "${PROJECT_SOURCE_DIR}/src/hcs_probe_guest.c"
+      DEPENDS src/hcs_probe_guest.c
+      COMMENT "Building the HCS probe's guest init for x86_64 Linux"
+      VERBATIM
+    )
+
+    # the init is a source only for the command that builds it to run
+    add_executable(lg-windows-client-hcs-probe src/hcs_probe.c
+      src/hcs_systems.c "${GUEST_INIT}")
+    target_compile_definitions(lg-windows-client-hcs-probe PRIVATE
+      LG_HCS_PROBE_GUEST="${GUEST_INIT}")
+    set_source_files_properties(src/hcs_probe.c PROPERTIES
+      OBJECT_DEPENDS "${GUEST_INIT}")
+    target_link_libraries(lg-windows-client-hcs-probe
+      advapi32
+      bcrypt
+      ole32
+    )
+    set_target_properties(lg-windows-client-hcs-probe PROPERTIES
+      LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+  else()
+    message(STATUS "No compiler for x86_64 Linux, not building "
+      "lg-windows-client-hcs-probe")
+  endif()
 else()
   set_target_properties(lg-windows-client-loopback PROPERTIES
     LINK_FLAGS "-Wl,--gc-sections -z noexecstack")
@@ -72,6 +159,8 @@ include(CTest)
 if(BUILD_TESTING)
   add_test(NAME loopback COMMAND lg-windows-client-loopback)
   set_tests_properties(loopback PROPERTIES TIMEOUT 60)
+  add_test(NAME hcs-systems COMMAND lg-hcs-systems-test)
+  set_tests_properties(hcs-systems PROPERTIES TIMEOUT 60)
 endif()
 
 feature_summary(WHAT ENABLED_FEATURES DISABLED_FEATURES)
