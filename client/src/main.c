@@ -4335,7 +4335,11 @@ static void lg_shutdown(void)
   LG_LOCK_FREE(l_frameTiming.lock);
 
   free(g_state.fontName);
-  igDestroyContext(NULL);
+
+  // an error before the context was made (an option that is refused, or the
+  // clipboard that cannot start) ends here too, and has none to destroy
+  if (igGetCurrentContext())
+    igDestroyContext(NULL);
   free(g_state.imGuiIni);
 }
 
