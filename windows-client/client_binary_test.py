@@ -319,7 +319,7 @@ def main():
       formatter_class=argparse.RawDescriptionHelpFormatter)
   parser.add_argument('exe', help='path to looking-glass-client.exe')
   parser.add_argument('--subsystem', choices=('gui', 'console'),
-      default='console', help='the subsystem that it is built for')
+      default='gui', help='the subsystem that it is built for')
   args = parser.parse_args()
 
   with open(args.exe, 'rb') as exe:

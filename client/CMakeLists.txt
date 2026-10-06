@@ -267,6 +267,7 @@ if(WIN32)
     src/eglutil.c
   )
   list(APPEND SOURCES
+    platform/Windows/startup.c
     platform/Windows/stubs.c
     platform/Windows/uifont.c
   )
@@ -325,6 +326,11 @@ target_link_libraries(looking-glass-client
 
 if(WIN32)
   target_link_libraries(looking-glass-client dwrite uuid)
+
+  # a program of the GUI subsystem has no console window of its own, which
+  # platform/Windows/startup.c makes up for
+  set_property(TARGET looking-glass-client APPEND_STRING PROPERTY
+    LINK_FLAGS " -mwindows")
 
   # the resource compiler can't take the quoted definitions that lg_gui
   # passes to its users, so the resources build in a target of their own

@@ -831,6 +831,10 @@ jobs:
         GALLIUM_DRIVER=llvmpipe python windows-client/client_session_test.py \
           --producer windows-client/build/lg-windows-client-producer.exe \
           --output sessions client/build/looking-glass-client.exe
+    - name: Check where the client's messages go when it has no console
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_startup_test.py \
+          --output startup client/build/looking-glass-client.exe
     - name: Check frame formats, strides and upload paths in a Windows window
       run: |
         # Mesa has no GL_AMD_pinned_memory, so this only covers the ordinary
@@ -847,6 +851,7 @@ jobs:
           client/build/Testing/
           pacing/
           sessions/
+          startup/
           formats/
 
   idd:
