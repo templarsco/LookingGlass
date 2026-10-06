@@ -264,6 +264,8 @@ def run_case(args, case, output):
     'win:quickSplash=yes',
     'win:alerts=no',
     'win:noScreensaver=no',
+    # the window does not take the focus from whoever is at the PC
+    'win:showInactive=yes',
     'input:grabKeyboard=no',
     'opengl:mipmap=no',
     'opengl:vsync=no',

@@ -569,7 +569,10 @@ bool opengl_renderStartup(LG_Renderer * renderer, bool useDMA)
   const char * version = (const char *)glGetString(GL_VERSION);
   if (!version || sscanf(version, "%d.%d", &maj, &min) != 2)
   {
-    DEBUG_ERROR("Unable to parse the OpenGL version");
+    // glGetString answers NULL when no context is current, as when the
+    // display server could not make this one so
+    DEBUG_ERROR("Unable to parse the OpenGL version%s",
+        version ? "" : ", the driver does not answer");
     return false;
   }
 

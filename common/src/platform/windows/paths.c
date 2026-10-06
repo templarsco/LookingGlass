@@ -108,6 +108,15 @@ static void appDir(const wchar_t * env, REFKNOWNFOLDERID folder,
 
 void lgPathsInit(const char * appName)
 {
+  /* The paths are UTF-8, and the C library opens them by the code page of the
+   * process. The manifest asks for UTF-8 as that, which Windows has honoured
+   * since 10 version 1903: before it, a configuration in a folder with an
+   * accent in it, as a user's name may have, is not found. */
+  if (GetACP() != CP_UTF8)
+    DEBUG_WARN("The code page of the process is %u and not UTF-8, which "
+        "needs Windows 10 version 1903 or later: a path with a character "
+        "that it lacks will not be found", (unsigned)GetACP());
+
   appDir(L"APPDATA"     , &FOLDERID_RoamingAppData, appName, configDir,
       sizeof(configDir));
   appDir(L"LOCALAPPDATA", &FOLDERID_LocalAppData  , appName, dataDir  ,

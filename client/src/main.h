@@ -236,6 +236,7 @@ struct AppParams
   int                  uiSize;
   bool                 jitRender;
   bool                 requestActivation;
+  bool                 showInactive;
   bool                 disableWaitingMessage;
 
   const char         * transport;

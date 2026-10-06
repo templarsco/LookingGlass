@@ -56,6 +56,7 @@ BEGIN
 
     BLOCK "VarFileInfo"
     BEGIN
-        VALUE "Translation", 0x409, 0
+        // the language and the code page of the block above, 040904E4
+        VALUE "Translation", 0x409, 1252
     END
 END

@@ -57,6 +57,10 @@
 #define STALL_MIN         UINT64_C(50000000)
 #define STALL_PERIODS     8
 
+// how long a source that is not the first is used before the ones that failed
+// are asked again
+#define RETRY_DELAY       UINT64_C(5000000000)
+
 struct Histogram
 {
   uint32_t bucket[BUCKETS];
@@ -246,6 +250,28 @@ static void recordTick(struct Win32VBlank * v, uint64_t now)
   LG_UNLOCK(v->lock);
 }
 
+// a blank of the source in use
+static void blankSeen(struct Win32VBlank * v)
+{
+  const uint64_t tick = clockNow(v);
+  recordTick(v, tick);
+  atomic_store_explicit(&v->tickTime, tick, memory_order_release);
+  atomic_store_explicit(&v->tickReal, nanotime(), memory_order_release);
+  atomic_fetch_or_explicit(&v->flags, LG_DS_WAIT_FRAME_CADENCE,
+      memory_order_release);
+  lgSignalEvent(v->event);
+}
+
+// the source in use is another now, which measures from the start
+static void sourceChanged(struct Win32VBlank * v, unsigned current)
+{
+  atomic_store_explicit(&v->source, current, memory_order_release);
+
+  LG_LOCK(v->lock);
+  resetMeasurement(v);
+  LG_UNLOCK(v->lock);
+}
+
 static int vblankThread(void * opaque)
 {
   struct Win32VBlank * v = opaque;
@@ -253,9 +279,43 @@ static int vblankThread(void * opaque)
   if (v->params.threadStart)
     v->params.threadStart();
 
+  const uint64_t retryDelay = v->params.retryDelay ?
+    v->params.retryDelay : RETRY_DELAY;
+
   unsigned current = 0;
+  uint64_t retryAt = 0;  // real time to ask the sources that failed again
+  bool     failed[WIN32_VBLANK_MAX_SOURCES] = { false };
   while (!atomic_load_explicit(&v->stop, memory_order_acquire))
   {
+    if (current > 0 && nanotime() >= retryAt)
+    {
+      // what failed may work again, once the display is back or the driver
+      // is. It is asked in turn, and if none of them can say yet, the source
+      // in use stays, and the measuring that it has made with it
+      retryAt = nanotime() + retryDelay;
+
+      const unsigned count = current < v->params.sourceCount ?
+        current : v->params.sourceCount;
+      for (unsigned i = 0; i < count; ++i)
+      {
+        const Win32VBlankSource * source = &v->params.sources[i];
+        const bool ok = source->wait(source->opaque);
+        if (atomic_load_explicit(&v->stop, memory_order_acquire))
+          goto done;
+
+        if (!ok)
+          continue;
+
+        DEBUG_INFO("The %s source of the vertical blank works again",
+            source->name ? source->name : "unnamed");
+        failed[i] = false;
+        current   = i;
+        sourceChanged(v, current);
+        blankSeen(v);
+        break;
+      }
+    }
+
     if (current >= v->params.sourceCount)
     {
       // nothing can say when the blank is: wake at the display's rate, and
@@ -277,29 +337,25 @@ static int vblankThread(void * opaque)
 
     if (!ok)
     {
-      DEBUG_WARN("The %s source of the vertical blank failed, %s",
-          source->name ? source->name : "unnamed",
-          current + 1 < v->params.sourceCount ?
-            "trying the next one" : "waking by the clock");
+      // once for as long as it does not work, and not each time that it is
+      // asked again
+      if (!failed[current])
+        DEBUG_WARN("The %s source of the vertical blank failed, %s",
+            source->name ? source->name : "unnamed",
+            current + 1 < v->params.sourceCount ?
+              "trying the next one" : "waking by the clock");
+      failed[current] = true;
 
       ++current;
-      atomic_store_explicit(&v->source, current, memory_order_release);
-
-      LG_LOCK(v->lock);
-      resetMeasurement(v);
-      LG_UNLOCK(v->lock);
+      retryAt = nanotime() + retryDelay;
+      sourceChanged(v, current);
       continue;
     }
 
-    const uint64_t tick = clockNow(v);
-    recordTick(v, tick);
-    atomic_store_explicit(&v->tickTime, tick, memory_order_release);
-    atomic_store_explicit(&v->tickReal, nanotime(), memory_order_release);
-    atomic_fetch_or_explicit(&v->flags, LG_DS_WAIT_FRAME_CADENCE,
-        memory_order_release);
-    lgSignalEvent(v->event);
+    blankSeen(v);
   }
 
+done:
   lgSignalEvent(v->exited);
   return 0;
 }

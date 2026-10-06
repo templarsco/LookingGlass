@@ -74,6 +74,11 @@ int alloc_sprintf(char ** str, const char * format, ...)
 
 bool str_containsValue(const char * list, char delimiter, const char * value)
 {
+  // there is no list when a graphics driver has no current context to answer
+  // for the extensions of, as glGetString has it
+  if (!list || !value)
+    return false;
+
   size_t len = strlen(value);
   const char span[] = {delimiter, '\0'};
 

@@ -44,6 +44,7 @@
 
 #include "input_event.h"
 #include "keymap.h"
+#include "placement.h"
 #include "vblank.h"
 #include "vblank_source.h"
 
@@ -1200,6 +1201,27 @@ static bool setPixelFormat(void)
   return true;
 }
 
+#define MAX_WORK_AREAS 16
+
+struct WorkAreas
+{
+  Win32Rect area[MAX_WORK_AREAS];
+  size_t    count;
+};
+
+static BOOL CALLBACK collectWorkArea(HMONITOR monitor, HDC dc, LPRECT rect,
+    LPARAM param)
+{
+  struct WorkAreas * list = (struct WorkAreas *)param;
+  MONITORINFO info = { .cbSize = sizeof(info) };
+  if (list->count < MAX_WORK_AREAS && GetMonitorInfoW(monitor, &info))
+    list->area[list->count++] = (Win32Rect)
+    {
+      info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom
+    };
+  return TRUE;
+}
+
 static bool createWindow(void)
 {
   const LG_DSInitParams * params = &win32.params;
@@ -1269,6 +1291,21 @@ static bool createWindow(void)
     // the configured position is the client area origin
     x = params->x + rect.left;
     y = params->y + rect.top;
+
+    // which is on no monitor if it was saved for one that is not there now,
+    // and a window that is on no screen cannot be taken back by anyone
+    struct WorkAreas monitors = { .count = 0 };
+    EnumDisplayMonitors(NULL, NULL, collectWorkArea, (LPARAM)&monitors);
+
+    Win32Rect placed = { x, y, x + width, y + height };
+    if (win32Placement_fit(&placed, monitors.area, monitors.count))
+    {
+      DEBUG_WARN("The configured window position %d,%d is not on a monitor, "
+          "using %d,%d", params->x, params->y,
+          (int)(placed.left - rect.left), (int)(placed.top - rect.top));
+      x = placed.left;
+      y = placed.top;
+    }
   }
 
   SetWindowPos(win32.window, NULL, x, y, width, height,
@@ -1289,8 +1326,13 @@ static bool createWindow(void)
     startVBlank();
 
   atomic_store(&win32.ready, true);
-  ShowWindow(win32.window, params->maximize ? SW_SHOWMAXIMIZED : SW_SHOW);
-  SetForegroundWindow(win32.window);
+  if (params->showInactive)
+    ShowWindow(win32.window, SW_SHOWNOACTIVATE);
+  else
+  {
+    ShowWindow(win32.window, params->maximize ? SW_SHOWMAXIMIZED : SW_SHOW);
+    SetForegroundWindow(win32.window);
+  }
 
   if (params->fullscreen)
     applyFullscreen(true);

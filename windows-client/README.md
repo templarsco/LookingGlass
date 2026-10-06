@@ -183,9 +183,13 @@ window across two displays, and Windows builds other than 11 were not tried.
 - The client's unit tests in [client/tests](../client/tests) run natively on
   Windows. They cover the LGMP transport (frames, input and clipboard, with a
   host in the same process), the input and mouse state, keybinds, the clipboard,
-  frame scheduling and timing, the transport fallback, the configuration, the
-  Win32 input layer and keymap, and the pacing of the Win32 display server's
-  wait for the vertical blank. The SPICE, file clipboard (FUSE) and
+  frame scheduling and timing, the transport fallback, the configuration and
+  how a configuration file is read (UTF-8 with or without a byte order mark,
+  UTF-16 refused), the conversion of the performance counter at the
+  frequencies that PCs have, where the window goes when its configured
+  position is on no monitor, the Win32 input layer and keymap, the pacing of
+  the Win32 display server's wait for the vertical blank, and the watchdog
+  that ends a shutdown that does not finish. The SPICE, file clipboard (FUSE) and
   rendering tests (GoogleTest with Weston or X11) are Linux only. `ENABLE_TESTS`
   alone only adds the framebuffer capture on Windows, so ask for the unit tests
   as well, in an MSYS2 MINGW64 shell:
@@ -269,6 +273,20 @@ window across two displays, and Windows builds other than 11 were not tried.
   python windows-client/client_session_test.py \
     --producer windows-client/build/lg-windows-client-producer.exe \
     client/build/looking-glass-client.exe
+  ```
+
+- [client_binary_test.py](client_binary_test.py) reads the executable, on any
+  host, and checks what a PC that is not the one that built it needs from
+  it: that it imports only DLLs that Windows has (so no MinGW or MSYS2
+  runtime, and no network library that would make the firewall ask), that
+  its manifest asks for UTF-8 as the code page, per-monitor DPI awareness
+  version 2 and no elevation, that its version resource's language and
+  code page are those of its strings, and that it has ASLR, high entropy ASLR
+  and DEP. CI runs it on the native and on the cross-compiled client. It does
+  not run the program.
+
+  ```sh
+  python windows-client/client_binary_test.py client/build/looking-glass-client.exe
   ```
 
 Focus changes, pointer capture, the keyboard grab, DPI scaling and
