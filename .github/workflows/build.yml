@@ -839,8 +839,12 @@ jobs:
           --output sessions client/build/looking-glass-client.exe
     - name: Check that the client renders nothing for a window that is minimized
       run: |
+        # software rendering of a stream this size costs the client far more
+        # than the threads that poll the guest do, which is what makes it
+        # tell a client that is drawing from one that is not
         GALLIUM_DRIVER=llvmpipe python windows-client/client_idle_test.py \
           --producer windows-client/build/lg-windows-client-producer.exe \
+          --size 1920x1080 --fps 60 \
           --output idle client/build/looking-glass-client.exe
     - name: Check where the client's messages go when it has no console
       run: |

@@ -29,8 +29,9 @@ its window can be seen, while it is minimized and when it is back:
              what the client composes, with every pixel as generated
 
 The test passes if the client logged that it paused and resumed, used under a
-third of the CPU time that it used visible while it was minimized, and
-composed the last frame with the expected pixels after it was restored. The
+third of the CPU time that it used visible while it was minimized (when
+visible it used enough for that to mean something), and composed the last frame
+with the expected pixels after it was restored. The
 window does not take the focus, and is minimized for a few seconds. CPU time is
 the process's own, as Windows counts it: it says nothing of the GPU. It needs
 Windows, and does not run elsewhere."""
@@ -55,12 +56,18 @@ SW_SHOWMINNOACTIVE  = 7
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
-# what the producer serves, unless told otherwise
-SIZE = '256x160'
+# what the producer serves, unless told otherwise: enough for what a visible
+# client does with each frame to cost far more than what it does when no frame
+# is drawn (the threads that poll the guest cost the same either way)
+SIZE = '1280x720'
 FPS  = 120
 
 # a client that is hidden costs at most this much of what it costs visible
 MAX_HIDDEN_FRACTION = 1 / 3
+
+# the least that a visible client has to cost for the test to tell the two
+# apart, as a fraction of a core
+MIN_VISIBLE = 0.03
 
 
 class FILETIME(ctypes.Structure):
@@ -256,13 +263,17 @@ def main():
         'as a fraction of one core: ' +
         ', '.join(f'{state} {value:.3f}' for state, value in results.items()))
   if 'visible' in results and 'minimized' in results:
-    if results['minimized'] > results['visible'] * MAX_HIDDEN_FRACTION:
+    if results['visible'] < MIN_VISIBLE:
+      errors.append('the visible client cost only %.3f of a core: the stream '
+                    'is too small to tell it from a client that is not drawing '
+                    '(try --size and --fps that are larger)' %
+                    results['visible'])
+    elif results['minimized'] > results['visible'] * MAX_HIDDEN_FRACTION:
       errors.append('the client used %.3f of a core minimized and %.3f '
                     'visible: more than %.0f%%' % (results['minimized'],
                     results['visible'], MAX_HIDDEN_FRACTION * 100))
-    if results.get('restored', 0) < results['minimized'] * 2:
-      errors.append('the client did not use more CPU time after it was '
-                    'restored: it may not have resumed')
+    # that it resumed is what the last frame says: it is not composed unless
+    # the client renders again. The CPU time that it takes after is printed
 
   if errors:
     for error in errors:
