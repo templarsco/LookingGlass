@@ -28,6 +28,8 @@ output redirected, and checks where its messages go:
   box       started as Explorer does, with an option that it refuses, it stops
             with a message box that says why, with the last lines of the log
             and the path of the log, and exits with a status that is not 0
+  relative  with a %LOCALAPPDATA% that is not a full path, it writes the log in
+            that folder of the one that it starts in
   redirect  started with its output in a file, it writes there, opens no log
             of its own, shows no box, and exits with a status that is not 0
 
@@ -38,6 +40,7 @@ does not (win:showInactive). It needs Windows, and does not run elsewhere."""
 import argparse
 import ctypes
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -255,6 +258,28 @@ def test_log(args, api, env, local):
   return errors
 
 
+def test_relative(args, api, env, local):
+  """A %LOCALAPPDATA% that is not a full path, as a test or a portable setup
+  may set it, is a folder of the folder that the client starts in."""
+  errors = []
+  relative = Path(f'lg-startup-relative-{os.getpid()}')
+  env = dict(env, APPDATA=str(relative), LOCALAPPDATA=str(relative))
+
+  process = Process(api, client_command(args, []), env, True)
+  try:
+    if process.wait_window(WINDOW_CLASS, args.timeout) is None:
+      errors.append('the client did not show a window')
+    else:
+      time.sleep(0.3)
+      log = relative / 'looking-glass' / 'client.log'
+      if not log.exists():
+        errors.append(f'there is no {log}')
+  finally:
+    process.close()
+    shutil.rmtree(relative, ignore_errors=True)
+  return errors
+
+
 def test_box(args, api, env, local):
   errors = []
   process = Process(api, client_command(args, [BAD_OPTION]), env, True)
@@ -361,10 +386,12 @@ def main():
 
   api = load_api()
   base = Path(args.output or tempfile.mkdtemp(prefix='lg-win-startup-'))
+  base = base.resolve()
   base.mkdir(parents=True, exist_ok=True)
 
   cases = [
     ('log', lambda env, local: test_log(args, api, env, local)),
+    ('relative', lambda env, local: test_relative(args, api, env, local)),
     ('box', lambda env, local: test_box(args, api, env, local)),
     ('redirect', lambda env, local: test_redirect(args, env, local)),
   ]
