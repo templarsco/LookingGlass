@@ -52,6 +52,9 @@
 #include "common/ll.h"
 #include "common/option.h"
 #include "common/proctitle.h"
+#ifdef _WIN32
+#include "common/watchdog.h"
+#endif
 
 #include "message.h"
 #include "core.h"
@@ -4174,9 +4177,23 @@ restart:
   return recoveryExit(&recoveryPrompt, 0);
 }
 
+#ifdef _WIN32
+// how long the shutdown may take before the process is ended
+#define SHUTDOWN_LIMIT_MS 10000
+#endif
+
 static void lg_shutdown(void)
 {
   app_setState(APP_STATE_SHUTDOWN);
+
+#ifdef _WIN32
+  /* The render thread is joined below. If it is stuck in the graphics driver,
+   * as after a reset of the GPU that did not finish, the join does not return
+   * and the window that was closed stays on the desktop. */
+  if (!lgWatchdogArm(SHUTDOWN_LIMIT_MS, "The shutdown"))
+    DEBUG_WARN("Failed to start the shutdown's watchdog");
+#endif
+
   frameScheduler_stop();
 
   if (e_cursorRepaint)

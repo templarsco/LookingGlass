@@ -41,6 +41,7 @@ add_library(lg_common_platform_code STATIC
   proctitle.c
   paths.c
   open.c
+  watchdog.c
 )
 
 target_link_libraries(lg_common_platform_code

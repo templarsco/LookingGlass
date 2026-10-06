@@ -64,6 +64,16 @@ target_link_libraries(placement-tests
 add_test(NAME placement-tests COMMAND placement-tests)
 set_tests_properties(placement-tests PROPERTIES TIMEOUT 20)
 
+if(WIN32)
+  add_executable(watchdog-tests watchdog_test.c)
+  target_link_libraries(watchdog-tests
+    ${EXE_FLAGS}
+    lg_common
+  )
+  add_test(NAME watchdog-tests COMMAND watchdog-tests)
+  set_tests_properties(watchdog-tests PROPERTIES TIMEOUT 60)
+endif()
+
 target_compile_definitions(font-tests PRIVATE
   FONT_TEST_FILE="${PROJECT_TOP}/repos/gui/cimgui/imgui/misc/fonts/DroidSans.ttf"
 )
