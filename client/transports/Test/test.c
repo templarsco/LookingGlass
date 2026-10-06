@@ -70,6 +70,20 @@ struct TestBuffer
   KVMFRFrameBuffer * framebuffer;
 };
 
+/* The cursor that the transport serves, so that a renderer's can be checked
+ * against what is generated here (windows-client/client_cursor_test.py has the
+ * same pictures). It is 16 pixels wide, and 16 high, and a monochrome one has
+ * the masks of Windows' cursors: 16 rows of AND, then 16 of XOR. */
+enum TestCursor
+{
+  TEST_CURSOR_NONE,
+  TEST_CURSOR_COLOR,
+  TEST_CURSOR_MASKED,
+  TEST_CURSOR_MONO,
+};
+
+#define TEST_CURSOR_SIZE 16
+
 struct LG_Transport
 {
   unsigned                width;
@@ -84,6 +98,11 @@ struct LG_Transport
   bool                    input;
   enum TestDamageMode     damageMode;
   unsigned                formatIndex;
+
+  enum TestCursor         cursor;
+  int                     cursorX, cursorY;
+  bool                    pointerSent;
+  uint8_t                 cursorShape[TEST_CURSOR_SIZE * TEST_CURSOR_SIZE * 4];
 
   bool                    connected;
   bool                    framePending;
@@ -182,6 +201,30 @@ static void test_setup(void)
       .description  = "Accept guest input and log every event",
       .type         = OPTION_TYPE_BOOL,
       .value.x_bool = false,
+    },
+    {
+      .module         = "test",
+      .name           = "cursor",
+      .description    = "Serve a cursor of this kind, to check what a renderer "
+                        "draws it as: none, color, masked or mono",
+      .type           = OPTION_TYPE_STRING,
+      .value.x_string = "none",
+    },
+    {
+      .module      = "test",
+      .name        = "cursorX",
+      .description = "The column of the guest's screen that the cursor's left "
+                     "edge is at",
+      .type        = OPTION_TYPE_INT,
+      .value.x_int = 40,
+    },
+    {
+      .module      = "test",
+      .name        = "cursorY",
+      .description = "The row of the guest's screen that the cursor's top edge "
+                     "is at",
+      .type        = OPTION_TYPE_INT,
+      .value.x_int = 24,
     },
     {
       .module         = "test",
@@ -299,6 +342,60 @@ static void test_setHDRMetadata(LG_TransportFrameFormat * format)
   format->hdrMaxFrameAverageLightLevel = 400;
 }
 
+/* A pixel of a color cursor, as the host sends them: BGRA, not premultiplied.
+ * A border that is not there, and in the rest a quadrant each of red, green,
+ * blue and white that half shows what is under it. */
+static uint32_t test_colorCursorPixel(unsigned x, unsigned y)
+{
+  if (!x || !y || x == TEST_CURSOR_SIZE - 1 || y == TEST_CURSOR_SIZE - 1)
+    return 0x00000000;
+
+  if (y < TEST_CURSOR_SIZE / 2)
+    return x < TEST_CURSOR_SIZE / 2 ? 0xFFFF0000 : 0xFF00FF00;
+  return x < TEST_CURSOR_SIZE / 2 ? 0xFF0000FF : 0x80FFFFFF;
+}
+
+/* A masked color cursor: where the alpha is 0 the color replaces what is
+ * under it (red, on the left), and where it is 255 it is XORed with it (white,
+ * on the right), which the renderers leave as it is. */
+static uint32_t test_maskedCursorPixel(unsigned x, unsigned y)
+{
+  return x < TEST_CURSOR_SIZE / 2 ? 0x00FF0000 : 0xFFFFFFFF;
+}
+
+static void test_makeCursorShape(struct LG_Transport * this)
+{
+  uint32_t * pixels = (uint32_t *)this->cursorShape;
+  switch (this->cursor)
+  {
+    case TEST_CURSOR_COLOR:
+    case TEST_CURSOR_MASKED:
+      for (unsigned y = 0; y < TEST_CURSOR_SIZE; ++y)
+        for (unsigned x = 0; x < TEST_CURSOR_SIZE; ++x)
+          pixels[y * TEST_CURSOR_SIZE + x] = this->cursor == TEST_CURSOR_COLOR ?
+            test_colorCursorPixel(x, y) : test_maskedCursorPixel(x, y);
+      break;
+
+    case TEST_CURSOR_MONO:
+      /* two bytes a row, the leftmost pixel the highest bit. The AND mask
+       * keeps what is under the pixel where a bit is set, and the XOR mask
+       * inverts it where a bit is set: black, white, nothing and inverted in the
+       * quadrants, from the top left. */
+      for (unsigned y = 0; y < TEST_CURSOR_SIZE; ++y)
+      {
+        uint8_t * andRow = this->cursorShape + y * 2;
+        uint8_t * xorRow = this->cursorShape + (y + TEST_CURSOR_SIZE) * 2;
+        andRow[0] = andRow[1] = y < TEST_CURSOR_SIZE / 2 ? 0x00 : 0xFF;
+        xorRow[0] = 0x00;
+        xorRow[1] = 0xFF;
+      }
+      break;
+
+    case TEST_CURSOR_NONE:
+      break;
+  }
+}
+
 static bool test_setFormat(struct LG_Transport * this, unsigned index)
 {
   if (this->format.version && this->formatIndex == index)
@@ -387,7 +484,30 @@ static bool test_create(LG_Transport ** result)
   this->input         = option_get_bool("test", "input");
   this->damageMode    = damageMode;
   this->formatIndex  = (unsigned)formatIndex;
+  this->cursorX       = option_get_int("test", "cursorX");
+  this->cursorY       = option_get_int("test", "cursorY");
   test_initPQLUT(this);
+
+  static const char * const cursors[] =
+  {
+    [TEST_CURSOR_NONE]   = "none",
+    [TEST_CURSOR_COLOR]  = "color",
+    [TEST_CURSOR_MASKED] = "masked",
+    [TEST_CURSOR_MONO]   = "mono",
+  };
+  const char * cursor = option_get_string("test", "cursor");
+  int          cursorIndex = -1;
+  for (unsigned i = 0; cursor && i < ARRAY_LENGTH(cursors); ++i)
+    if (strcmp(cursor, cursors[i]) == 0)
+      cursorIndex = (int)i;
+  if (cursorIndex < 0)
+  {
+    DEBUG_ERROR("The test cursor is none, color, masked or mono");
+    free(this);
+    return false;
+  }
+  this->cursor = (enum TestCursor)cursorIndex;
+  test_makeCursorShape(this);
 
   const size_t dataSize =
     bufferStride * this->height * maxBytesPerPixel;
@@ -430,6 +550,7 @@ static LG_TransportStatus test_connect(LG_Transport * this,
 
   this->connected      = true;
   this->framePending   = false;
+  this->pointerSent    = false;
   this->serial         = 0;
   this->bufferIndex    = 0;
   this->nextFrameTime  = nanotime();
@@ -769,6 +890,29 @@ static LG_TransportStatus test_nextPointer(LG_Transport * this,
 {
   if (!this->connected)
     return LG_TRANSPORT_DISCONNECTED;
+
+  // the cursor, its place and its shape, once for each time that it connects
+  if (this->cursor != TEST_CURSOR_NONE && !this->pointerSent)
+  {
+    this->pointerSent = true;
+
+    const bool mono = this->cursor == TEST_CURSOR_MONO;
+    memset(pointer, 0, sizeof(*pointer));
+    pointer->flags  = LG_TRANSPORT_POINTER_POSITION |
+      LG_TRANSPORT_POINTER_VISIBLE_VALID | LG_TRANSPORT_POINTER_VISIBLE |
+      LG_TRANSPORT_POINTER_SHAPE;
+    pointer->x      = this->cursorX;
+    pointer->y      = this->cursorY;
+    pointer->type   = mono ? CURSOR_TYPE_MONOCHROME :
+      this->cursor == TEST_CURSOR_MASKED ? CURSOR_TYPE_MASKED_COLOR :
+      CURSOR_TYPE_COLOR;
+    pointer->width  = TEST_CURSOR_SIZE;
+    pointer->height = mono ? TEST_CURSOR_SIZE * 2 : TEST_CURSOR_SIZE;
+    pointer->pitch  = mono ? 2 : TEST_CURSOR_SIZE * 4;
+    pointer->shape  = this->cursorShape;
+    return LG_TRANSPORT_OK;
+  }
+
   usleep(1000);
   return LG_TRANSPORT_TIMEOUT;
 }
