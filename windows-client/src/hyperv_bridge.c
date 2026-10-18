@@ -613,6 +613,19 @@ static SOCKET createHostListener(const struct BridgeOptions * opts)
   return s;
 }
 
+static void configureSocketBuffers(SOCKET s)
+{
+  BOOL nodelay = TRUE;
+  setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
+      (const char *)&nodelay, sizeof(nodelay));
+
+  int bufSize = 4 * 1024 * 1024;
+  setsockopt(s, SOL_SOCKET, SO_SNDBUF,
+      (const char *)&bufSize, sizeof(bufSize));
+  setsockopt(s, SOL_SOCKET, SO_RCVBUF,
+      (const char *)&bufSize, sizeof(bufSize));
+}
+
 static SOCKET acceptClient(SOCKET listener, uint64_t deadlineNs)
 {
   while (!InterlockedCompareExchange(&stopRequested, 0, 0))
@@ -626,9 +639,7 @@ static SOCKET acceptClient(SOCKET listener, uint64_t deadlineNs)
     SOCKET client = accept(listener, NULL, NULL);
     if (client != INVALID_SOCKET)
     {
-      BOOL nodelay = TRUE;
-      setsockopt(client, IPPROTO_TCP, TCP_NODELAY,
-          (const char *)&nodelay, sizeof(nodelay));
+      configureSocketBuffers(client);
       return client;
     }
   }
@@ -647,6 +658,7 @@ static SOCKET connectToHost(const struct BridgeOptions * opts, uint64_t deadline
       SOCKET s = socket(AF_HYPERV, SOCK_STREAM, HV_PROTOCOL_RAW);
       if (s != INVALID_SOCKET)
       {
+        configureSocketBuffers(s);
         SOCKADDR_HV addr = { 0 };
         addr.Family    = AF_HYPERV;
         addr.VmId      = HV_GUID_PARENT;
@@ -670,9 +682,7 @@ static SOCKET connectToHost(const struct BridgeOptions * opts, uint64_t deadline
       SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
       if (s != INVALID_SOCKET)
       {
-        BOOL nodelay = TRUE;
-        setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
-            (const char *)&nodelay, sizeof(nodelay));
+        configureSocketBuffers(s);
 
         u_long nonBlock = 1;
         ioctlsocket(s, FIONBIO, &nonBlock);
@@ -1002,13 +1012,16 @@ static uint32_t computeCursorShapeSize(const KVMFRCursor * cursor)
 }
 
 static bool drainHostToGuestSocket(SOCKET sock, PLGMPClientQueue pointerQueue,
-    struct InputInjector * inj)
+    struct InputInjector * inj, bool * outDidWork)
 {
   while (socketHasData(sock, 0))
   {
     struct BridgePacketHeader hdr;
     if (!recvAll(sock, &hdr, sizeof(hdr)))
       return false;
+
+    if (outDidWork)
+      *outDidWork = true;
 
     if (hdr.magic != BRIDGE_MAGIC || hdr.version != BRIDGE_VERSION)
     {
@@ -1321,9 +1334,7 @@ static int runGuestBridge(const struct BridgeOptions * opts)
       SOCKET accepted = accept(listener, NULL, NULL);
       if (accepted != INVALID_SOCKET)
       {
-        BOOL nodelay = TRUE;
-        setsockopt(accepted, IPPROTO_TCP, TCP_NODELAY,
-            (const char *)&nodelay, sizeof(nodelay));
+        configureSocketBuffers(accepted);
         sock = accepted;
         prevWidth = prevHeight = prevPitch = prevType = 0;
 
@@ -1381,13 +1392,13 @@ static int runGuestBridge(const struct BridgeOptions * opts)
       }
     }
 
+    bool didWork = false;
     if (sock != INVALID_SOCKET)
     {
-      if (!drainHostToGuestSocket(sock, pointerQueue, &inj))
+      if (!drainHostToGuestSocket(sock, pointerQueue, &inj, &didWork))
         goto peer_disconnected;
     }
 
-    bool didWork = false;
     LGMPMessage msg;
 
     if (!opts->noInject)
@@ -1566,51 +1577,23 @@ static int runGuestBridge(const struct BridgeOptions * opts)
         }
         const uint8_t * pixels = framebuffer_get_buffer(fb);
 
-        if (fullSize > 0)
-        {
-          if (fullSize > shadowCap)
-          {
-            uint8_t * ns = (uint8_t *)realloc(shadowFrame, fullSize);
-            if (ns)
-            {
-              shadowFrame = ns;
-              shadowCap   = fullSize;
-            }
-          }
-          if (shadowFrame && shadowCap >= fullSize)
-          {
-            memcpy(shadowFrame, pixels, fullSize);
-            lastFrame                  = *frame;
-            lastFrame.damageRectsCount = 0;
-            lastFrameFlags             = msg.udata;
-            lastFrameSize              = fullSize;
-            hasLastFrame               = true;
-          }
-        }
-
-        if (sock == INVALID_SOCKET)
-        {
-          lgmpClientMessageDone(frameQueue);
-          continue;
-        }
-
         uint32_t bpp = frame->stride ? (frame->pitch / frame->stride) : 4u;
         if (bpp == 0 || bpp > 16)
           bpp = 4u;
 
-        bool sameGeometry =
-          frame->frameWidth  == prevWidth  &&
-          frame->frameHeight == prevHeight &&
-          frame->pitch       == prevPitch  &&
-          frame->type        == prevType;
+        bool sameShadowGeometry =
+          hasLastFrame &&
+          frame->frameWidth  == lastFrame.frameWidth  &&
+          frame->frameHeight == lastFrame.frameHeight &&
+          frame->pitch       == lastFrame.pitch       &&
+          frame->type        == lastFrame.type;
 
-        bool sendRects = false;
+        bool rectsValid = false;
         size_t rectsPayloadSize = sizeof(struct BridgeFramePacket);
-        if (sameGeometry &&
-            frame->damageRectsCount > 0 &&
+        if (frame->damageRectsCount > 0 &&
             frame->damageRectsCount <= KVMFR_MAX_DAMAGE_RECTS)
         {
-          sendRects = true;
+          rectsValid = true;
           for (uint32_t r = 0; r < frame->damageRectsCount; ++r)
           {
             KVMFRFrameDamageRect rc = frame->damageRects[r];
@@ -1625,16 +1608,75 @@ static int runGuestBridge(const struct BridgeOptions * opts)
                 rc.y + rc.height > dataHeight ||
                 rc.width == 0 || rc.height == 0)
             {
-              sendRects = false;
+              rectsValid = false;
               break;
             }
             uint32_t rowBytes = rc.width * bpp;
             rectsPayloadSize += sizeof(struct BridgeRectEntry) +
                                 (size_t)rowBytes * rc.height;
           }
-          if (rectsPayloadSize >= sizeof(struct BridgeFramePacket) + (fullSize * 3u) / 4u)
-            sendRects = false;
         }
+
+        if (fullSize > 0)
+        {
+          if (fullSize > shadowCap)
+          {
+            uint8_t * ns = (uint8_t *)realloc(shadowFrame, fullSize);
+            if (ns)
+            {
+              shadowFrame = ns;
+              shadowCap   = fullSize;
+            }
+          }
+          if (shadowFrame && shadowCap >= fullSize)
+          {
+            if (sameShadowGeometry && rectsValid)
+            {
+              for (uint32_t r = 0; r < frame->damageRectsCount; ++r)
+              {
+                KVMFRFrameDamageRect rc = frame->damageRects[r];
+                if (frame->type == FRAME_TYPE_BGR_32)
+                {
+                  uint32_t origX   = rc.x;
+                  uint32_t scaledX = (origX * 3u) / 4u;
+                  rc.x     = scaledX;
+                  rc.width = (((origX + rc.width) * 3u + 3u) / 4u) - scaledX;
+                }
+                uint32_t rowBytes = rc.width * bpp;
+                for (uint32_t y = 0; y < rc.height; ++y)
+                {
+                  size_t rowOff =
+                    (size_t)(rc.y + y) * frame->pitch + (size_t)rc.x * bpp;
+                  memcpy(shadowFrame + rowOff, pixels + rowOff, rowBytes);
+                }
+              }
+            }
+            else
+            {
+              memcpy(shadowFrame, pixels, fullSize);
+            }
+            lastFrame                  = *frame;
+            lastFrame.damageRectsCount = 0;
+            lastFrameFlags             = msg.udata;
+            lastFrameSize              = fullSize;
+            hasLastFrame               = true;
+          }
+        }
+
+        if (sock == INVALID_SOCKET)
+        {
+          lgmpClientMessageDone(frameQueue);
+          continue;
+        }
+
+        bool sameGeometry =
+          frame->frameWidth  == prevWidth  &&
+          frame->frameHeight == prevHeight &&
+          frame->pitch       == prevPitch  &&
+          frame->type        == prevType;
+
+        bool sendRects = sameGeometry && rectsValid &&
+          (rectsPayloadSize < sizeof(struct BridgeFramePacket) + (fullSize * 3u) / 4u);
 
         bool ok = false;
         if (sendRects)
@@ -1694,6 +1736,7 @@ static int runGuestBridge(const struct BridgeOptions * opts)
             .frame         = *frame,
             .frameDataSize = fullSize
           };
+          fp.frame.damageRectsCount = 0;
           struct BridgePacketHeader hdr =
           {
             .magic       = BRIDGE_MAGIC,
@@ -1702,9 +1745,11 @@ static int runGuestBridge(const struct BridgeOptions * opts)
             .flags       = msg.udata,
             .payloadSize = (uint32_t)(sizeof(fp) + fullSize)
           };
+          const uint8_t * fullSrc =
+            (shadowFrame && shadowCap >= fullSize) ? shadowFrame : pixels;
           ok = sendAll(sock, &hdr, sizeof(hdr)) &&
                sendAll(sock, &fp, sizeof(fp)) &&
-               sendAll(sock, pixels, fullSize);
+               sendAll(sock, fullSrc, fullSize);
         }
 
         prevWidth  = frame->frameWidth;
@@ -1722,7 +1767,7 @@ static int runGuestBridge(const struct BridgeOptions * opts)
           /* Give any pending input / cursor returns a brief window to arrive */
           for (unsigned i = 0; i < 20; ++i)
           {
-            if (!drainHostToGuestSocket(sock, pointerQueue, &inj))
+            if (!drainHostToGuestSocket(sock, pointerQueue, &inj, NULL))
               break;
             Sleep(5);
           }
@@ -1767,6 +1812,8 @@ out:
   return ret;
 }
 
+#define HOST_FRAME_SLOTS (LGMP_Q_FRAME_LEN + 2)
+
 struct HostSession
 {
   PLGMPHost             host;
@@ -1775,7 +1822,7 @@ struct HostSession
   PLGMPHostQueue        inputQueue;
   PLGMPHostStream       inputStreams[KVMFR_INPUT_STREAM_ENDPOINT_COUNT];
   KVMFRStreamDescriptor streamDescriptors[KVMFR_INPUT_STREAM_ENDPOINT_COUNT];
-  PLGMPMemory           frameMem[LGMP_Q_FRAME_LEN];
+  PLGMPMemory           frameMem[HOST_FRAME_SLOTS];
   uint32_t              frameMemSize;
   unsigned              frameIndex;
   uint32_t              frameSerial;
@@ -1872,7 +1919,7 @@ static void hostSessionFree(struct HostSession * hs)
 {
   if (hs->shadowFrame)
     _aligned_free(hs->shadowFrame);
-  for (unsigned i = 0; i < LGMP_Q_FRAME_LEN; ++i)
+  for (unsigned i = 0; i < HOST_FRAME_SLOTS; ++i)
     if (hs->frameMem[i])
       lgmpHostMemFree(&hs->frameMem[i]);
   for (unsigned i = 0; i < LGMP_Q_POINTER_LEN; ++i)
@@ -1975,11 +2022,11 @@ static bool hostSessionEnsureFrameMem(struct HostSession * hs,
   if (hs->frameMem[0] && hs->frameMemSize >= needed && hs->shadowCap >= frameDataSize)
     return true;
 
-  for (unsigned i = 0; i < LGMP_Q_FRAME_LEN; ++i)
+  for (unsigned i = 0; i < HOST_FRAME_SLOTS; ++i)
     if (hs->frameMem[i])
       lgmpHostMemFree(&hs->frameMem[i]);
 
-  for (unsigned i = 0; i < LGMP_Q_FRAME_LEN; ++i)
+  for (unsigned i = 0; i < HOST_FRAME_SLOTS; ++i)
   {
     if (lgmpHostMemAllocAligned(hs->host, needed, pageSize,
           &hs->frameMem[i]) != LGMP_OK)
@@ -2023,7 +2070,6 @@ static bool hostSessionPostShadowFrame(struct HostSession * hs,
   const uint32_t offset   = pageSize - (uint32_t)sizeof(KVMFRFrameBuffer);
 
   PLGMPMemory slot = hs->frameMem[hs->frameIndex];
-  hs->frameIndex = (hs->frameIndex + 1u) % LGMP_Q_FRAME_LEN;
 
   KVMFRFrame * dstFrame = (KVMFRFrame *)lgmpHostMemPtr(slot);
   *dstFrame             = *srcFrame;
@@ -2032,6 +2078,7 @@ static bool hostSessionPostShadowFrame(struct HostSession * hs,
 
   KVMFRFrameBuffer * fb = (KVMFRFrameBuffer *)((uint8_t *)dstFrame + offset);
   framebuffer_prepare(fb);
+  framebuffer_write(fb, hs->shadowFrame, frameDataSize);
 
   LGMP_STATUS qst = lgmpHostQueuePost(hs->frameQueue, flags, slot);
   if (qst == LGMP_ERR_QUEUE_FULL)
@@ -2039,11 +2086,12 @@ static bool hostSessionPostShadowFrame(struct HostSession * hs,
   if (qst != LGMP_OK)
     return false;
 
-  framebuffer_write(fb, hs->shadowFrame, frameDataSize);
+  hs->frameIndex = (hs->frameIndex + 1u) % HOST_FRAME_SLOTS;
   return true;
 }
 
-static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock)
+static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock,
+    bool * outDidWork)
 {
   if (!hs->host)
     return true;
@@ -2059,6 +2107,8 @@ static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock)
     fullFrame.damageRectsCount = 0;
     hostSessionPostShadowFrame(hs, &fullFrame, hs->lastFrameFlags,
         hs->lastFrameDataSize);
+    if (outDidWork)
+      *outDidWork = true;
   }
 
   if (hs->pointerQueue && lgmpHostQueueNewSubs(hs->pointerQueue) > 0 &&
@@ -2067,6 +2117,8 @@ static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock)
   {
     lgmpHostQueuePost(hs->pointerQueue, hs->lastPointerFlags,
         hs->lastPointerSlot);
+    if (outDidWork)
+      *outDidWork = true;
   }
 
   bool inputNewSubs = hs->inputQueue &&
@@ -2080,6 +2132,8 @@ static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock)
       break;
 
     lgmpHostAckData(hs->pointerQueue);
+    if (outDidWork)
+      *outDidWork = true;
     if (size == sizeof(pos) &&
         pos.msg.type == KVMFR_MESSAGE_SETCURSORPOS)
     {
@@ -2120,11 +2174,15 @@ static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock)
             &hs->streamEpoch);
         hostSessionPublishInputStatus(hs);
         inputNewSubs = false;
+        if (outDidWork)
+          *outDidWork = true;
       }
     }
     else if (inputNewSubs)
     {
       hostSessionPublishInputStatus(hs);
+      if (outDidWork)
+        *outDidWork = true;
     }
   }
 
@@ -2136,6 +2194,9 @@ static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock)
       const LGMP_STATUS st = lgmpHostStreamReadPeek(hs->inputStreams[0], &buffer);
       if (st != LGMP_OK)
         break;
+
+      if (outDidWork)
+        *outDidWork = true;
 
       KVMFRInputMessage msg = { 0 };
       if (buffer.size >= sizeof(msg))
@@ -2221,11 +2282,16 @@ accept_next:
     if (deadlineNs && nanotime() >= deadlineNs)
       break;
 
-    if (hs.host && !hostPumpReverseChannels(&hs, client))
+    bool didWork = false;
+    if (hs.host && !hostPumpReverseChannels(&hs, client, &didWork))
       break;
 
-    if (!socketHasData(client, 1))
+    if (!socketHasData(client, 0))
+    {
+      if (!didWork)
+        Sleep(1);
       continue;
+    }
 
     struct BridgePacketHeader hdr;
     if (!recvAll(client, &hdr, sizeof(hdr)))
@@ -2306,7 +2372,7 @@ accept_next:
       {
         for (unsigned i = 0; i < 20; ++i)
         {
-          if (!hostPumpReverseChannels(&hs, client))
+          if (!hostPumpReverseChannels(&hs, client, NULL))
             break;
           Sleep(5);
         }
@@ -2387,7 +2453,7 @@ accept_next:
       {
         for (unsigned i = 0; i < 20; ++i)
         {
-          if (!hostPumpReverseChannels(&hs, client))
+          if (!hostPumpReverseChannels(&hs, client, NULL))
             break;
           Sleep(5);
         }
@@ -2433,9 +2499,14 @@ out:
   return ret;
 }
 
+HWND MessageHWND = NULL;
+
 int main(int argc, char * argv[])
 {
   debug_init();
+  windowsSetTimerResolution();
+  windowsDisablePowerThrottling();
+  SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
 
   struct BridgeOptions opts;
   if (!parseArgs(argc, argv, &opts))
