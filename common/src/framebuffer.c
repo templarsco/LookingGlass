@@ -341,7 +341,10 @@ bool framebuffer_write_avx2(KVMFRFrameBuffer * frame,
     wp   += 128;
 
     if (wp % FB_CHUNK_SIZE == 0)
+    {
+      _mm_sfence();
       atomic_store_explicit(&frame->wp, wp, memory_order_release);
+    }
   }
 
   if (size > 63)
@@ -358,7 +361,10 @@ bool framebuffer_write_avx2(KVMFRFrameBuffer * frame,
     wp   += 64;
 
     if (wp % FB_CHUNK_SIZE == 0)
+    {
+      _mm_sfence();
       atomic_store_explicit(&frame->wp, wp, memory_order_release);
+    }
   }
 
   if (size)
@@ -367,6 +373,7 @@ bool framebuffer_write_avx2(KVMFRFrameBuffer * frame,
     wp += size;
   }
 
+  _mm_sfence();
   atomic_store_explicit(&frame->wp, wp, memory_order_release);
 
 #ifdef FB_PROFILE
