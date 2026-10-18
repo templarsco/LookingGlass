@@ -33,8 +33,11 @@ third of the CPU time that it used visible while it was minimized (when
 visible it used enough for that to mean something), and composed the last frame
 with the expected pixels after it was restored. The
 window does not take the focus, and is minimized for a few seconds. CPU time is
-the process's own, as Windows counts it: it says nothing of the GPU. It needs
-Windows, and does not run elsewhere."""
+the process's own, counted in the cycles that its threads ran (as Windows
+counts them, QueryProcessCycleTime) against the cycles that a busy core runs in
+a second, which is exact where the time that Windows charges by the tick is not,
+as a program that wakes a few times a second is charged a whole tick for each:
+it says nothing of the GPU. It needs Windows, and does not run elsewhere."""
 
 import argparse
 import ctypes
@@ -70,13 +73,6 @@ MAX_HIDDEN_FRACTION = 1 / 3
 MIN_VISIBLE = 0.03
 
 
-class FILETIME(ctypes.Structure):
-  _fields_ = [('low', wintypes.DWORD), ('high', wintypes.DWORD)]
-
-  def seconds(self):
-    return ((self.high << 32) | self.low) / 1e7
-
-
 def load_api():
   kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
   user32   = ctypes.WinDLL('user32', use_last_error=True)
@@ -86,8 +82,11 @@ def load_api():
   kernel32.OpenProcess.restype = wintypes.HANDLE
   kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL,
       wintypes.DWORD]
-  kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + \
-      [ctypes.POINTER(FILETIME)] * 4
+  kernel32.QueryProcessCycleTime.argtypes = [wintypes.HANDLE,
+      ctypes.POINTER(ctypes.c_ulonglong)]
+  kernel32.QueryThreadCycleTime.argtypes = [wintypes.HANDLE,
+      ctypes.POINTER(ctypes.c_ulonglong)]
+  kernel32.GetCurrentThread.restype = wintypes.HANDLE
   kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 
   user32.EnumWindows.argtypes = [window_proc, wintypes.LPARAM]
@@ -118,28 +117,44 @@ def find_window(api, pid):
   return found[0] if found else None
 
 
-def cpu_seconds(api, pid):
-  """The kernel and user time that the process has used, in seconds."""
+def cpu_cycles(api, pid):
+  """The cycles that the threads of the process have run, those that have
+  ended too."""
   kernel32 = api[0]
   handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
   if not handle:
     raise OSError(ctypes.get_last_error(), 'OpenProcess failed')
   try:
-    created, exited, kernel, user = (FILETIME() for _ in range(4))
-    kernel32.GetProcessTimes(handle, ctypes.byref(created),
-        ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user))
-    return kernel.seconds() + user.seconds()
+    cycles = ctypes.c_ulonglong()
+    if not kernel32.QueryProcessCycleTime(handle, ctypes.byref(cycles)):
+      raise OSError(ctypes.get_last_error(), 'QueryProcessCycleTime failed')
+    return cycles.value
   finally:
     kernel32.CloseHandle(handle)
 
 
-def measure(api, pid, seconds):
+def core_hertz(api):
+  """The cycles that a core runs in a second, as it is now: this thread, with
+  nothing else to do, for a fifth of a second."""
+  kernel32 = api[0]
+  thread = kernel32.GetCurrentThread()
+  before = ctypes.c_ulonglong()
+  after  = ctypes.c_ulonglong()
+  kernel32.QueryThreadCycleTime(thread, ctypes.byref(before))
+  start = time.perf_counter()
+  while time.perf_counter() - start < 0.2:
+    pass
+  kernel32.QueryThreadCycleTime(thread, ctypes.byref(after))
+  return (after.value - before.value) / (time.perf_counter() - start)
+
+
+def measure(api, pid, seconds, hertz):
   """The CPU that the process used over a time, as a fraction of one core."""
-  before = cpu_seconds(api, pid)
+  before = cpu_cycles(api, pid)
   start  = time.monotonic()
   time.sleep(seconds)
-  used   = cpu_seconds(api, pid) - before
-  return used / (time.monotonic() - start)
+  used   = cpu_cycles(api, pid) - before
+  return used / hertz / (time.monotonic() - start)
 
 
 def main():
@@ -221,20 +236,21 @@ def main():
       return 1
 
     user32 = api[1]
+    hertz  = core_hertz(api)
     time.sleep(1.5)
-    results['visible'] = measure(api, client.pid, args.seconds)
+    results['visible'] = measure(api, client.pid, args.seconds, hertz)
 
     user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
     time.sleep(0.7)
     if not user32.IsIconic(hwnd):
       errors.append('the window is not minimized')
-    results['minimized'] = measure(api, client.pid, args.seconds)
+    results['minimized'] = measure(api, client.pid, args.seconds, hertz)
 
     user32.ShowWindow(hwnd, SW_SHOWNOACTIVATE)
     time.sleep(0.7)
     if user32.IsIconic(hwnd):
       errors.append('the window is still minimized')
-    results['restored'] = measure(api, client.pid, args.seconds)
+    results['restored'] = measure(api, client.pid, args.seconds, hertz)
 
     try:
       status = client.wait(timeout=args.timeout)
@@ -260,7 +276,7 @@ def main():
     errors.append('the client did not capture the last frame')
 
   print(f'{args.size} at {args.fps} frames per second; CPU time of the client, '
-        'as a fraction of one core: ' +
+        f'as a fraction of one core ({hertz / 1e9:.2f} GHz): ' +
         ', '.join(f'{state} {value:.3f}' for state, value in results.items()))
   if 'visible' in results and 'minimized' in results:
     if results['visible'] < MIN_VISIBLE:

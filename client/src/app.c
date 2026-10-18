@@ -802,6 +802,12 @@ bool app_getHDRDescFailed(void)
   return atomic_load(&g_state.hdrDescFailed);
 }
 
+void app_frameSubmitted(void)
+{
+  if (g_state.ds->frameSubmitted)
+    g_state.ds->frameSubmitted();
+}
+
 #ifdef ENABLE_EGL
 EGLDisplay app_getEGLDisplay(void)
 {
