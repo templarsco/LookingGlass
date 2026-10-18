@@ -115,6 +115,7 @@ if(WIN32)
     lg_common
     lgmp
     advapi32
+    gdi32
     user32
     ws2_32
   )

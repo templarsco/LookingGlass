@@ -915,26 +915,7 @@ static int cursorRepaintThread(void * unused)
  * Returns true if the render thread slept, and has to look again. */
 static bool renderPaused(void)
 {
-  static bool paused = false;
-
-  bool hidden = false;
-  if (!app_getProp(LG_DS_WINDOW_HIDDEN, &hidden))
-    hidden = false;
-
-  if (hidden != paused)
-  {
-    paused = hidden;
-    if (hidden)
-      DEBUG_INFO("The window cannot be seen, rendering is paused");
-    else
-      DEBUG_INFO("The window can be seen, rendering resumes");
-  }
-
-  if (!hidden)
-    return false;
-
-  nsleep(HIDDEN_POLL_NS);
-  return true;
+  return false;
 }
 
 static int renderThread(void * unused)

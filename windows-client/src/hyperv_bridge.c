@@ -1061,6 +1061,126 @@ static bool drainHostToGuestSocket(SOCKET sock, PLGMPClientQueue pointerQueue,
   return true;
 }
 
+static bool extractWin32CursorShape(HCURSOR hCur, KVMFRCursor * cursor,
+    uint8_t * shapeBuf, uint32_t * outShapeSize)
+{
+  if (!hCur || !cursor || !shapeBuf || !outShapeSize)
+    return false;
+
+  ICONINFO ii = { 0 };
+  if (!GetIconInfo(hCur, &ii))
+    return false;
+
+  bool ok = false;
+  HDC hdc = GetDC(NULL);
+  if (!hdc)
+    goto cleanup;
+
+  BITMAP bm = { 0 };
+  HBITMAP hbm = ii.hbmColor ? ii.hbmColor : ii.hbmMask;
+  if (!hbm || !GetObject(hbm, sizeof(bm), &bm))
+    goto cleanup_dc;
+
+  uint32_t w = (uint32_t)bm.bmWidth;
+  uint32_t h = ii.hbmColor ? (uint32_t)bm.bmHeight : (uint32_t)(bm.bmHeight / 2);
+  if (w == 0 || h == 0 || w > 256 || h > 256)
+    goto cleanup_dc;
+
+  uint32_t byteSize = w * h * 4u;
+  if (byteSize > MAX_POINTER_SHAPE_SIZE)
+    goto cleanup_dc;
+
+  BITMAPINFO bmi = { 0 };
+  bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+  bmi.bmiHeader.biWidth       = (LONG)w;
+  bmi.bmiHeader.biHeight      = -(LONG)h;
+  bmi.bmiHeader.biPlanes      = 1;
+  bmi.bmiHeader.biBitCount    = 32;
+  bmi.bmiHeader.biCompression = BI_RGB;
+
+  if (ii.hbmColor)
+  {
+    if (!GetDIBits(hdc, ii.hbmColor, 0, h, shapeBuf, &bmi, DIB_RGB_COLORS))
+      goto cleanup_dc;
+
+    bool hasAlpha = false;
+    uint32_t * px = (uint32_t *)shapeBuf;
+    for (uint32_t i = 0; i < w * h; ++i)
+    {
+      if ((px[i] & 0xFF000000u) != 0)
+      {
+        hasAlpha = true;
+        break;
+      }
+    }
+
+    if (!hasAlpha && ii.hbmMask)
+    {
+      uint32_t * maskPx = (uint32_t *)malloc(byteSize);
+      if (maskPx)
+      {
+        if (GetDIBits(hdc, ii.hbmMask, 0, h, maskPx, &bmi, DIB_RGB_COLORS))
+        {
+          for (uint32_t i = 0; i < w * h; ++i)
+          {
+            uint32_t m = maskPx[i] & 0x00FFFFFFu;
+            uint32_t c = px[i]     & 0x00FFFFFFu;
+            px[i] = (m == 0) ? (0xFF000000u | c) :
+                    (c != 0) ? (0xFF000000u | c) : 0x00000000u;
+          }
+        }
+        free(maskPx);
+      }
+    }
+  }
+  else
+  {
+    BITMAPINFO mbmi = bmi;
+    mbmi.bmiHeader.biHeight = -(LONG)(h * 2u);
+    uint32_t * maskPx = (uint32_t *)malloc(byteSize * 2u);
+    if (!maskPx)
+      goto cleanup_dc;
+
+    if (!GetDIBits(hdc, ii.hbmMask, 0, h * 2u, maskPx, &mbmi, DIB_RGB_COLORS))
+    {
+      free(maskPx);
+      goto cleanup_dc;
+    }
+
+    uint32_t * dstPx = (uint32_t *)shapeBuf;
+    for (uint32_t i = 0; i < w * h; ++i)
+    {
+      uint32_t andVal = maskPx[i]         & 0x00FFFFFFu;
+      uint32_t xorVal = maskPx[i + w * h] & 0x00FFFFFFu;
+      if (andVal == 0)
+        dstPx[i] = xorVal ? 0xFFFFFFFFu : 0xFF000000u;
+      else if (xorVal != 0)
+        dstPx[i] = 0xFF000000u;
+      else
+        dstPx[i] = 0x00000000u;
+    }
+    free(maskPx);
+  }
+
+  cursor->hx     = (int8_t)ii.xHotspot;
+  cursor->hy     = (int8_t)ii.yHotspot;
+  cursor->width  = w;
+  cursor->height = h;
+  cursor->pitch  = w * 4u;
+  cursor->type   = CURSOR_TYPE_COLOR;
+  *outShapeSize  = byteSize;
+  ok = true;
+
+cleanup_dc:
+  ReleaseDC(NULL, hdc);
+cleanup:
+  if (ii.hbmColor)
+    DeleteObject(ii.hbmColor);
+  if (ii.hbmMask)
+    DeleteObject(ii.hbmMask);
+  return ok;
+}
+
 static int runGuestBridge(const struct BridgeOptions * opts)
 {
   const uint64_t deadlineNs = opts->timeoutSec ?
@@ -1131,6 +1251,10 @@ static int runGuestBridge(const struct BridgeOptions * opts)
   uint32_t         lastCursorShapeSize = 0;
   uint32_t         lastCursorFlags     = 0;
   bool             hasLastCursor       = false;
+  HCURSOR          prevWinCursor       = NULL;
+  LONG             prevWinCursorX      = -32768;
+  LONG             prevWinCursorY      = -32768;
+  bool             prevWinCursorVis    = false;
   unsigned         relayedFrames       = 0;
   uint32_t         prevWidth           = 0;
   uint32_t         prevHeight          = 0;
@@ -1266,6 +1390,73 @@ static int runGuestBridge(const struct BridgeOptions * opts)
     bool didWork = false;
     LGMPMessage msg;
 
+    if (!opts->noInject)
+    {
+      CURSORINFO ci = { .cbSize = sizeof(ci) };
+      if (GetCursorInfo(&ci))
+      {
+        bool vis          = (ci.flags & CURSOR_SHOWING) != 0;
+        bool shapeChanged = vis && (ci.hCursor != prevWinCursor || !hasLastCursor);
+        bool posChanged   = vis && (ci.ptScreenPos.x != prevWinCursorX ||
+                                    ci.ptScreenPos.y != prevWinCursorY);
+        bool visChanged   = (vis != prevWinCursorVis) || !hasLastCursor;
+
+        if (shapeChanged || posChanged || visChanged)
+        {
+          uint32_t cFlags = CURSOR_FLAG_VISIBLE_VALID |
+                            (vis ? CURSOR_FLAG_VISIBLE : 0);
+          if (vis)
+          {
+            cFlags |= CURSOR_FLAG_POSITION;
+            lastCursor.x   = (int16_t)ci.ptScreenPos.x;
+            lastCursor.y   = (int16_t)ci.ptScreenPos.y;
+            prevWinCursorX = ci.ptScreenPos.x;
+            prevWinCursorY = ci.ptScreenPos.y;
+          }
+          if (shapeChanged)
+          {
+            uint32_t newShapeSize = 0;
+            if (extractWin32CursorShape(ci.hCursor, &lastCursor,
+                  lastCursorShape, &newShapeSize))
+            {
+              lastCursorShapeSize = newShapeSize;
+              cFlags             |= CURSOR_FLAG_SHAPE;
+              prevWinCursor       = ci.hCursor;
+            }
+          }
+          prevWinCursorVis = vis;
+          lastCursorFlags  = cFlags |
+            (lastCursorShapeSize > 0 ? CURSOR_FLAG_SHAPE : 0);
+          hasLastCursor    = true;
+          didWork          = true;
+
+          if (sock != INVALID_SOCKET)
+          {
+            uint32_t sendShapeSize = (cFlags & CURSOR_FLAG_SHAPE) ?
+              lastCursorShapeSize : 0;
+            struct BridgePointerPacket pkt =
+            {
+              .cursor    = lastCursor,
+              .shapeSize = sendShapeSize
+            };
+            struct BridgePacketHeader hdr =
+            {
+              .magic       = BRIDGE_MAGIC,
+              .version     = BRIDGE_VERSION,
+              .type        = BRIDGE_PKT_POINTER,
+              .flags       = cFlags,
+              .payloadSize = (uint32_t)(sizeof(pkt) + sendShapeSize)
+            };
+            if (!sendAll(sock, &hdr, sizeof(hdr)) ||
+                !sendAll(sock, &pkt, sizeof(pkt)) ||
+                (sendShapeSize > 0 &&
+                 !sendAll(sock, lastCursorShape, sendShapeSize)))
+              goto peer_disconnected;
+          }
+        }
+      }
+    }
+
     if (pointerQueue)
     {
       LGMP_STATUS pst = lgmpClientProcess(pointerQueue, &msg);
@@ -1288,38 +1479,52 @@ static int runGuestBridge(const struct BridgeOptions * opts)
           computeCursorShapeSize(cursor) : 0;
         const uint8_t * shapePtr = (const uint8_t *)(cursor + 1);
 
-        lastCursor      = *cursor;
-        lastCursorFlags = msg.udata;
-        if ((msg.udata & CURSOR_FLAG_SHAPE) &&
-            shapeSize > 0 && shapeSize <= MAX_POINTER_SHAPE_SIZE)
-        {
-          memcpy(lastCursorShape, shapePtr, shapeSize);
-          lastCursorShapeSize = shapeSize;
-        }
-        else if (msg.udata & CURSOR_FLAG_SHAPE)
-          lastCursorShapeSize = 0;
-        hasLastCursor = true;
+        /*
+         * Indirect Display Drivers (such as ParsecVdd) report Visible=FALSE
+         * and no pointer shape on DXGI Output Duplication even when the
+         * Win32 desktop cursor is visible. Ignore empty invisible pointer
+         * updates from DXGI when the Win32 cursor is actively tracked.
+         */
+        bool ignoreDxgiHide = !opts->noInject &&
+                              prevWinCursorVis &&
+                              !(msg.udata & CURSOR_FLAG_VISIBLE) &&
+                              !(msg.udata & CURSOR_FLAG_SHAPE);
 
         bool ok = true;
-        if (sock != INVALID_SOCKET)
+        if (!ignoreDxgiHide)
         {
-          struct BridgePointerPacket pkt =
+          lastCursor      = *cursor;
+          lastCursorFlags = msg.udata;
+          if ((msg.udata & CURSOR_FLAG_SHAPE) &&
+              shapeSize > 0 && shapeSize <= MAX_POINTER_SHAPE_SIZE)
           {
-            .cursor    = *cursor,
-            .shapeSize = shapeSize
-          };
-          struct BridgePacketHeader hdr =
-          {
-            .magic       = BRIDGE_MAGIC,
-            .version     = BRIDGE_VERSION,
-            .type        = BRIDGE_PKT_POINTER,
-            .flags       = msg.udata,
-            .payloadSize = (uint32_t)(sizeof(pkt) + shapeSize)
-          };
+            memcpy(lastCursorShape, shapePtr, shapeSize);
+            lastCursorShapeSize = shapeSize;
+          }
+          else if (msg.udata & CURSOR_FLAG_SHAPE)
+            lastCursorShapeSize = 0;
+          hasLastCursor = true;
 
-          ok = sendAll(sock, &hdr, sizeof(hdr)) &&
-               sendAll(sock, &pkt, sizeof(pkt)) &&
-               (shapeSize == 0 || sendAll(sock, shapePtr, shapeSize));
+          if (sock != INVALID_SOCKET)
+          {
+            struct BridgePointerPacket pkt =
+            {
+              .cursor    = *cursor,
+              .shapeSize = shapeSize
+            };
+            struct BridgePacketHeader hdr =
+            {
+              .magic       = BRIDGE_MAGIC,
+              .version     = BRIDGE_VERSION,
+              .type        = BRIDGE_PKT_POINTER,
+              .flags       = msg.udata,
+              .payloadSize = (uint32_t)(sizeof(pkt) + shapeSize)
+            };
+
+            ok = sendAll(sock, &hdr, sizeof(hdr)) &&
+                 sendAll(sock, &pkt, sizeof(pkt)) &&
+                 (shapeSize == 0 || sendAll(sock, shapePtr, shapeSize));
+          }
         }
         lgmpClientMessageDone(pointerQueue);
         if (!ok)
@@ -1573,6 +1778,7 @@ struct HostSession
   PLGMPMemory           frameMem[LGMP_Q_FRAME_LEN];
   uint32_t              frameMemSize;
   unsigned              frameIndex;
+  uint32_t              frameSerial;
   PLGMPMemory           pointerMem[LGMP_Q_POINTER_LEN];
   unsigned              pointerIndex;
   PLGMPMemory           inputStatusMem[LGMP_Q_INPUT_LEN];
@@ -1617,6 +1823,9 @@ static KVMFRStreamDescriptor exportStreamDescriptor(
 static void hostSessionPublishInputStatus(struct HostSession * hs)
 {
   if (!hs->inputQueue || !hs->inputStatusMem[0])
+    return;
+
+  if (lgmpHostQueuePending(hs->inputQueue) >= LGMP_Q_INPUT_LEN)
     return;
 
   PLGMPMemory slot = hs->inputStatusMem[hs->inputStatusIndex];
@@ -1799,6 +2008,15 @@ static bool hostSessionEnsureFrameMem(struct HostSession * hs,
 static bool hostSessionPostShadowFrame(struct HostSession * hs,
     const KVMFRFrame * srcFrame, uint32_t flags, uint32_t frameDataSize)
 {
+  hs->lastFrame         = *srcFrame;
+  hs->lastFrameFlags    = flags;
+  hs->lastFrameDataSize = frameDataSize;
+  hs->lastFrameValid    = true;
+
+  lgmpHostQueueNewSubs(hs->frameQueue);
+  if (lgmpHostQueuePending(hs->frameQueue) >= LGMP_Q_FRAME_LEN)
+    return true;
+
   SYSTEM_INFO si;
   GetSystemInfo(&si);
   const uint32_t pageSize = si.dwPageSize ? si.dwPageSize : 4096u;
@@ -1808,21 +2026,20 @@ static bool hostSessionPostShadowFrame(struct HostSession * hs,
   hs->frameIndex = (hs->frameIndex + 1u) % LGMP_Q_FRAME_LEN;
 
   KVMFRFrame * dstFrame = (KVMFRFrame *)lgmpHostMemPtr(slot);
-  *dstFrame        = *srcFrame;
-  dstFrame->offset = offset;
+  *dstFrame             = *srcFrame;
+  dstFrame->frameSerial = ++hs->frameSerial;
+  dstFrame->offset      = offset;
 
   KVMFRFrameBuffer * fb = (KVMFRFrameBuffer *)((uint8_t *)dstFrame + offset);
   framebuffer_prepare(fb);
 
-  lgmpHostQueueNewSubs(hs->frameQueue);
-  if (lgmpHostQueuePost(hs->frameQueue, flags, slot) != LGMP_OK)
+  LGMP_STATUS qst = lgmpHostQueuePost(hs->frameQueue, flags, slot);
+  if (qst == LGMP_ERR_QUEUE_FULL)
+    return true;
+  if (qst != LGMP_OK)
     return false;
 
   framebuffer_write(fb, hs->shadowFrame, frameDataSize);
-  hs->lastFrame         = *srcFrame;
-  hs->lastFrameFlags    = flags;
-  hs->lastFrameDataSize = frameDataSize;
-  hs->lastFrameValid    = true;
   return true;
 }
 
@@ -1851,6 +2068,9 @@ static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock)
     lgmpHostQueuePost(hs->pointerQueue, hs->lastPointerFlags,
         hs->lastPointerSlot);
   }
+
+  bool inputNewSubs = hs->inputQueue &&
+                      (lgmpHostQueueNewSubs(hs->inputQueue) > 0);
 
   for (;;)
   {
@@ -1899,7 +2119,12 @@ static bool hostPumpReverseChannels(struct HostSession * hs, SOCKET clientSock)
         lgmpHostStreamBind(hs->inputStreams[0], hs->boundClientID,
             &hs->streamEpoch);
         hostSessionPublishInputStatus(hs);
+        inputNewSubs = false;
       }
+    }
+    else if (inputNewSubs)
+    {
+      hostSessionPublishInputStatus(hs);
     }
   }
 
@@ -2019,8 +2244,7 @@ accept_next:
         break;
       if (hdr.payloadSize > 0 && !recvAll(client, udata, hdr.payloadSize))
         break;
-      hostSessionFree(&hs);
-      if (!hostSessionInit(&hs, &shm, udata, hdr.payloadSize))
+      if (!hs.host && !hostSessionInit(&hs, &shm, udata, hdr.payloadSize))
         break;
     }
     else if (hdr.type == BRIDGE_PKT_POINTER)
@@ -2046,7 +2270,8 @@ accept_next:
         break;
 
       lgmpHostQueueNewSubs(hs.pointerQueue);
-      lgmpHostQueuePost(hs.pointerQueue, hdr.flags, slot);
+      if (lgmpHostQueuePending(hs.pointerQueue) < LGMP_Q_POINTER_LEN)
+        lgmpHostQueuePost(hs.pointerQueue, hdr.flags, slot);
       hs.lastPointerSlot  = slot;
       hs.lastPointerFlags = hdr.flags;
       hs.lastPointerValid = true;

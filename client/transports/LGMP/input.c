@@ -1178,9 +1178,22 @@ static void applyInputStatus(LGMPInput * input,
 
 static void processInputStatus(LGMPInput * input, bool * wake)
 {
+  if (!input->queue)
+  {
+    if (lgmpClientSubscribe(input->client, LGMP_Q_INPUT, &input->queue) != LGMP_OK)
+      return;
+  }
+
   LGMP_STATUS result = lgmpClientAdvanceToLast(input->queue);
   if (result == LGMP_ERR_QUEUE_EMPTY)
     return;
+  if (result == LGMP_ERR_QUEUE_TIMEOUT ||
+      result == LGMP_ERR_QUEUE_UNSUBSCRIBED)
+  {
+    input->queue = NULL;
+    lgmpClientSubscribe(input->client, LGMP_Q_INPUT, &input->queue);
+    return;
+  }
   if (result != LGMP_OK)
   {
     connectionFailed(input, result);
@@ -1191,6 +1204,13 @@ static void processInputStatus(LGMPInput * input, bool * wake)
   result = lgmpClientProcess(input->queue, &message);
   if (result == LGMP_ERR_QUEUE_EMPTY)
     return;
+  if (result == LGMP_ERR_QUEUE_TIMEOUT ||
+      result == LGMP_ERR_QUEUE_UNSUBSCRIBED)
+  {
+    input->queue = NULL;
+    lgmpClientSubscribe(input->client, LGMP_Q_INPUT, &input->queue);
+    return;
+  }
   if (result != LGMP_OK)
   {
     connectionFailed(input, result);
@@ -1204,7 +1224,13 @@ static void processInputStatus(LGMPInput * input, bool * wake)
     memcpy(&status, message.mem, sizeof(status));
 
   result = lgmpClientMessageDone(input->queue);
-  if (result != LGMP_OK)
+  if (result == LGMP_ERR_QUEUE_TIMEOUT ||
+      result == LGMP_ERR_QUEUE_UNSUBSCRIBED)
+  {
+    input->queue = NULL;
+    lgmpClientSubscribe(input->client, LGMP_Q_INPUT, &input->queue);
+  }
+  else if (result != LGMP_OK)
   {
     connectionFailed(input, result);
     return;
