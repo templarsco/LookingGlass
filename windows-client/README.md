@@ -99,9 +99,12 @@ conversions, with the bytes that a guest that is not to be trusted can send,
 clipboard and a core that the test makes. Both pass under AddressSanitizer,
 UndefinedBehaviorSanitizer and, for the second, ThreadSanitizer on Linux.
 [win32_clipboard_real_test.c](../client/tests/win32_clipboard_real_test.c) uses
-Windows' own clipboard, in a window station that it makes and moves the process
-to, so that it is not the PC's: another program copies, pastes, and
-is pasted from. **Not tested: a guest.** No LGMP host that speaks the clipboard
+Windows' own clipboard, in a window station that it moves the process to, so
+that it is not the PC's: another program copies, pastes, and is pasted from.
+That station is the hidden one of the logon session, the only one that a user
+who is not an administrator can make, and every process of the user that asks
+for one gets the same, so a run of the test waits for any other run to end.
+**Not tested: a guest.** No LGMP host that speaks the clipboard
 exists in these tools, so the path from the core to the LGMP queue and the Windows
 guest's helper is covered by the client's existing tests of those, and not
 by this one.

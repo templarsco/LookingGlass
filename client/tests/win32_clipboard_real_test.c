@@ -21,10 +21,15 @@
 /* The clipboard of the Windows display server, on Windows' own clipboard, with
  * a core that the test makes. The clipboard is Windows', so the test does not
  * use the one of the PC: the clipboard belongs to a window station, and the
- * test makes one of its own, with a desktop in it, and moves the process there
- * before it has a window, a hook or the clipboard open. Then the threads that
- * the clipboard starts are in it too. It looks at where it is before it
- * touches the clipboard, and does not if that is the station of the PC. */
+ * test moves the process to another one, with a desktop in it, before it has a
+ * window, a hook or the clipboard open. Then the threads that the clipboard
+ * starts are in it too. It looks at where it is before it touches the
+ * clipboard, and does not if that is the station of the PC.
+ *
+ * That station is not the test's alone. A user who is not an administrator
+ * may only make one with no name, and Windows gives the hidden station of the
+ * logon session for that, the same for every process of the user that asks.
+ * So a run of the test waits for any other run to end before it moves. */
 
 #include "test.h"
 
@@ -44,9 +49,23 @@
 static HWINSTA g_station;
 static HDESK   g_desktop;
 
-// returns false if the process is not in a window station of its own, which is
+// returns false if another run of the test holds the station's clipboard for
+// a minute, which is when the test does not go on
+static bool waitForOtherRuns(void)
+{
+  HANDLE mutex = CreateMutexW(NULL, FALSE,
+      L"Local\\LookingGlassClipboardRealTest");
+  if (!mutex)
+    return false;
+
+  // held until the process ends, which lets the next run go
+  const DWORD result = WaitForSingleObject(mutex, 60000);
+  return result == WAIT_OBJECT_0 || result == WAIT_ABANDONED;
+}
+
+// returns false if the process is not in a hidden window station, which is
 // when the test does not go on
-static bool enterOwnStation(void)
+static bool enterHiddenStation(void)
 {
   HWINSTA own = GetProcessWindowStation();
 
@@ -222,11 +241,6 @@ static bool noTextOnClipboard(void)
   return !IsClipboardFormatAvailable(CF_UNICODETEXT);
 }
 
-static bool bitmapOnClipboard(void)
-{
-  return IsClipboardFormatAvailable(CF_DIB) != FALSE;
-}
-
 static bool pngOnClipboard(void)
 {
   return IsClipboardFormatAvailable(RegisterClipboardFormatW(L"PNG")) != FALSE;
@@ -272,13 +286,17 @@ static void testGuestText(void)
   Sleep(200);
   CHECK(g_core.requests == requests);
 
-  // and not for the history of the clipboard, or the cloud's
+  // and not for the history of the clipboard, or the cloud's. The window puts
+  // those on after the text and then closes the clipboard, which a program
+  // that opens the clipboard waits for
+  CHECK(openForOtherProgram());
   CHECK(IsClipboardFormatAvailable(RegisterClipboardFormatW(
           L"CanIncludeInClipboardHistory")));
   CHECK(IsClipboardFormatAvailable(RegisterClipboardFormatW(
           L"CanUploadToCloudClipboard")));
   CHECK(IsClipboardFormatAvailable(RegisterClipboardFormatW(
           L"ExcludeClipboardContentFromMonitorProcessing")));
+  CloseClipboard();
 
   // a program pastes, and Windows asks the window to fill it in
   size_t size = 0;
@@ -310,18 +328,18 @@ static void testGuestText(void)
   CHECK(g_core.releases == 0);
 }
 
-static void makeBitmap(uint8_t dib[56])
+static void makeBitmap(uint8_t dib[56], uint8_t seed)
 {
   memset(dib, 0, 56);
   dib[0] = 40; dib[4] = 2; dib[8] = 2; dib[12] = 1; dib[14] = 24;
   for (size_t i = 40; i < 56; ++i)
-    dib[i] = (uint8_t)(i * 3);
+    dib[i] = (uint8_t)(i * 3 + seed);
 }
 
 static void testImages(void)
 {
   uint8_t dib[56];
-  makeBitmap(dib);
+  makeBitmap(dib, 0);
 
   // a bitmap copied by another program is offered, and sent as a BMP file
   ResetEvent(g_core.notified);
@@ -346,24 +364,40 @@ static void testImages(void)
   CHECK(back && dibSize > 40);
   free(back);
 
-  // and one that the guest copied is put on the clipboard as a bitmap
+  // and another one, which the guest copied, is put on the clipboard as a
+  // bitmap
+  uint8_t guestDib[56];
+  makeBitmap(guestDib, 1);
   uint8_t bmp[14 + 56] = { 'B', 'M' };
   bmp[2]  = sizeof(bmp);
   bmp[10] = 54;
-  memcpy(bmp + 14, dib, sizeof(dib));
+  memcpy(bmp + 14, guestDib, sizeof(guestDib));
   g_core.replyData = bmp;
   g_core.replySize = sizeof(bmp);
+  const LONG requests = g_core.requests;
 
+  // the bitmap above was copied with no window, so the clipboard is the
+  // window's once it has emptied it for the guest's
   win32CBNotice(LG_CLIPBOARD_DATA_BMP);
-  CHECK(eventually(bitmapOnClipboard));
-  CHECK(IsClipboardFormatAvailable(CF_BITMAP));   // which Windows makes
+  CHECK(eventually(ownedByUs));
 
+  // Windows makes the other bitmaps of it when the window closes the
+  // clipboard, which a program that opens the clipboard waits for
+  CHECK(openForOtherProgram());
+  CHECK(IsClipboardFormatAvailable(CF_DIB));
+  CHECK(IsClipboardFormatAvailable(CF_BITMAP));
+  CHECK(IsClipboardFormatAvailable(CF_DIBV5));
+  CloseClipboard();
+  CHECK(g_core.requests == requests);
+
+  // a program pastes it, and the window asks the guest for it
   size_t size = 0;
   uint8_t * pasted = pasteAs(CF_DIB, &size);
   CHECK(pasted);
-  CHECK(size >= sizeof(dib));
-  CHECK(memcmp(pasted, dib, sizeof(dib)) == 0);
+  CHECK(size >= sizeof(guestDib));
+  CHECK(memcmp(pasted, guestDib, sizeof(guestDib)) == 0);
   free(pasted);
+  CHECK(g_core.requests == requests + 1);
 }
 
 static void testGuestPng(void)
@@ -453,9 +487,15 @@ static int run(void)
 
 int main(void)
 {
-  if (!enterOwnStation())
+  if (!waitForOtherRuns())
   {
-    puts("win32 clipboard real tests skipped: no window station of its own");
+    puts("win32 clipboard real tests skipped: another run did not end");
+    return EXIT_SUCCESS;
+  }
+
+  if (!enterHiddenStation())
+  {
+    puts("win32 clipboard real tests skipped: no hidden window station");
     return EXIT_SUCCESS;
   }
 

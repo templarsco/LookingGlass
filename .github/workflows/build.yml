@@ -799,7 +799,7 @@ jobs:
       run: |
         cd client/build
         ctest --output-on-failure -j$(nproc)
-    - name: Check the clipboard on Windows' own, in a window station of its own
+    - name: Check the clipboard on Windows' own, in a hidden window station
       run: |
         # ctest passes the test if it cannot make a station, which is a
         # reason to look, and this step does not

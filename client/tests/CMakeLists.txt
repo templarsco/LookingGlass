@@ -119,7 +119,7 @@ if(WIN32)
   add_test(NAME clipboard-wic-tests COMMAND clipboard-wic-tests)
   set_tests_properties(clipboard-wic-tests PROPERTIES TIMEOUT 60)
 
-  # Windows' own clipboard, in a window station that the test makes
+  # Windows' own clipboard, in the hidden window station of the logon session
   add_executable(win32-clipboard-real-tests
     win32_clipboard_real_test.c
     ../displayservers/Win32/clipboard.c
