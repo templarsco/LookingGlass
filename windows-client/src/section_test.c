@@ -28,6 +28,7 @@
 
 #include "common/debug.h"
 #include "common/ivshmem.h"
+#include "common/option.h"
 
 #include <windows.h>
 #include <sddl.h>
@@ -146,6 +147,35 @@ int main(void)
       ivshmemFree(&dev);
     }
     CloseHandle(section);
+  }
+
+  {
+    ivshmemOptionsInit();
+    char nameArg[128];
+    char sectionName[96];
+    snprintf(sectionName, sizeof(sectionName), "Local\\lg-host-section-%lu",
+        GetCurrentProcessId());
+    snprintf(nameArg, sizeof(nameArg), "os:shmFile=%s", sectionName);
+    char * argv[] = { "section-test", nameArg, "os:shmSize=2" };
+    struct IVSHMEM hostDev = { 0 };
+    struct IVSHMEM clientDev = { 0 };
+    if (!option_parse(3, argv) || !ivshmemInit(&hostDev) ||
+        !ivshmemOpen(&hostDev) || !hostDev.mem ||
+        hostDev.size != 2u * SECTION_SIZE ||
+        !ivshmemOpenDev(&clientDev, sectionName) || !clientDev.mem ||
+        clientDev.size != 2u * SECTION_SIZE)
+    {
+      printf("FAIL os:shmFile: host section was not created or opened\n");
+      ++failures;
+    }
+    else
+      printf("ok   os:shmFile: host creates a private section and client opens it\n");
+
+    ivshmemClose(&clientDev);
+    ivshmemFree(&clientDev);
+    ivshmemClose(&hostDev);
+    ivshmemFree(&hostDev);
+    option_free();
   }
 
   LocalFree(sid);

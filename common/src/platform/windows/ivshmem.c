@@ -35,8 +35,9 @@
 struct IVSHMEMInfo
 {
   // the guest's IVSHMEM driver, or a named section on the PC running the VM
-  bool   section;
-  HANDLE handle;
+  bool     section;
+  HANDLE   handle;
+  char   * name;
 };
 
 void ivshmemOptionsInit(void)
@@ -49,10 +50,217 @@ void ivshmemOptionsInit(void)
       .type           = OPTION_TYPE_INT,
       .value.x_int    = 0
     },
+    {
+      .module         = "os",
+      .name           = "shmFile",
+      .description    = "The shared memory section name to create or open instead of an IVSHMEM device",
+      .type           = OPTION_TYPE_STRING,
+      .value.x_string = ""
+    },
+    {
+      .module         = "os",
+      .name           = "shmSize",
+      .description    = "The shared memory section size in MiB when creating os:shmFile",
+      .type           = OPTION_TYPE_INT,
+      .value.x_int    = 128
+    },
     {0}
   };
 
   option_register(options);
+}
+
+static void * tokenInfo(HANDLE token, TOKEN_INFORMATION_CLASS type);
+static bool sectionIsPrivate(HANDLE handle, const char * name);
+
+static wchar_t * sectionNameWide(const char * shmDevice)
+{
+  const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+      shmDevice, -1, NULL, 0);
+  wchar_t * name = length > 0 ? malloc(length * sizeof(*name)) : NULL;
+  if (!name || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        shmDevice, -1, name, length))
+  {
+    DEBUG_ERROR("Invalid shared memory section name: %s", shmDevice);
+    free(name);
+    return NULL;
+  }
+  return name;
+}
+
+static HANDLE sectionCreatePrivate(const wchar_t * name, const char * label,
+    uint32_t sizeBytes)
+{
+  HANDLE               section = NULL;
+  HANDLE               token   = NULL;
+  TOKEN_USER         * user    = NULL;
+  char               * userSid = NULL;
+  PSECURITY_DESCRIPTOR sd      = NULL;
+
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+  {
+    DEBUG_WINERROR("OpenProcessToken failed", GetLastError());
+    goto out;
+  }
+
+  if (!(user = tokenInfo(token, TokenUser)))
+    goto out;
+
+  if (!ConvertSidToStringSidA(user->User.Sid, &userSid))
+  {
+    DEBUG_WINERROR("ConvertSidToStringSidA failed", GetLastError());
+    goto out;
+  }
+
+  char sddl[512];
+  snprintf(sddl, sizeof(sddl),
+      "O:%sD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;%s)",
+      userSid, userSid);
+
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl,
+        SDDL_REVISION_1, &sd, NULL))
+  {
+    DEBUG_WINERROR("ConvertStringSecurityDescriptorToSecurityDescriptorA "
+        "failed", GetLastError());
+    goto out;
+  }
+
+  SECURITY_ATTRIBUTES sa =
+  {
+    .nLength              = sizeof(sa),
+    .lpSecurityDescriptor = sd,
+    .bInheritHandle       = FALSE
+  };
+
+  section = CreateFileMappingW(INVALID_HANDLE_VALUE, &sa,
+      PAGE_READWRITE | SEC_COMMIT, 0, sizeBytes, name);
+  if (!section)
+  {
+    DEBUG_WINERROR("Failed to create the shared memory section",
+        GetLastError());
+    goto out;
+  }
+
+  if (!sectionIsPrivate(section, label))
+  {
+    CloseHandle(section);
+    section = NULL;
+  }
+
+out:
+  LocalFree(sd);
+  LocalFree(userSid);
+  free(user);
+  if (token)
+    CloseHandle(token);
+  return section;
+}
+
+static bool sectionMapCommitted(HANDLE handle, const char * label,
+    void ** outMem, unsigned int * outSize)
+{
+  uint8_t * mem = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE,
+      0, 0, 0);
+  if (!mem)
+  {
+    DEBUG_WINERROR("Failed to map the shared memory section", GetLastError());
+    return false;
+  }
+
+  // the view covers the whole section, but a section that commits memory in
+  // parts reports one region per part, and reserved pages cannot be read
+  size_t size      = 0;
+  bool   committed = true;
+  MEMORY_BASIC_INFORMATION region;
+  while (VirtualQuery(mem + size, &region, sizeof(region)) == sizeof(region) &&
+      region.AllocationBase == mem)
+  {
+    committed &= region.State == MEM_COMMIT;
+    size      += region.RegionSize;
+  }
+
+  if (!committed)
+  {
+    DEBUG_ERROR("The shared memory section %s is not fully committed", label);
+    UnmapViewOfFile(mem);
+    return false;
+  }
+
+  if (!size || size > UINT_MAX)
+  {
+    DEBUG_ERROR("Unsupported shared memory section size: %" PRIuPTR, size);
+    UnmapViewOfFile(mem);
+    return false;
+  }
+
+  *outMem  = mem;
+  *outSize = (unsigned int)size;
+  return true;
+}
+
+static bool ivshmemInitSection(struct IVSHMEM * dev, const char * shmFile,
+    int shmSizeMiB)
+{
+  DEBUG_INFO("Shared memory    : %s", shmFile);
+
+  wchar_t * name = sectionNameWide(shmFile);
+  if (!name)
+    return false;
+
+  HANDLE handle = OpenFileMappingW(
+      FILE_MAP_READ | FILE_MAP_WRITE | READ_CONTROL, FALSE, name);
+  if (handle)
+  {
+    free(name);
+    if (!sectionIsPrivate(handle, shmFile))
+    {
+      CloseHandle(handle);
+      return false;
+    }
+  }
+  else
+  {
+    const DWORD openError = GetLastError();
+    if (openError != ERROR_FILE_NOT_FOUND)
+    {
+      free(name);
+      DEBUG_WINERROR("Failed to open the shared memory section", openError);
+      return false;
+    }
+
+    if (shmSizeMiB <= 0 ||
+        (uint64_t)shmSizeMiB * 1048576ULL > UINT_MAX)
+    {
+      free(name);
+      DEBUG_ERROR("Invalid os:shmSize (%d MiB)", shmSizeMiB);
+      return false;
+    }
+
+    const uint32_t sizeBytes = (uint32_t)((uint64_t)shmSizeMiB * 1048576ULL);
+    handle = sectionCreatePrivate(name, shmFile, sizeBytes);
+    free(name);
+    if (!handle)
+      return false;
+  }
+
+  struct IVSHMEMInfo * info = calloc(1, sizeof(*info));
+  char               * copy = strdup(shmFile);
+  if (!info || !copy)
+  {
+    DEBUG_ERROR("Failed to allocate memory");
+    free(copy);
+    free(info);
+    CloseHandle(handle);
+    return false;
+  }
+
+  info->section = true;
+  info->handle  = handle;
+  info->name    = copy;
+  dev->opaque   = info;
+  dev->size     = 0;
+  dev->mem      = NULL;
+  return true;
 }
 
 struct IVSHMEMData
@@ -78,6 +286,10 @@ static int ivshmemComparator(const void * a_, const void * b_)
 bool ivshmemInit(struct IVSHMEM * dev)
 {
   DEBUG_ASSERT(dev && !dev->opaque);
+
+  const char * shmFile = option_get_string("os", "shmFile");
+  if (shmFile && *shmFile)
+    return ivshmemInitSection(dev, shmFile, option_get_int("os", "shmSize"));
 
   HANDLE                           handle;
   HDEVINFO                         devInfoSet;
@@ -204,7 +416,7 @@ bool ivshmemInit(struct IVSHMEM * dev)
   free(infData);
   SetupDiDestroyDeviceInfoList(devInfoSet);
 
-  struct IVSHMEMInfo * info = malloc(sizeof(*info));
+  struct IVSHMEMInfo * info = calloc(1, sizeof(*info));
 
   info->section = false;
   info->handle  = handle;
@@ -220,6 +432,9 @@ bool ivshmemOpen(struct IVSHMEM * dev)
   DEBUG_ASSERT(dev && dev->opaque && !dev->mem);
 
   struct IVSHMEMInfo * info = (struct IVSHMEMInfo *)dev->opaque;
+  if (info->section)
+    return sectionMapCommitted(info->handle,
+        info->name ? info->name : "os:shmFile", &dev->mem, &dev->size);
 
   IVSHMEM_SIZE size;
   if (!DeviceIoControl(info->handle, IOCTL_IVSHMEM_REQUEST_SIZE, NULL, 0, &size,
@@ -455,16 +670,9 @@ bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
 
   DEBUG_INFO("Shared memory    : %s", shmDevice);
 
-  const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-      shmDevice, -1, NULL, 0);
-  wchar_t * name = length > 0 ? malloc(length * sizeof(*name)) : NULL;
-  if (!name || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        shmDevice, -1, name, length))
-  {
-    DEBUG_ERROR("Invalid shared memory section name: %s", shmDevice);
-    free(name);
+  wchar_t * name = sectionNameWide(shmDevice);
+  if (!name)
     return false;
-  }
 
   // READ_CONTROL lets us check who else can open the section
   HANDLE handle = OpenFileMappingW(
@@ -483,45 +691,15 @@ bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
     return false;
   }
 
-  uint8_t * mem = MapViewOfFile(handle, FILE_MAP_READ | FILE_MAP_WRITE,
-      0, 0, 0);
-  if (!mem)
+  void       * mem  = NULL;
+  unsigned int size = 0;
+  if (!sectionMapCommitted(handle, shmDevice, &mem, &size))
   {
-    DEBUG_WINERROR("Failed to map the shared memory section", GetLastError());
     CloseHandle(handle);
     return false;
   }
 
-  // the view covers the whole section, but a section that commits memory in
-  // parts reports one region per part, and reserved pages cannot be read
-  size_t size      = 0;
-  bool   committed = true;
-  MEMORY_BASIC_INFORMATION region;
-  while (VirtualQuery(mem + size, &region, sizeof(region)) == sizeof(region) &&
-      region.AllocationBase == mem)
-  {
-    committed &= region.State == MEM_COMMIT;
-    size      += region.RegionSize;
-  }
-
-  if (!committed)
-  {
-    DEBUG_ERROR("The shared memory section %s is not fully committed",
-        shmDevice);
-    UnmapViewOfFile(mem);
-    CloseHandle(handle);
-    return false;
-  }
-
-  if (!size || size > UINT_MAX)
-  {
-    DEBUG_ERROR("Unsupported shared memory section size: %" PRIuPTR, size);
-    UnmapViewOfFile(mem);
-    CloseHandle(handle);
-    return false;
-  }
-
-  struct IVSHMEMInfo * info = malloc(sizeof(*info));
+  struct IVSHMEMInfo * info = calloc(1, sizeof(*info));
   if (!info)
   {
     DEBUG_ERROR("Failed to allocate memory");
@@ -535,7 +713,7 @@ bool ivshmemOpenDev(struct IVSHMEM * dev, const char * shmDevice)
 
   dev->opaque = info;
   dev->mem    = mem;
-  dev->size   = (unsigned int)size;
+  dev->size   = size;
   return true;
 }
 
@@ -550,8 +728,11 @@ void ivshmemClose(struct IVSHMEM * dev)
 
   if (info->section)
   {
-    UnmapViewOfFile(dev->mem);
-    CloseHandle(info->handle);
+    if (dev->mem)
+      UnmapViewOfFile(dev->mem);
+    if (info->handle)
+      CloseHandle(info->handle);
+    free(info->name);
     free(info);
     dev->opaque = NULL;
     dev->size   = 0;
@@ -580,6 +761,9 @@ void ivshmemFree(struct IVSHMEM * dev)
   DEBUG_ASSERT(!dev->mem);
   struct IVSHMEMInfo * info = (struct IVSHMEMInfo *)dev->opaque;
 
+  if (info->section && info->handle)
+    CloseHandle(info->handle);
+  free(info->name);
   free(info);
   dev->opaque = NULL;
 }

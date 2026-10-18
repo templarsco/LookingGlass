@@ -109,6 +109,28 @@ if(WIN32)
   set_target_properties(lg-windows-client-section-test PROPERTIES
     LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
 
+  # relays an LGMP session between guest and host named sections over AF_HYPERV/TCP
+  add_executable(lg-hyperv-bridge src/hyperv_bridge.c src/session.c)
+  target_link_libraries(lg-hyperv-bridge
+    lg_common
+    lgmp
+    advapi32
+    user32
+    ws2_32
+  )
+  set_target_properties(lg-hyperv-bridge PROPERTIES
+    LINK_FLAGS "-static -Wl,--gc-sections -Wl,--nxcompat")
+
+  # end-to-end loopback test for lg-hyperv-bridge
+  add_executable(lg-windows-client-bridge-test src/bridge_test.c src/session.c)
+  target_link_libraries(lg-windows-client-bridge-test
+    lg_common
+    lgmp
+    advapi32
+  )
+  set_target_properties(lg-windows-client-bridge-test PROPERTIES
+    LINK_FLAGS "-Wl,--gc-sections -Wl,--nxcompat")
+
   # the HCS shared memory probe boots VMs with its own init, which needs a
   # compiler for x86_64 Linux: the host's GCC when cross-compiling from
   # Linux, else Clang with LLD
@@ -174,6 +196,8 @@ if(BUILD_TESTING)
   if(WIN32)
     add_test(NAME section COMMAND lg-windows-client-section-test)
     set_tests_properties(section PROPERTIES TIMEOUT 60)
+    add_test(NAME bridge COMMAND lg-windows-client-bridge-test)
+    set_tests_properties(bridge PROPERTIES TIMEOUT 60)
   endif()
 endif()
 

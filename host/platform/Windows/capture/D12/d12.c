@@ -1310,14 +1310,16 @@ static bool d12_enumerateDevices(
   wchar_t * optOutput  = NULL;
   if (_optAdapter)
   {
-    optAdapter = malloc((strlen(_optAdapter) + 1) * 2);
-    mbstowcs(optAdapter, _optAdapter, strlen(_optAdapter));
+    const size_t count = strlen(_optAdapter) + 1;
+    optAdapter = calloc(count, sizeof(*optAdapter));
+    mbstowcs(optAdapter, _optAdapter, count);
   }
 
   if (_optOutput)
   {
-    optOutput = malloc((strlen(_optOutput) + 1) * 2);
-    mbstowcs(optOutput, _optOutput, strlen(_optOutput));
+    const size_t count = strlen(_optOutput) + 1;
+    optOutput = calloc(count, sizeof(*optOutput));
+    mbstowcs(optOutput, _optOutput, count);
   }
 
   for(
@@ -1331,6 +1333,8 @@ static bool d12_enumerateDevices(
     {
       DEBUG_WINERROR("Failed to get the device description", hr);
       comRef_release(adapter);
+      free(optAdapter);
+      free(optOutput );
       return false;
     }
 
