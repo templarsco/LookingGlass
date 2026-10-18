@@ -1109,299 +1109,439 @@ static int runGuestBridge(const struct BridgeOptions * opts)
     return EXIT_FAILURE;
   }
 
-  int      ret          = EXIT_FAILURE;
-  SOCKET   sock         = INVALID_SOCKET;
-  PLGMPClient client    = NULL;
-  uint8_t * deltaBuf    = NULL;
-  size_t    deltaCap    = 0;
-  unsigned  relayedFrames = 0;
+  int              ret                 = EXIT_FAILURE;
+  SOCKET           sock                = INVALID_SOCKET;
+  PLGMPClient      client              = NULL;
+  PLGMPClientQueue frameQueue          = NULL;
+  PLGMPClientQueue pointerQueue        = NULL;
+  uint32_t         udataSize           = 0;
+  uint32_t         clientID            = 0;
+  uint32_t         remoteVersion       = 0;
+  uint8_t        * udata               = NULL;
+  uint8_t        * deltaBuf            = NULL;
+  size_t           deltaCap            = 0;
+  uint8_t        * shadowFrame         = NULL;
+  size_t           shadowCap           = 0;
+  KVMFRFrame       lastFrame           = { 0 };
+  uint32_t         lastFrameFlags      = 0;
+  uint32_t         lastFrameSize       = 0;
+  bool             hasLastFrame        = false;
+  KVMFRCursor      lastCursor          = { 0 };
+  uint8_t          lastCursorShape[MAX_POINTER_SHAPE_SIZE];
+  uint32_t         lastCursorShapeSize = 0;
+  uint32_t         lastCursorFlags     = 0;
+  bool             hasLastCursor       = false;
+  unsigned         relayedFrames       = 0;
+  uint32_t         prevWidth           = 0;
+  uint32_t         prevHeight          = 0;
+  uint32_t         prevPitch           = 0;
+  uint32_t         prevType            = 0;
   struct InputInjector inj =
   {
     .noInject = opts->noInject,
     .logFile  = opts->inputLogPath ? fopen(opts->inputLogPath, "w") : NULL
   };
 
-next_peer:
-  if (sock == INVALID_SOCKET)
-  {
-    sock = opts->tcpListen ?
-      acceptClient(listener, deadlineNs) :
-      connectToHost(opts, deadlineNs);
-    if (sock == INVALID_SOCKET)
-      goto out;
-  }
-
-  if (client)
-    lgmpClientFree(&client);
-
-  if (lgmpClientInit(shm.mem, shm.size, &client) != LGMP_OK)
-  {
-    DEBUG_ERROR("lgmpClientInit failed");
-    goto out;
-  }
-
-  uint32_t  udataSize     = 0;
-  uint32_t  clientID      = 0;
-  uint32_t  remoteVersion = 0;
-  uint8_t * udata         = NULL;
   while (!InterlockedCompareExchange(&stopRequested, 0, 0))
   {
     if (deadlineNs && nanotime() >= deadlineNs)
-      goto out;
-
-    LGMP_STATUS st = lgmpClientSessionInit(client, &udataSize, &udata,
-        &clientID, &remoteVersion);
-    if (st == LGMP_OK)
       break;
-    Sleep(10);
-  }
-  if (!udata)
-    goto out;
 
-  if (!sendPacket(sock, BRIDGE_PKT_HELLO, 0, udata, udataSize))
-    goto peer_disconnected;
+    if (!opts->tcpListen && sock == INVALID_SOCKET)
+    {
+      sock = connectToHost(opts, deadlineNs);
+      if (sock == INVALID_SOCKET)
+        goto out;
+    }
 
-  PLGMPClientQueue frameQueue   = NULL;
-  PLGMPClientQueue pointerQueue = NULL;
-  while (!InterlockedCompareExchange(&stopRequested, 0, 0))
-  {
-    if (deadlineNs && nanotime() >= deadlineNs)
-      goto out;
+    if (!client)
+    {
+      if (lgmpClientInit(shm.mem, shm.size, &client) != LGMP_OK)
+      {
+        DEBUG_ERROR("lgmpClientInit failed");
+        goto out;
+      }
+      udata        = NULL;
+      udataSize    = 0;
+      frameQueue   = NULL;
+      pointerQueue = NULL;
+    }
+
+    if (!udata || !lgmpClientSessionValid(client))
+    {
+      udata        = NULL;
+      udataSize    = 0;
+      frameQueue   = NULL;
+      pointerQueue = NULL;
+      LGMP_STATUS st = lgmpClientSessionInit(client, &udataSize, &udata,
+          &clientID, &remoteVersion);
+      if (st != LGMP_OK || !udata)
+      {
+        Sleep(10);
+        continue;
+      }
+      if (sock != INVALID_SOCKET)
+      {
+        if (!sendPacket(sock, BRIDGE_PKT_HELLO, 0, udata, udataSize))
+          goto peer_disconnected;
+      }
+    }
+
     if (!frameQueue)
       lgmpClientSubscribe(client, LGMP_Q_FRAME, &frameQueue);
     if (!pointerQueue)
       lgmpClientSubscribe(client, LGMP_Q_POINTER, &pointerQueue);
-    if (frameQueue && pointerQueue)
-      break;
-    Sleep(10);
-  }
-  if (!frameQueue || !pointerQueue)
-    goto out;
 
-  uint32_t prevWidth  = 0;
-  uint32_t prevHeight = 0;
-  uint32_t prevPitch  = 0;
-  uint32_t prevType   = 0;
+    if (opts->tcpListen && sock == INVALID_SOCKET && socketHasData(listener, 0))
+    {
+      SOCKET accepted = accept(listener, NULL, NULL);
+      if (accepted != INVALID_SOCKET)
+      {
+        BOOL nodelay = TRUE;
+        setsockopt(accepted, IPPROTO_TCP, TCP_NODELAY,
+            (const char *)&nodelay, sizeof(nodelay));
+        sock = accepted;
+        prevWidth = prevHeight = prevPitch = prevType = 0;
 
-  while (!InterlockedCompareExchange(&stopRequested, 0, 0))
-  {
-    if (deadlineNs && nanotime() >= deadlineNs)
-      break;
+        if (!sendPacket(sock, BRIDGE_PKT_HELLO, 0, udata, udataSize))
+          goto peer_disconnected;
 
-    if (!drainHostToGuestSocket(sock, pointerQueue, &inj))
-      goto peer_disconnected;
+        if (hasLastFrame && shadowFrame && lastFrameSize > 0)
+        {
+          struct BridgeFramePacket fp =
+          {
+            .frame         = lastFrame,
+            .frameDataSize = lastFrameSize
+          };
+          struct BridgePacketHeader hdr =
+          {
+            .magic       = BRIDGE_MAGIC,
+            .version     = BRIDGE_VERSION,
+            .type        = BRIDGE_PKT_FRAME_FULL,
+            .flags       = lastFrameFlags,
+            .payloadSize = (uint32_t)(sizeof(fp) + lastFrameSize)
+          };
+          if (!sendAll(sock, &hdr, sizeof(hdr)) ||
+              !sendAll(sock, &fp, sizeof(fp)) ||
+              !sendAll(sock, shadowFrame, lastFrameSize))
+            goto peer_disconnected;
+
+          prevWidth  = lastFrame.frameWidth;
+          prevHeight = lastFrame.frameHeight;
+          prevPitch  = lastFrame.pitch;
+          prevType   = lastFrame.type;
+          ++relayedFrames;
+        }
+
+        if (hasLastCursor)
+        {
+          struct BridgePointerPacket pkt =
+          {
+            .cursor    = lastCursor,
+            .shapeSize = lastCursorShapeSize
+          };
+          struct BridgePacketHeader hdr =
+          {
+            .magic       = BRIDGE_MAGIC,
+            .version     = BRIDGE_VERSION,
+            .type        = BRIDGE_PKT_POINTER,
+            .flags       = lastCursorFlags,
+            .payloadSize = (uint32_t)(sizeof(pkt) + lastCursorShapeSize)
+          };
+          if (!sendAll(sock, &hdr, sizeof(hdr)) ||
+              !sendAll(sock, &pkt, sizeof(pkt)) ||
+              (lastCursorShapeSize > 0 &&
+               !sendAll(sock, lastCursorShape, lastCursorShapeSize)))
+            goto peer_disconnected;
+        }
+      }
+    }
+
+    if (sock != INVALID_SOCKET)
+    {
+      if (!drainHostToGuestSocket(sock, pointerQueue, &inj))
+        goto peer_disconnected;
+    }
 
     bool didWork = false;
     LGMPMessage msg;
 
-    LGMP_STATUS pst = lgmpClientProcess(pointerQueue, &msg);
-    if (pst == LGMP_ERR_INVALID_SESSION)
-      goto next_peer;
-    if (pst == LGMP_OK)
+    if (pointerQueue)
     {
-      didWork = true;
-      const KVMFRCursor * cursor = (const KVMFRCursor *)msg.mem;
-      uint32_t shapeSize = (msg.udata & CURSOR_FLAG_SHAPE) ?
-        computeCursorShapeSize(cursor) : 0;
-
-      struct BridgePointerPacket pkt =
+      LGMP_STATUS pst = lgmpClientProcess(pointerQueue, &msg);
+      if (pst == LGMP_ERR_INVALID_SESSION)
       {
-        .cursor    = *cursor,
-        .shapeSize = shapeSize
-      };
-      struct BridgePacketHeader hdr =
-      {
-        .magic       = BRIDGE_MAGIC,
-        .version     = BRIDGE_VERSION,
-        .type        = BRIDGE_PKT_POINTER,
-        .flags       = msg.udata,
-        .payloadSize = (uint32_t)(sizeof(pkt) + shapeSize)
-      };
-
-      const uint8_t * shapePtr = (const uint8_t *)(cursor + 1);
-      bool ok = sendAll(sock, &hdr, sizeof(hdr)) &&
-                sendAll(sock, &pkt, sizeof(pkt)) &&
-                (shapeSize == 0 || sendAll(sock, shapePtr, shapeSize));
-      lgmpClientMessageDone(pointerQueue);
-      if (!ok)
-        goto peer_disconnected;
-    }
-
-    LGMP_STATUS fst = lgmpClientProcess(frameQueue, &msg);
-    if (fst == LGMP_ERR_INVALID_SESSION)
-      goto next_peer;
-    if (fst == LGMP_OK)
-    {
-      didWork = true;
-      const KVMFRFrame * frame = (const KVMFRFrame *)msg.mem;
-      const KVMFRFrameBuffer * fb =
-        (const KVMFRFrameBuffer *)((const uint8_t *)frame + frame->offset);
-      const uint32_t dataWidth  = frame->dataWidth  ? frame->dataWidth  : frame->frameWidth;
-      const uint32_t dataHeight = frame->dataHeight ? frame->dataHeight : frame->frameHeight;
-      const uint32_t fullSize   = dataHeight * frame->pitch;
-
-      inj.screenWidth  = frame->screenWidth  ? frame->screenWidth  : frame->frameWidth;
-      inj.screenHeight = frame->screenHeight ? frame->screenHeight : frame->frameHeight;
-
-      if (!framebuffer_wait(fb, fullSize))
-      {
-        lgmpClientMessageDone(frameQueue);
+        udata        = NULL;
+        frameQueue   = NULL;
+        pointerQueue = NULL;
         continue;
       }
-      const uint8_t * pixels = framebuffer_get_buffer(fb);
-
-      uint32_t bpp = frame->stride ? (frame->pitch / frame->stride) : 4u;
-      if (bpp == 0 || bpp > 16)
-        bpp = 4u;
-
-      bool sameGeometry =
-        frame->frameWidth  == prevWidth  &&
-        frame->frameHeight == prevHeight &&
-        frame->pitch       == prevPitch  &&
-        frame->type        == prevType;
-
-      bool sendRects = false;
-      size_t rectsPayloadSize = sizeof(struct BridgeFramePacket);
-      if (sameGeometry &&
-          frame->damageRectsCount > 0 &&
-          frame->damageRectsCount <= KVMFR_MAX_DAMAGE_RECTS)
+      if (pst == LGMP_ERR_QUEUE_TIMEOUT || pst == LGMP_ERR_QUEUE_UNSUBSCRIBED)
       {
-        sendRects = true;
-        for (uint32_t r = 0; r < frame->damageRectsCount; ++r)
-        {
-          KVMFRFrameDamageRect rc = frame->damageRects[r];
-          if (frame->type == FRAME_TYPE_BGR_32)
-          {
-            uint32_t origX   = rc.x;
-            uint32_t scaledX = (origX * 3u) / 4u;
-            rc.x     = scaledX;
-            rc.width = (((origX + rc.width) * 3u + 3u) / 4u) - scaledX;
-          }
-          if (rc.x + rc.width > dataWidth ||
-              rc.y + rc.height > dataHeight ||
-              rc.width == 0 || rc.height == 0)
-          {
-            sendRects = false;
-            break;
-          }
-          uint32_t rowBytes = rc.width * bpp;
-          rectsPayloadSize += sizeof(struct BridgeRectEntry) +
-                              (size_t)rowBytes * rc.height;
-        }
-        if (rectsPayloadSize >= sizeof(struct BridgeFramePacket) + (fullSize * 3u) / 4u)
-          sendRects = false;
+        pointerQueue = NULL;
       }
-
-      bool ok = false;
-      if (sendRects)
+      else if (pst == LGMP_OK)
       {
-        if (rectsPayloadSize > deltaCap)
+        didWork = true;
+        const KVMFRCursor * cursor = (const KVMFRCursor *)msg.mem;
+        uint32_t shapeSize = (msg.udata & CURSOR_FLAG_SHAPE) ?
+          computeCursorShapeSize(cursor) : 0;
+        const uint8_t * shapePtr = (const uint8_t *)(cursor + 1);
+
+        lastCursor      = *cursor;
+        lastCursorFlags = msg.udata;
+        if ((msg.udata & CURSOR_FLAG_SHAPE) &&
+            shapeSize > 0 && shapeSize <= MAX_POINTER_SHAPE_SIZE)
         {
-          uint8_t * nb = (uint8_t *)realloc(deltaBuf, rectsPayloadSize);
-          if (!nb)
-          {
-            lgmpClientMessageDone(frameQueue);
-            break;
-          }
-          deltaBuf = nb;
-          deltaCap = rectsPayloadSize;
+          memcpy(lastCursorShape, shapePtr, shapeSize);
+          lastCursorShapeSize = shapeSize;
         }
+        else if (msg.udata & CURSOR_FLAG_SHAPE)
+          lastCursorShapeSize = 0;
+        hasLastCursor = true;
 
-        struct BridgeFramePacket * fp = (struct BridgeFramePacket *)deltaBuf;
-        fp->frame         = *frame;
-        fp->frameDataSize = fullSize;
-
-        uint8_t * dst = deltaBuf + sizeof(*fp);
-        for (uint32_t r = 0; r < frame->damageRectsCount; ++r)
+        bool ok = true;
+        if (sock != INVALID_SOCKET)
         {
-          KVMFRFrameDamageRect rc = frame->damageRects[r];
-          if (frame->type == FRAME_TYPE_BGR_32)
+          struct BridgePointerPacket pkt =
           {
-            uint32_t origX   = rc.x;
-            uint32_t scaledX = (origX * 3u) / 4u;
-            rc.x     = scaledX;
-            rc.width = (((origX + rc.width) * 3u + 3u) / 4u) - scaledX;
-          }
-          uint32_t rowBytes = rc.width * bpp;
-          struct BridgeRectEntry entry =
-          {
-            .rect     = rc,
-            .rowBytes = rowBytes
+            .cursor    = *cursor,
+            .shapeSize = shapeSize
           };
-          memcpy(dst, &entry, sizeof(entry));
-          dst += sizeof(entry);
-
-          for (uint32_t y = 0; y < rc.height; ++y)
+          struct BridgePacketHeader hdr =
           {
-            const uint8_t * srcRow =
-              pixels + (size_t)(rc.y + y) * frame->pitch + (size_t)rc.x * bpp;
-            memcpy(dst, srcRow, rowBytes);
-            dst += rowBytes;
+            .magic       = BRIDGE_MAGIC,
+            .version     = BRIDGE_VERSION,
+            .type        = BRIDGE_PKT_POINTER,
+            .flags       = msg.udata,
+            .payloadSize = (uint32_t)(sizeof(pkt) + shapeSize)
+          };
+
+          ok = sendAll(sock, &hdr, sizeof(hdr)) &&
+               sendAll(sock, &pkt, sizeof(pkt)) &&
+               (shapeSize == 0 || sendAll(sock, shapePtr, shapeSize));
+        }
+        lgmpClientMessageDone(pointerQueue);
+        if (!ok)
+          goto peer_disconnected;
+      }
+    }
+
+    if (frameQueue)
+    {
+      LGMP_STATUS fst = lgmpClientProcess(frameQueue, &msg);
+      if (fst == LGMP_ERR_INVALID_SESSION)
+      {
+        udata        = NULL;
+        frameQueue   = NULL;
+        pointerQueue = NULL;
+        continue;
+      }
+      if (fst == LGMP_ERR_QUEUE_TIMEOUT || fst == LGMP_ERR_QUEUE_UNSUBSCRIBED)
+      {
+        frameQueue = NULL;
+      }
+      else if (fst == LGMP_OK)
+      {
+        didWork = true;
+        const KVMFRFrame * frame = (const KVMFRFrame *)msg.mem;
+        const KVMFRFrameBuffer * fb =
+          (const KVMFRFrameBuffer *)((const uint8_t *)frame + frame->offset);
+        const uint32_t dataWidth  = frame->dataWidth  ? frame->dataWidth  : frame->frameWidth;
+        const uint32_t dataHeight = frame->dataHeight ? frame->dataHeight : frame->frameHeight;
+        const uint32_t fullSize   = dataHeight * frame->pitch;
+
+        inj.screenWidth  = frame->screenWidth  ? frame->screenWidth  : frame->frameWidth;
+        inj.screenHeight = frame->screenHeight ? frame->screenHeight : frame->frameHeight;
+
+        if (!framebuffer_wait(fb, fullSize))
+        {
+          lgmpClientMessageDone(frameQueue);
+          continue;
+        }
+        const uint8_t * pixels = framebuffer_get_buffer(fb);
+
+        if (fullSize > 0)
+        {
+          if (fullSize > shadowCap)
+          {
+            uint8_t * ns = (uint8_t *)realloc(shadowFrame, fullSize);
+            if (ns)
+            {
+              shadowFrame = ns;
+              shadowCap   = fullSize;
+            }
+          }
+          if (shadowFrame && shadowCap >= fullSize)
+          {
+            memcpy(shadowFrame, pixels, fullSize);
+            lastFrame                  = *frame;
+            lastFrame.damageRectsCount = 0;
+            lastFrameFlags             = msg.udata;
+            lastFrameSize              = fullSize;
+            hasLastFrame               = true;
           }
         }
 
-        ok = sendPacket(sock, BRIDGE_PKT_FRAME_RECTS, msg.udata,
-            deltaBuf, (uint32_t)rectsPayloadSize);
-      }
-      else
-      {
-        struct BridgeFramePacket fp =
+        if (sock == INVALID_SOCKET)
         {
-          .frame         = *frame,
-          .frameDataSize = fullSize
-        };
-        struct BridgePacketHeader hdr =
-        {
-          .magic       = BRIDGE_MAGIC,
-          .version     = BRIDGE_VERSION,
-          .type        = BRIDGE_PKT_FRAME_FULL,
-          .flags       = msg.udata,
-          .payloadSize = (uint32_t)(sizeof(fp) + fullSize)
-        };
-        ok = sendAll(sock, &hdr, sizeof(hdr)) &&
-             sendAll(sock, &fp, sizeof(fp)) &&
-             sendAll(sock, pixels, fullSize);
-      }
-
-      prevWidth  = frame->frameWidth;
-      prevHeight = frame->frameHeight;
-      prevPitch  = frame->pitch;
-      prevType   = frame->type;
-
-      lgmpClientMessageDone(frameQueue);
-      if (!ok)
-        goto peer_disconnected;
-
-      ++relayedFrames;
-      if (opts->maxFrames && relayedFrames >= opts->maxFrames)
-      {
-        /* Give any pending input / cursor returns a brief window to arrive */
-        for (unsigned i = 0; i < 20; ++i)
-        {
-          if (!drainHostToGuestSocket(sock, pointerQueue, &inj))
-            break;
-          Sleep(5);
+          lgmpClientMessageDone(frameQueue);
+          continue;
         }
-        ret = EXIT_SUCCESS;
-        goto out;
+
+        uint32_t bpp = frame->stride ? (frame->pitch / frame->stride) : 4u;
+        if (bpp == 0 || bpp > 16)
+          bpp = 4u;
+
+        bool sameGeometry =
+          frame->frameWidth  == prevWidth  &&
+          frame->frameHeight == prevHeight &&
+          frame->pitch       == prevPitch  &&
+          frame->type        == prevType;
+
+        bool sendRects = false;
+        size_t rectsPayloadSize = sizeof(struct BridgeFramePacket);
+        if (sameGeometry &&
+            frame->damageRectsCount > 0 &&
+            frame->damageRectsCount <= KVMFR_MAX_DAMAGE_RECTS)
+        {
+          sendRects = true;
+          for (uint32_t r = 0; r < frame->damageRectsCount; ++r)
+          {
+            KVMFRFrameDamageRect rc = frame->damageRects[r];
+            if (frame->type == FRAME_TYPE_BGR_32)
+            {
+              uint32_t origX   = rc.x;
+              uint32_t scaledX = (origX * 3u) / 4u;
+              rc.x     = scaledX;
+              rc.width = (((origX + rc.width) * 3u + 3u) / 4u) - scaledX;
+            }
+            if (rc.x + rc.width > dataWidth ||
+                rc.y + rc.height > dataHeight ||
+                rc.width == 0 || rc.height == 0)
+            {
+              sendRects = false;
+              break;
+            }
+            uint32_t rowBytes = rc.width * bpp;
+            rectsPayloadSize += sizeof(struct BridgeRectEntry) +
+                                (size_t)rowBytes * rc.height;
+          }
+          if (rectsPayloadSize >= sizeof(struct BridgeFramePacket) + (fullSize * 3u) / 4u)
+            sendRects = false;
+        }
+
+        bool ok = false;
+        if (sendRects)
+        {
+          if (rectsPayloadSize > deltaCap)
+          {
+            uint8_t * nb = (uint8_t *)realloc(deltaBuf, rectsPayloadSize);
+            if (!nb)
+            {
+              lgmpClientMessageDone(frameQueue);
+              break;
+            }
+            deltaBuf = nb;
+            deltaCap = rectsPayloadSize;
+          }
+
+          struct BridgeFramePacket * fp = (struct BridgeFramePacket *)deltaBuf;
+          fp->frame         = *frame;
+          fp->frameDataSize = fullSize;
+
+          uint8_t * dst = deltaBuf + sizeof(*fp);
+          for (uint32_t r = 0; r < frame->damageRectsCount; ++r)
+          {
+            KVMFRFrameDamageRect rc = frame->damageRects[r];
+            if (frame->type == FRAME_TYPE_BGR_32)
+            {
+              uint32_t origX   = rc.x;
+              uint32_t scaledX = (origX * 3u) / 4u;
+              rc.x     = scaledX;
+              rc.width = (((origX + rc.width) * 3u + 3u) / 4u) - scaledX;
+            }
+            uint32_t rowBytes = rc.width * bpp;
+            struct BridgeRectEntry entry =
+            {
+              .rect     = rc,
+              .rowBytes = rowBytes
+            };
+            memcpy(dst, &entry, sizeof(entry));
+            dst += sizeof(entry);
+
+            for (uint32_t y = 0; y < rc.height; ++y)
+            {
+              const uint8_t * srcRow =
+                pixels + (size_t)(rc.y + y) * frame->pitch + (size_t)rc.x * bpp;
+              memcpy(dst, srcRow, rowBytes);
+              dst += rowBytes;
+            }
+          }
+
+          ok = sendPacket(sock, BRIDGE_PKT_FRAME_RECTS, msg.udata,
+              deltaBuf, (uint32_t)rectsPayloadSize);
+        }
+        else
+        {
+          struct BridgeFramePacket fp =
+          {
+            .frame         = *frame,
+            .frameDataSize = fullSize
+          };
+          struct BridgePacketHeader hdr =
+          {
+            .magic       = BRIDGE_MAGIC,
+            .version     = BRIDGE_VERSION,
+            .type        = BRIDGE_PKT_FRAME_FULL,
+            .flags       = msg.udata,
+            .payloadSize = (uint32_t)(sizeof(fp) + fullSize)
+          };
+          ok = sendAll(sock, &hdr, sizeof(hdr)) &&
+               sendAll(sock, &fp, sizeof(fp)) &&
+               sendAll(sock, pixels, fullSize);
+        }
+
+        prevWidth  = frame->frameWidth;
+        prevHeight = frame->frameHeight;
+        prevPitch  = frame->pitch;
+        prevType   = frame->type;
+
+        lgmpClientMessageDone(frameQueue);
+        if (!ok)
+          goto peer_disconnected;
+
+        ++relayedFrames;
+        if (opts->maxFrames && relayedFrames >= opts->maxFrames)
+        {
+          /* Give any pending input / cursor returns a brief window to arrive */
+          for (unsigned i = 0; i < 20; ++i)
+          {
+            if (!drainHostToGuestSocket(sock, pointerQueue, &inj))
+              break;
+            Sleep(5);
+          }
+          ret = EXIT_SUCCESS;
+          goto out;
+        }
       }
     }
 
     if (!didWork)
       Sleep(1);
-  }
+    continue;
 
 peer_disconnected:
-  injectorReleaseAll(&inj);
-  if (sock != INVALID_SOCKET)
-  {
-    closesocket(sock);
-    sock = INVALID_SOCKET;
+    injectorReleaseAll(&inj);
+    if (sock != INVALID_SOCKET)
+    {
+      closesocket(sock);
+      sock = INVALID_SOCKET;
+    }
+    prevWidth = prevHeight = prevPitch = prevType = 0;
+    if (opts->maxFrames)
+      break;
   }
-  if (!opts->maxFrames &&
-      !InterlockedCompareExchange(&stopRequested, 0, 0) &&
-      (!deadlineNs || nanotime() < deadlineNs))
-    goto next_peer;
 
   if (!opts->maxFrames && relayedFrames > 0)
     ret = EXIT_SUCCESS;
@@ -1410,6 +1550,7 @@ out:
   injectorReleaseAll(&inj);
   if (inj.logFile)
     fclose(inj.logFile);
+  free(shadowFrame);
   free(deltaBuf);
   if (client)
     lgmpClientFree(&client);
