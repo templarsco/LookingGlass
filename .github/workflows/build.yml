@@ -890,6 +890,13 @@ jobs:
           --size 1920x1080 --fps 60 \
           --output idle-d3d11 client/build/looking-glass-client.exe \
           app:renderer=D3D11 d3d11:adapter=warp
+        python windows-client/client_cursor_test.py \
+          --output cursor-d3d11 client/build/looking-glass-client.exe \
+          app:renderer=D3D11 d3d11:adapter=warp
+    - name: Check the cursors that the test transport serves
+      run: |
+        GALLIUM_DRIVER=llvmpipe python windows-client/client_cursor_test.py \
+          --output cursor client/build/looking-glass-client.exe
     - name: Upload Windows client smoke test output
       if: failure()
       uses: actions/upload-artifact@v6
@@ -908,6 +915,8 @@ jobs:
           formats-d3d11/
           sessions-d3d11/
           idle-d3d11/
+          cursor/
+          cursor-d3d11/
 
   idd:
     runs-on: windows-2022

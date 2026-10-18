@@ -33,7 +33,8 @@ transport:
   larger    the window is made several sizes while frames arrive, the last
             larger than the frame and of another shape: the swap chain follows
             each, and the frame is where the core says the screen is, made
-            larger, with the bars around it black
+            larger, with the bars around it black, and the cursor that the
+            test transport serves is on it, made larger with it
   smaller   the same with the last size smaller than the frame, which the frame
             is made to fit
   refused   an adapter that is not one is refused before the client starts
@@ -66,6 +67,11 @@ WINDOW_CLASS = 'LookingGlassClient'
 
 SWP_NOZORDER     = 0x0004
 SWP_NOACTIVATE   = 0x0010
+
+# where the test transport puts the cursor that test:cursor gives it, and how
+# large it is (its defaults)
+CURSOR_AT   = (40, 24)
+CURSOR_SIZE = 16
 
 # the frame that is captured is the last one that the test transport makes
 FRAMES = 20
@@ -200,15 +206,46 @@ def screen_rect(width, height):
   return 0, (height >> 1) - (h >> 1), w, h
 
 
-def check_placed(path, width, height, serial):
+def check_cursor(pixel, x0, y0, w, h, serial):
+  """The color cursor that the test transport serves (test:cursor=color) is made
+  larger or smaller with the frame and is where it should be on it: the middle
+  of each of its quadrants, which are red, green, blue and half white."""
+  errors = []
+  for color, alpha, qx, qy in (((255, 0, 0), 255, 0, 0),
+                               ((0, 255, 0), 255, 1, 0),
+                               ((0, 0, 255), 255, 0, 1),
+                               ((255, 255, 255), 128, 1, 1)):
+    # the pixel of the cursor, on the guest's screen, and the pixel of the window
+    sx = CURSOR_AT[0] + CURSOR_SIZE // 4 + CURSOR_SIZE // 2 * qx
+    sy = CURSOR_AT[1] + CURSOR_SIZE // 4 + CURSOR_SIZE // 2 * qy
+    x  = int(x0 + (sx + 0.5) * w / WIDTH)
+    y  = int(y0 + (sy + 0.5) * h / HEIGHT)
+
+    under  = expected_color(sx, sy, WIDTH, HEIGHT, serial)
+    wanted = tuple(round((c * alpha + u * (255 - alpha)) / 255)
+                   for c, u in zip(color, under))
+    got    = pixel(x, y)
+    if max(abs(a - b) for a, b in zip(got, wanted)) > TOLERANCE:
+      errors.append(f'the cursor at {x},{y} is {got} and not {wanted}')
+  return errors
+
+
+def check_placed(path, width, height, serial, cursor=False):
   """The frame is where the core says the screen is in the window of this size,
-  made larger or smaller to fit it, and everywhere else the window is black."""
+  made larger or smaller to fit it, and everywhere else the window is black.
+  With cursor, the test transport's color cursor is on it."""
   errors, pixel = read_capture(path, width, height, serial)
   if errors:
     return errors
 
   x0, y0, w, h = screen_rect(width, height)
   margin       = 2   # the edge of the frame is not checked to the pixel
+
+  # where the cursor is, which the frame is not checked under
+  cursor_rect = (x0 + CURSOR_AT[0] * w / WIDTH - margin,
+                 y0 + CURSOR_AT[1] * h / HEIGHT - margin,
+                 x0 + (CURSOR_AT[0] + CURSOR_SIZE) * w / WIDTH + margin,
+                 y0 + (CURSOR_AT[1] + CURSOR_SIZE) * h / HEIGHT + margin)
 
   # nothing but black around the frame
   stray = [(x, y) for y in range(height) for x in range(width)
@@ -223,6 +260,10 @@ def check_placed(path, width, height, serial):
   checked, wrong = 0, []
   for y in range(y0 + 3, y0 + h - 3, 3):
     for x in range(x0 + 3, x0 + w - 3, 3):
+      if cursor and cursor_rect[0] <= x < cursor_rect[2] and \
+          cursor_rect[1] <= y < cursor_rect[3]:
+        continue
+
       sx = (x + 0.5 - x0) * WIDTH  / w
       sy = (y + 0.5 - y0) * HEIGHT / h
       around = [expected_color(int(sx + dx), int(sy + dy), WIDTH, HEIGHT, serial)
@@ -244,6 +285,9 @@ def check_placed(path, width, height, serial):
     errors.append(f'{len(wrong)} of {checked} points of the frame are not the '
         f'colour that was generated, such as {wrong[0][0]}, which is '
         f'{wrong[0][1]} and not {wrong[0][2]}')
+
+  if cursor:
+    errors += check_cursor(pixel, x0, y0, w, h, serial)
   return errors
 
 
@@ -336,7 +380,8 @@ def test_resize(args, output, name, sizes):
   capture.unlink(missing_ok=True)
 
   status, size, text = run_client(args, output, name,
-      client_command(args, 'warp', capture, frames=4 * FRAMES, rate=20),
+      client_command(args, 'warp', capture, frames=4 * FRAMES, rate=20,
+        extra=['test:cursor=color']),
       resizes=sizes)
 
   errors = common_errors(status, text)
@@ -346,7 +391,7 @@ def test_resize(args, output, name, sizes):
   if not capture.exists():
     errors.append('the client did not write a capture')
   elif size is not None:
-    errors += check_placed(capture, *size, 4 * FRAMES)
+    errors += check_placed(capture, *size, 4 * FRAMES, cursor=True)
   return errors, f'{len(sizes)} sizes, the last {sizes[-1][0]}x{sizes[-1][1]}'
 
 

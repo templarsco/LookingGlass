@@ -78,9 +78,9 @@ in [windows-client](windows-client/README.md).
    client has a Direct3D 11 renderer (`app:renderer=D3D11`) that draws into a
    flip model swap chain and needs no OpenGL driver, with WARP when there is no
    GPU. It is a CPU-copy path: each frame is copied into a texture. It draws
-   the frames and not yet the cursor, the overlays or HDR. With the test
+   the frames and the cursor and not yet the overlays or HDR. With the test
    transport and the test producer, and not a guest, it passes the pixel,
-   format, stride and resolution checks that OpenGL passes. See
+   format, stride, resolution and cursor checks that OpenGL passes. See
    [windows-client](windows-client/README.md#direct3d-11-renderer).
 5. Integrate the QEMU transport/guest device and the compatible Windows
    capture component. GPU delivery is a separate prerequisite owned by

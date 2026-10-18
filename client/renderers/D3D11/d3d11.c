@@ -199,6 +199,28 @@ struct Inst
   LG_RendererFrameToken      pendingFrameToken;
   struct FrameRelease        frameRelease;
   atomic_bool                frameUpdate;
+
+  // the cursor, which the core gives a shape and a place for separately
+  ID3D11PixelShader * cursorPS;
+  ID3D11BlendState  * alphaBlend; // a color cursor, with its alpha
+  ID3D11BlendState  * andBlend;   // the first mask of a monochrome one
+  ID3D11BlendState  * xorBlend;   // and the second
+
+  LG_Lock           mouseLock;
+  LG_RendererCursor mouseCursor;  // the shape that arrived, until it is made
+  int               mouseWidth, mouseHeight, mousePitch;
+  uint8_t         * mouseData;
+  size_t            mouseDataSize;
+  bool              newShape;
+  bool              mouseVisible;
+  int               mouseX, mouseY;  // where its top left is, in the guest's
+                                     // pixels
+
+  LG_RendererCursor          cursorType;   // the shape that is made
+  int                        cursorW, cursorH;
+  ID3D11Texture2D          * cursorTexture[2]; // the color, or the AND and XOR
+  ID3D11ShaderResourceView * cursorView[2];
+  unsigned                   screenW, screenH; // of the guest's screen
 };
 
 /* what the frames can be, and how a texture holds them */
@@ -304,6 +326,7 @@ static bool d3d11_create(LG_Renderer ** renderer,
 
   LG_LOCK_INIT(this->formatLock);
   LG_LOCK_INIT(this->frameLock );
+  LG_LOCK_INIT(this->mouseLock );
 
   // the window is drawn into by Direct3D, and must not have an OpenGL context
   *needsOpenGL = false;
@@ -438,6 +461,24 @@ static void deconfigure(struct Inst * this)
   this->configured = false;
 }
 
+static void releaseCursor(struct Inst * this)
+{
+  for (int i = 0; i < 2; ++i)
+  {
+    if (this->cursorView[i])
+    {
+      ID3D11ShaderResourceView_Release(this->cursorView[i]);
+      this->cursorView[i] = NULL;
+    }
+
+    if (this->cursorTexture[i])
+    {
+      ID3D11Texture2D_Release(this->cursorTexture[i]);
+      this->cursorTexture[i] = NULL;
+    }
+  }
+}
+
 static void releasePipeline(struct Inst * this)
 {
   if (this->frameVS)
@@ -450,6 +491,30 @@ static void releasePipeline(struct Inst * this)
   {
     ID3D11PixelShader_Release(this->framePS);
     this->framePS = NULL;
+  }
+
+  if (this->cursorPS)
+  {
+    ID3D11PixelShader_Release(this->cursorPS);
+    this->cursorPS = NULL;
+  }
+
+  if (this->alphaBlend)
+  {
+    ID3D11BlendState_Release(this->alphaBlend);
+    this->alphaBlend = NULL;
+  }
+
+  if (this->andBlend)
+  {
+    ID3D11BlendState_Release(this->andBlend);
+    this->andBlend = NULL;
+  }
+
+  if (this->xorBlend)
+  {
+    ID3D11BlendState_Release(this->xorBlend);
+    this->xorBlend = NULL;
   }
 
   if (this->pointSampler)
@@ -477,8 +542,10 @@ static void d3d11_deinitialize(LG_Renderer * renderer)
 
   releasePendingFrame(this);
   deconfigure(this);
+  releaseCursor(this);
   releasePipeline(this);
   releaseBackBuffer(this);
+  free(this->mouseData);
   if (this->context)
   {
     // so that nothing refers to the swap chain's buffers when it goes
@@ -565,6 +632,13 @@ static const char frameShader[] =
   "float4 ps(VSOut i) : SV_Target\n"
   "{\n"
   "  return float4(frame.Sample(smp, i.uv).rgb, 1.0);\n"
+  "}\n"
+  "\n"
+  // the cursor keeps its alpha, which a blend state uses (or, for a
+  // monochrome one, does not)
+  "float4 psCursor(VSOut i) : SV_Target\n"
+  "{\n"
+  "  return frame.Sample(smp, i.uv);\n"
   "}\n";
 
 static bool makeSampler(struct Inst * this, D3D11_FILTER filter,
@@ -587,6 +661,32 @@ static bool makeSampler(struct Inst * this, D3D11_FILTER filter,
   return SUCCEEDED(hr);
 }
 
+// a blend of the color of what is drawn with the color under it, which leaves
+// the alpha of what is under it as it is
+static bool makeBlend(struct Inst * this, D3D11_BLEND source,
+    D3D11_BLEND destination, ID3D11BlendState ** state)
+{
+  const D3D11_BLEND_DESC desc =
+  {
+    .RenderTarget[0] =
+    {
+      .BlendEnable           = TRUE,
+      .SrcBlend              = source,
+      .DestBlend             = destination,
+      .BlendOp               = D3D11_BLEND_OP_ADD,
+      .SrcBlendAlpha         = D3D11_BLEND_ZERO,
+      .DestBlendAlpha        = D3D11_BLEND_ONE,
+      .BlendOpAlpha          = D3D11_BLEND_OP_ADD,
+      .RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL,
+    },
+  };
+
+  const HRESULT hr = ID3D11Device_CreateBlendState(this->device, &desc, state);
+  if (FAILED(hr))
+    DEBUG_ERROR("Could not make a blend state (0x%08lx)", (unsigned long)hr);
+  return SUCCEEDED(hr);
+}
+
 static bool makePipeline(struct Inst * this)
 {
   D3D11ShaderCompiler * compiler = d3d11Shader_open();
@@ -597,9 +697,26 @@ static bool makePipeline(struct Inst * this)
     d3d11Shader_vertex(compiler, this->device, "frame", frameShader, "vs",
         &this->frameVS, NULL) &&
     d3d11Shader_pixel (compiler, this->device, "frame", frameShader, "ps",
-        &this->framePS);
+        &this->framePS) &&
+    d3d11Shader_pixel (compiler, this->device, "frame", frameShader, "psCursor",
+        &this->cursorPS);
   d3d11Shader_close(compiler);
   if (!compiled)
+    return false;
+
+  /* A color cursor is blended with the alpha that it has. A monochrome one is
+   * the AND of what is under it with one mask, and then the XOR of that with
+   * another. As each pixel of a mask is all ones or all zeros, the AND is what
+   * is under it times the mask, and the XOR is the mask times the inverse of
+   * what is under it plus what is under it times the inverse of the mask. Those
+   * are blend factors, so no logic operation, which not every GPU has, is
+   * needed. */
+  if (!makeBlend(this, D3D11_BLEND_SRC_ALPHA, D3D11_BLEND_INV_SRC_ALPHA,
+        &this->alphaBlend) ||
+      !makeBlend(this, D3D11_BLEND_ZERO, D3D11_BLEND_SRC_COLOR,
+        &this->andBlend) ||
+      !makeBlend(this, D3D11_BLEND_INV_DEST_COLOR, D3D11_BLEND_INV_SRC_COLOR,
+        &this->xorBlend))
     return false;
 
   // pixels stay the frame's own when it is not made smaller, as with OpenGL
@@ -760,12 +877,53 @@ static bool d3d11_onMouseShape(LG_Renderer * renderer,
     const LG_RendererCursor cursor, const int width, const int height,
     const int pitch, const uint8_t * data)
 {
+  struct Inst * this = UPCAST(struct Inst, renderer);
+
+  size_t size;
+  if (!data || !lg_rendererCursorValidate(cursor, width, height, pitch, &size))
+  {
+    DEBUG_ERROR("Invalid cursor shape geometry");
+    return false;
+  }
+
+  LG_LOCK(this->mouseLock);
+  if (size > this->mouseDataSize)
+  {
+    uint8_t * resized = realloc(this->mouseData, size);
+    if (!resized)
+    {
+      LG_UNLOCK(this->mouseLock);
+      DEBUG_ERROR("Failed to allocate the cursor shape");
+      return false;
+    }
+
+    this->mouseData     = resized;
+    this->mouseDataSize = size;
+  }
+
+  // made into a texture by the next render, which is what can use the device
+  memcpy(this->mouseData, data, size);
+  this->mouseCursor = cursor;
+  this->mouseWidth  = width;
+  this->mouseHeight = height;
+  this->mousePitch  = pitch;
+  this->newShape    = true;
+  LG_UNLOCK(this->mouseLock);
   return true;
 }
 
+/* The place is the cursor's top left, in the guest's pixels. The hot spot is
+ * for the core, which has already put it in, as it is for OpenGL. */
 static bool d3d11_onMouseEvent(LG_Renderer * renderer, const bool visible,
     int x, int y, const int hx, const int hy)
 {
+  struct Inst * this = UPCAST(struct Inst, renderer);
+
+  LG_LOCK(this->mouseLock);
+  this->mouseVisible = visible;
+  this->mouseX       = x;
+  this->mouseY       = y;
+  LG_UNLOCK(this->mouseLock);
   return true;
 }
 
@@ -899,6 +1057,8 @@ static bool configure(struct Inst * this)
 
   this->texWidth    = this->format.frameWidth;
   this->texHeight   = this->format.frameHeight;
+  this->screenW     = this->format.screenWidth;
+  this->screenH     = this->format.screenHeight;
   this->configured  = true;
   this->reconfigure = false;
   ok = true;
@@ -1128,6 +1288,199 @@ static void drawFrame(struct Inst * this)
   ID3D11DeviceContext_PSSetShaderResources(context, 0, 1, &none);
 }
 
+static bool makeCursorTexture(struct Inst * this, int slot, DXGI_FORMAT format,
+    int width, int height, const uint32_t * pixels)
+{
+  const D3D11_TEXTURE2D_DESC desc =
+  {
+    .Width      = width,
+    .Height     = height,
+    .MipLevels  = 1,
+    .ArraySize  = 1,
+    .Format     = format,
+    .SampleDesc = { .Count = 1 },
+    .Usage      = D3D11_USAGE_IMMUTABLE,
+    .BindFlags  = D3D11_BIND_SHADER_RESOURCE,
+  };
+  const D3D11_SUBRESOURCE_DATA data =
+  {
+    .pSysMem     = pixels,
+    .SysMemPitch = width * 4,
+  };
+
+  HRESULT hr = ID3D11Device_CreateTexture2D(this->device, &desc, &data,
+      &this->cursorTexture[slot]);
+  if (SUCCEEDED(hr))
+    hr = ID3D11Device_CreateShaderResourceView(this->device,
+        (ID3D11Resource *)this->cursorTexture[slot], NULL,
+        &this->cursorView[slot]);
+  if (FAILED(hr))
+    DEBUG_ERROR("Could not make a texture for the cursor (0x%08lx)",
+        (unsigned long)hr);
+  return SUCCEEDED(hr);
+}
+
+/* Make the shape that the core last gave into what is drawn. A color cursor is
+ * a texture of its pixels, which are BGRA, and a masked color one is the same
+ * with the alpha that it has taken as it is by OpenGL: 0 replaces what is
+ * under the pixel, which is drawn, and anything else is the XOR of it, which is
+ * not (it would take a texture of its own). A monochrome cursor is two
+ * textures, one for each mask, with each bit made a whole pixel of ones or of
+ * zeros. */
+static void updateMouseShape(struct Inst * this)
+{
+  LG_LOCK(this->mouseLock);
+  if (!this->newShape)
+  {
+    LG_UNLOCK(this->mouseLock);
+    return;
+  }
+  this->newShape = false;
+
+  const LG_RendererCursor cursor = this->mouseCursor;
+  const int               width  = this->mouseWidth;
+  const int               pitch  = this->mousePitch;
+  const int               height = cursor == LG_CURSOR_MONOCHROME ?
+    this->mouseHeight / 2 : this->mouseHeight;
+  const uint8_t         * data   = this->mouseData;
+
+  releaseCursor(this);
+  this->cursorW = 0;
+
+  const size_t pixels = (size_t)width * (size_t)height;
+  uint32_t * first    = malloc(pixels * sizeof(*first));
+  uint32_t * second   = cursor == LG_CURSOR_MONOCHROME ?
+    malloc(pixels * sizeof(*second)) : NULL;
+  if (!first || (cursor == LG_CURSOR_MONOCHROME && !second))
+  {
+    DEBUG_ERROR("Failed to allocate the cursor's pixels");
+    goto out;
+  }
+
+  bool ok;
+  if (cursor == LG_CURSOR_MONOCHROME)
+  {
+    for (int y = 0; y < height; ++y)
+    {
+      const uint8_t * andRow = data + (size_t)pitch * (size_t)y;
+      const uint8_t * xorRow = data + (size_t)pitch * (size_t)(y + height);
+      for (int x = 0; x < width; ++x)
+      {
+        const uint8_t mask = 0x80 >> (x % 8);
+        first [(size_t)y * width + x] = (andRow[x / 8] & mask) ?
+          0xFFFFFFFF : 0xFF000000;
+        second[(size_t)y * width + x] = (xorRow[x / 8] & mask) ?
+          0x00FFFFFF : 0x00000000;
+      }
+    }
+
+    ok = makeCursorTexture(this, 0, DXGI_FORMAT_R8G8B8A8_UNORM, width, height,
+        first) &&
+      makeCursorTexture(this, 1, DXGI_FORMAT_R8G8B8A8_UNORM, width, height,
+        second);
+  }
+  else
+  {
+    for (int y = 0; y < height; ++y)
+    {
+      const uint8_t * row = data + (size_t)pitch * (size_t)y;
+      for (int x = 0; x < width; ++x)
+      {
+        uint32_t c;
+        memcpy(&c, row + (size_t)x * sizeof(c), sizeof(c));
+        if (cursor == LG_CURSOR_MASKED_COLOR)
+          c = (c & 0x00FFFFFF) | ((c & 0xFF000000) ? 0 : 0xFF000000);
+        first[(size_t)y * width + x] = c;
+      }
+    }
+
+    ok = makeCursorTexture(this, 0, DXGI_FORMAT_B8G8R8A8_UNORM, width, height,
+        first);
+  }
+
+  if (ok)
+  {
+    this->cursorType = cursor;
+    this->cursorW    = width;
+    this->cursorH    = height;
+  }
+  else
+    releaseCursor(this);
+
+out:
+  free(first);
+  free(second);
+  LG_UNLOCK(this->mouseLock);
+}
+
+/* The cursor is drawn the way that OpenGL draws it: in the frame's pixels, so
+ * that it is made larger or smaller with the frame, with its top left where the
+ * core says in the guest's screen, and again with the viewport, so that there is
+ * nothing to compute for the triangle. */
+static void drawCursor(struct Inst * this)
+{
+  LG_LOCK(this->mouseLock);
+  const bool visible = this->mouseVisible;
+  const int  mouseX  = this->mouseX;
+  const int  mouseY  = this->mouseY;
+  LG_UNLOCK(this->mouseLock);
+
+  if (!visible || !this->cursorW || !this->configured || !this->screenW ||
+      !this->screenH || !this->destRect.valid)
+    return;
+
+  const float fx = (float)this->destRect.w / (float)this->texWidth;
+  const float fy = (float)this->destRect.h / (float)this->texHeight;
+  const D3D11_VIEWPORT viewport =
+  {
+    .TopLeftX = this->destRect.x + (float)mouseX * this->texWidth  /
+      this->screenW * fx,
+    .TopLeftY = this->destRect.y + (float)mouseY * this->texHeight /
+      this->screenH * fy,
+    .Width    = (float)this->cursorW * fx,
+    .Height   = (float)this->cursorH * fy,
+    .MaxDepth = 1.0f,
+  };
+
+  ID3D11DeviceContext * context = this->context;
+  ID3D11DeviceContext_RSSetViewports(context, 1, &viewport);
+  ID3D11DeviceContext_RSSetState(context, this->rasterizer);
+  ID3D11DeviceContext_IASetInputLayout(context, NULL);
+  ID3D11DeviceContext_IASetPrimitiveTopology(context,
+      D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+  ID3D11DeviceContext_VSSetShader(context, this->frameVS, NULL, 0);
+  ID3D11DeviceContext_PSSetShader(context, this->cursorPS, NULL, 0);
+  ID3D11DeviceContext_PSSetSamplers(context, 0, 1, &this->pointSampler);
+
+  if (this->cursorType == LG_CURSOR_MONOCHROME)
+  {
+    // the AND, and then the XOR of what that left
+    ID3D11DeviceContext_OMSetBlendState(context, this->andBlend, NULL,
+        0xFFFFFFFF);
+    ID3D11DeviceContext_PSSetShaderResources(context, 0, 1,
+        &this->cursorView[0]);
+    ID3D11DeviceContext_Draw(context, 3, 0);
+
+    ID3D11DeviceContext_OMSetBlendState(context, this->xorBlend, NULL,
+        0xFFFFFFFF);
+    ID3D11DeviceContext_PSSetShaderResources(context, 0, 1,
+        &this->cursorView[1]);
+    ID3D11DeviceContext_Draw(context, 3, 0);
+  }
+  else
+  {
+    ID3D11DeviceContext_OMSetBlendState(context, this->alphaBlend, NULL,
+        0xFFFFFFFF);
+    ID3D11DeviceContext_PSSetShaderResources(context, 0, 1,
+        &this->cursorView[0]);
+    ID3D11DeviceContext_Draw(context, 3, 0);
+  }
+
+  ID3D11DeviceContext_OMSetBlendState(context, NULL, NULL, 0xFFFFFFFF);
+  ID3D11ShaderResourceView * none = NULL;
+  ID3D11DeviceContext_PSSetShaderResources(context, 0, 1, &none);
+}
+
 static bool d3d11_render(LG_Renderer * renderer, LG_RendererRotate rotate,
     LG_RendererFrameToken frameTokenLimit, const bool invalidateWindow,
     void (*preSwap)(void * udata), void * udata,
@@ -1153,7 +1506,9 @@ static bool d3d11_render(LG_Renderer * renderer, LG_RendererRotate rotate,
   ID3D11DeviceContext_ClearRenderTargetView(this->context,
       this->backBufferView, black);
 
+  updateMouseShape(this);
   drawFrame(this);
+  drawCursor(this);
   preSwap(udata);
 
   const uint64_t swapStart = nanotime();

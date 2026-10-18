@@ -116,7 +116,7 @@ own software rasterizer. OpenGL is still the renderer that the client starts
 with, and the one that is tried first; `-DENABLE_D3D11=OFF` leaves the new one
 out of the build.
 
-**It draws the guest's frames, and not yet the cursor, the overlays (the
+**It draws the guest's frames and its cursor, and not yet the overlays (the
 settings, the graphs and the splash) or a way to see HDR**, so it is for
 testing, not for use, until those come.
 
@@ -146,6 +146,16 @@ testing, not for use, until those come.
 - Pixels stay pixels (point sampling) unless the frame is made smaller to fit,
   when the sampling is bilinear. There is no mipmap, so a frame that is made much
   smaller aliases more than with `opengl:mipmap`.
+- The cursor is drawn as OpenGL draws it: in the frame's pixels, so that it is
+  made larger or smaller with the frame, with its top left where the core says
+  on the guest's screen, and clipped by the window. A color cursor is blended
+  with its alpha. A masked color cursor is drawn with the alpha as OpenGL takes
+  it (0 replaces what is under the pixel, and anything else, which is the XOR of
+  it, is left out). A monochrome cursor is the AND of what is under it with one
+  mask, and then the XOR of that with another: each pixel of a mask is all ones or
+  all zeros, so they are blend factors (the destination times the mask, and the
+  mask times the inverse of the destination plus the destination times the
+  inverse of the mask) and not a logic operation, which not every GPU has.
 - The shaders are HLSL, compiled when the renderer starts with
   `d3dcompiler_47.dll` from System32, which every Windows 10 has. The compiler
   is not in the build and its output is not in the source. Without it the renderer
@@ -159,9 +169,10 @@ window: every pixel of the test frame is the one that was generated. It also
 makes the window five sizes while frames arrive, the last one larger than the
 frame and of another shape, and again with the last one smaller, and checks
 that the swap chain followed, that the frame is where the core says the screen
-is, made larger or smaller, with black around it, that the client logs no
-failure and exits, and that an adapter that is not one is refused before the
-client starts. The other tests, the 25 cases of `client_format_test.py`
+is, made larger or smaller, with black around it, and the test transport's
+cursor on it, made larger or smaller too, that the client logs no failure and
+exits, and that an adapter that is not one is refused before the client
+starts. The other tests, the 25 cases of `client_format_test.py`
 included, run with it as well, with `-- app:renderer=D3D11`. On the developer's
 PC (Windows 11, an RX 9070 XT) they pass on the RX 9070 XT and on WARP, and
 `auto` picks the RX 9070 XT. CI has no GPU: it covers WARP, and accepts the
@@ -466,6 +477,21 @@ window across two displays, and Windows builds other than 11 were not tried.
 
   ```sh
   python windows-client/client_d3d11_test.py client/build/looking-glass-client.exe
+  ```
+- [client_cursor_test.py](client_cursor_test.py) runs the client on the cursors
+  that the test transport serves (`test:cursor=color`, `masked` and `mono`, a
+  16x16 picture each, at `test:cursorX` and `test:cursorY`) and compares every
+  pixel of the window with the test frame and the cursor on it: a color cursor
+  with its alpha blended, a masked one and a monochrome one (black, white, what
+  is under it, and that inverted), and a color one with only a quarter of it on
+  the frame, at the corner and at the edge. It runs the renderer that the
+  options after the client's path choose (OpenGL by default), and both pass it,
+  on the RX 9070 XT, and the Direct3D 11 renderer on WARP too. CI runs it on
+  Windows with each.
+
+  ```sh
+  python windows-client/client_cursor_test.py client/build/looking-glass-client.exe
+  python windows-client/client_cursor_test.py client/build/looking-glass-client.exe app:renderer=D3D11
   ```
 - [client_binary_test.py](client_binary_test.py) reads the executable, on any
   host, and checks what a PC that is not the one that built it needs from
@@ -859,10 +885,11 @@ keeps the shared code covered there.
   host has not run in a Hyper-V guest yet.
 - The LGMP path copies each frame through the CPU into an OpenGL texture.
   There is no zero-copy import on Windows; DMA-BUF is Linux only.
-- The Direct3D 11 renderer draws the guest's frames but no cursor and no
+- The Direct3D 11 renderer draws the guest's frames and its cursor but no
   overlays, and has no HDR output, and it was tried on an RX 9070 XT and on
   WARP; no other GPU, and no PC that lacks an OpenGL driver, which is what it is
-  for.
+  for. Its cursor was checked with the test transport's cursors, not a guest's.
+  The XOR half of a masked color cursor is not drawn, by either renderer.
 - Resizing by dragging the window border has no automated test. The
   fullscreen toggle goes through the same resize path.
 - There is no audio or SPICE support on Windows, and no files on the
