@@ -430,16 +430,21 @@ static bool dxgi_init(void * ivshmemBase, unsigned * alignSize)
   comRef_initGlobalScope(20 + this->maxTextures * 16, this->comScope);
   comRef_scopePush(20);
 
-  this->desktop = OpenInputDesktop(0, FALSE, GENERIC_READ);
-  if (!this->desktop)
+  HDESK desk = OpenInputDesktop(0, FALSE, GENERIC_READ);
+  if (!desk)
     DEBUG_WINERROR("Failed to open the desktop", GetLastError());
   else
   {
-    if (!SetThreadDesktop(this->desktop))
+    if (!SetThreadDesktop(desk))
     {
       DEBUG_WINERROR("Failed to set thread desktop", GetLastError());
-      CloseDesktop(this->desktop);
-      this->desktop = NULL;
+      CloseDesktop(desk);
+    }
+    else
+    {
+      if (this->desktop)
+        CloseDesktop(this->desktop);
+      this->desktop = desk;
     }
   }
 
@@ -806,34 +811,11 @@ static bool dxgi_init(void * ivshmemBase, unsigned * alignSize)
     IDXGIOutputDuplication_GetDesc(*this->dup, &dupDesc);
     DEBUG_INFO("Source Format     : %s", getDXGIFormatStr(dupDesc.ModeDesc.Format));
 
-    DXGI_OUTDUPL_FRAME_INFO frameInfo;
-    comRef_defineLocal(IDXGIResource, res);
+    this->hdr           = this->dxgiColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    this->dxgiSrcFormat = this->hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : dupDesc.ModeDesc.Format;
+    this->dxgiFormat    = this->dxgiSrcFormat;
 
-    if (FAILED(status = IDXGIOutputDuplication_AcquireNextFrame(*this->dup,
-      INFINITE, &frameInfo, res)))
-    {
-      DEBUG_WINERROR("AcquireNextFrame Failed", status);
-      goto fail;
-    }
-
-    comRef_defineLocal(ID3D11Texture2D, src);
-    if (FAILED(status = IDXGIResource_QueryInterface(*res, &IID_ID3D11Texture2D,
-      (void **)src)))
-    {
-      DEBUG_WINERROR("ResourceQueryInterface failed", status);
-      IDXGIOutputDuplication_ReleaseFrame(*this->dup);
-      goto fail;
-    }
-
-    D3D11_TEXTURE2D_DESC desc;
-    ID3D11Texture2D_GetDesc(*src, &desc);
-    this->dxgiSrcFormat = desc.Format;
-    this->dxgiFormat    = desc.Format;
-
-    DEBUG_INFO("Capture Format    : %s", getDXGIFormatStr(desc.Format));
-
-    IDXGIOutputDuplication_ReleaseFrame(*this->dup);
-    this->hdr = this->dxgiColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+    DEBUG_INFO("Capture Format    : %s", getDXGIFormatStr(this->dxgiFormat));
   }
 
   // set the initial format
@@ -940,6 +922,8 @@ fail:
 static void dxgi_stop(void)
 {
   this->stop = true;
+  if (this->frameEvent)
+    lgSignalEvent(this->frameEvent);
 }
 
 static bool dxgi_deinit(void)
@@ -981,12 +965,6 @@ static bool dxgi_deinit(void)
 
   LG_LOCK_FREE(this->deviceContextLock);
 
-  if (this->desktop)
-  {
-    CloseDesktop(this->desktop);
-    this->desktop = NULL;
-  }
-
   this->initialized = false;
   return true;
 }
@@ -997,6 +975,12 @@ static void dxgi_free(void)
 
   if (this->initialized)
     dxgi_deinit();
+
+  if (this->desktop)
+  {
+    CloseDesktop(this->desktop);
+    this->desktop = NULL;
+  }
 
   free(this->texture);
   free(this);

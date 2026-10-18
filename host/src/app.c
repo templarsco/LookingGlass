@@ -1125,12 +1125,17 @@ int app_main(int argc, char * argv[])
         }
 
         // clients subscribed, start the capture
-        if (!captureStart() || !startThreads())
+        if (!captureStart())
+        {
+          usleep(100000);
+          continue;
+        }
+        setAppState(APP_STATE_RUNNING);
+        if (!startThreads())
         {
           exitcode = LG_HOST_EXIT_FAILED;
           goto fail;
         }
-        setAppState(APP_STATE_RUNNING);
         break;
 
       case APP_STATE_TRANSITION_TO_IDLE:
