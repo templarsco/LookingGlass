@@ -302,10 +302,88 @@ bool opengl_create(LG_Renderer ** renderer, const LG_RendererParams params,
   return true;
 }
 
+/* Whether a driver that says that it is this version, with these extensions,
+ * can be used, and the version if it can. */
+static bool checkDriver(const char * version, const char * exts, int * maj,
+    int * min)
+{
+  // GL_MAJOR_VERSION needs OpenGL 3.0, so read the version string instead,
+  // which also works on the OpenGL 1.1 software renderer Windows falls back to
+  if (!version || sscanf(version, "%d.%d", maj, min) != 2)
+  {
+    // glGetString answers NULL when no context is current, as when the
+    // display server could not make this one so
+    DEBUG_ERROR("Unable to parse the OpenGL version%s",
+        version ? "" : ", the driver does not answer");
+    return false;
+  }
+
+  if ((*maj < 3 || (*maj == 3 && *min < 2)) &&
+      !util_hasGLExt(exts, "GL_ARB_sync"))
+  {
+    DEBUG_ERROR("Need OpenGL 3.2+ or GL_ARB_sync for sync objects");
+    return false;
+  }
+
+  if (*maj < 2 && !util_hasGLExt(exts, "GL_ARB_pixel_buffer_object"))
+  {
+    DEBUG_ERROR("Need OpenGL 2.0+ or GL_ARB_pixel_buffer_object");
+    return false;
+  }
+
+  return true;
+}
+
+#ifdef _WIN32
+/* Windows has an OpenGL on every PC, but on one that has no driver for its GPU,
+ * as a virtual machine or a remote session does not, it is Microsoft's software
+ * OpenGL 1.1, which cannot be used, and the client would find that out only
+ * when its window is made and drawn into, and end. The display server can make
+ * a context of its own before the window to ask, which lets this renderer be
+ * left for another (Direct3D 11) when the user has not chosen it. */
+static bool probeDriver(void)
+{
+#ifdef ENABLE_TESTS
+  // so that a test can have the client find OpenGL unusable on a PC that has it
+  if (getenv("LG_TEST_NO_OPENGL"))
+  {
+    DEBUG_WARN("OpenGL cannot be used here: LG_TEST_NO_OPENGL is set");
+    return false;
+  }
+#endif
+
+  LG_DSGLProbe probe;
+  switch (app_glProbe(&probe))
+  {
+    case LG_DS_GL_PROBE_UNKNOWN:
+      return true;
+
+    case LG_DS_GL_PROBE_FAILED:
+      DEBUG_WARN("OpenGL cannot be used here: no context could be made");
+      return false;
+
+    case LG_DS_GL_PROBE_OK:
+      break;
+  }
+
+  int maj, min;
+  const bool usable = checkDriver(probe.version, probe.extensions, &maj, &min);
+  if (!usable)
+    DEBUG_WARN("OpenGL cannot be used here: \"%s\" by \"%s\" is version "
+        "\"%s\"", probe.renderer, probe.vendor, probe.version);
+
+  free(probe.extensions);
+  return usable;
+}
+#endif
+
 bool opengl_initialize(LG_Renderer * renderer)
 {
-//  struct Inst * this = UPCAST(struct Inst, renderer);
+#ifdef _WIN32
+  return probeDriver();
+#else
   return true;
+#endif
 }
 
 void opengl_deinitialize(LG_Renderer * renderer)
@@ -563,30 +641,9 @@ bool opengl_renderStartup(LG_Renderer * renderer, bool useDMA)
       DEBUG_INFO("GL_AMD_pinned_memory is available but not in use");
   }
 
-  // GL_MAJOR_VERSION needs OpenGL 3.0, so read the version string instead,
-  // which also works on the OpenGL 1.1 software renderer Windows falls back to
-  GLint maj, min;
-  const char * version = (const char *)glGetString(GL_VERSION);
-  if (!version || sscanf(version, "%d.%d", &maj, &min) != 2)
-  {
-    // glGetString answers NULL when no context is current, as when the
-    // display server could not make this one so
-    DEBUG_ERROR("Unable to parse the OpenGL version%s",
-        version ? "" : ", the driver does not answer");
+  int maj, min;
+  if (!checkDriver((const char *)glGetString(GL_VERSION), exts, &maj, &min))
     return false;
-  }
-
-  if ((maj < 3 || (maj == 3 && min < 2)) && !util_hasGLExt(exts, "GL_ARB_sync"))
-  {
-    DEBUG_ERROR("Need OpenGL 3.2+ or GL_ARB_sync for sync objects");
-    return false;
-  }
-
-  if (maj < 2 && !util_hasGLExt(exts, "GL_ARB_pixel_buffer_object"))
-  {
-    DEBUG_ERROR("Need OpenGL 2.0+ or GL_ARB_pixel_buffer_object");
-    return false;
-  }
 
   if (this->opt.mipmap && maj < 3 &&
       !util_hasGLExt(exts, "GL_ARB_framebuffer_object") &&

@@ -44,7 +44,12 @@ the one that makes the section decides which machine gets it.
   1703 to 1809 too, but they ignore the manifest's UTF-8 code page, so a path
   with an accent in it, as the name of a user may have, is not found, and
   the client says so when it starts.
-- A graphics driver with OpenGL 3.2, or OpenGL 2.0 with `GL_ARB_sync`.
+- A graphics driver with OpenGL 3.2, or OpenGL 2.0 with `GL_ARB_sync`. Without
+  one, as in a virtual machine or a remote session, the client says so and draws
+  with Direct3D 11 instead (with WARP, Windows' software rasterizer, if there
+  is no GPU that Direct3D can use). That renderer is new: it was tried on one PC
+  with an RX 9070 XT and in CI, it does not show HDR as such, and nobody has run
+  it on a PC that has no OpenGL driver yet.
 
 The program is not code signed, so Windows SmartScreen may warn before it
 runs.

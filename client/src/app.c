@@ -829,6 +829,12 @@ bool app_eglSwapBuffers(EGLDisplay display, EGLSurface surface,
 #endif
 
 #ifdef ENABLE_OPENGL
+LG_DSGLProbeResult app_glProbe(LG_DSGLProbe * probe)
+{
+  return g_state.ds->glProbe ? g_state.ds->glProbe(probe) :
+    LG_DS_GL_PROBE_UNKNOWN;
+}
+
 LG_DSGLContext app_glCreateContext(void)
 {
   return g_state.ds->glCreateContext();
