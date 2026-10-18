@@ -860,6 +860,12 @@ jobs:
         # upload path. A PC with an AMD GPU runs it with --require-pinned.
         GALLIUM_DRIVER=llvmpipe python windows-client/client_format_test.py \
           --output formats client/build/looking-glass-client.exe
+    - name: Check the Direct3D 11 renderer, which needs no OpenGL driver
+      run: |
+        # the runner has no GPU, so WARP, Windows' software rasterizer, is
+        # what it can try. A PC with a GPU runs it with --require-hardware.
+        python windows-client/client_d3d11_test.py \
+          --output d3d11 client/build/looking-glass-client.exe
     - name: Upload Windows client smoke test output
       if: failure()
       uses: actions/upload-artifact@v6
@@ -874,6 +880,7 @@ jobs:
           config/
           idle/
           formats/
+          d3d11/
 
   idd:
     runs-on: windows-2022

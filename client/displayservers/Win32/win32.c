@@ -1312,12 +1312,18 @@ static bool createWindow(void)
   SetWindowPos(win32.window, NULL, x, y, width, height,
       SWP_NOZORDER | SWP_NOACTIVATE);
 
-  win32.dc = GetDC(win32.window);
-  if (!win32.dc || !setPixelFormat())
+  // only a renderer that draws with OpenGL has any use for the pixel format, and
+  // a PC that has no OpenGL driver may refuse it, which would keep Direct3D
+  // from starting on the PCs that it is for
+  if (params->opengl)
   {
-    DestroyWindow(win32.window);
-    win32.window = NULL;
-    return false;
+    win32.dc = GetDC(win32.window);
+    if (!win32.dc || !setPixelFormat())
+    {
+      DestroyWindow(win32.window);
+      win32.window = NULL;
+      return false;
+    }
   }
 
   atomic_store(&win32.keyboardLayout,
@@ -1489,6 +1495,10 @@ static bool win32GetProp(LG_DSProperty prop, void * ret)
     case LG_DS_WINDOW_HIDDEN:
       // a minimized window is shown by nothing, however fast it is drawn
       *(bool *)ret = IsIconic(win32.window);
+      return true;
+
+    case LG_DS_NATIVE_WINDOW:
+      *(void **)ret = win32.window;
       return true;
 
     default:
