@@ -3583,11 +3583,13 @@ static int lg_run(void)
   const char * capturePath = option_get_string("test", "captureFile");
   const int captureFrame   = option_get_int("test", "captureFrame");
   const int captureDelay   = option_get_int("test", "captureDelay");
+  /* a captureFrame of 0 is a capture that waits for no frame, which is how
+   * what the client draws without a guest (its splash) is captured */
   if (capturePath)
   {
-    if (captureFrame < 1 || captureDelay < 0)
+    if (captureFrame < 0 || captureDelay < 0)
     {
-      DEBUG_ERROR("test capture requires captureFrame >= 1 and "
+      DEBUG_ERROR("test capture requires captureFrame >= 0 and "
           "captureDelay >= 0");
       return -1;
     }
@@ -4333,7 +4335,11 @@ static void lg_shutdown(void)
   LG_LOCK_FREE(l_frameTiming.lock);
 
   free(g_state.fontName);
-  igDestroyContext(NULL);
+
+  // an error before the context was made (an option that is refused, or the
+  // clipboard that cannot start) ends here too, and has none to destroy
+  if (igGetCurrentContext())
+    igDestroyContext(NULL);
   free(g_state.imGuiIni);
 }
 

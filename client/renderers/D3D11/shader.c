@@ -37,6 +37,15 @@ struct D3D11ShaderCompiler
   pD3DCompile compile;
 };
 
+// from System32 only, as a compiler that is found elsewhere is not Windows'
+static pD3DCompile loadCompiler(HMODULE * library)
+{
+  *library = LoadLibraryExW(L"d3dcompiler_47.dll", NULL,
+      LOAD_LIBRARY_SEARCH_SYSTEM32);
+  return *library ? (pD3DCompile)(void *)GetProcAddress(*library,
+      "D3DCompile") : NULL;
+}
+
 D3D11ShaderCompiler * d3d11Shader_open(void)
 {
   D3D11ShaderCompiler * compiler = calloc(1, sizeof(*compiler));
@@ -46,13 +55,7 @@ D3D11ShaderCompiler * d3d11Shader_open(void)
     return NULL;
   }
 
-  // from System32 only, as a compiler that is found elsewhere is not Windows'
-  compiler->library = LoadLibraryExW(L"d3dcompiler_47.dll", NULL,
-      LOAD_LIBRARY_SEARCH_SYSTEM32);
-  if (compiler->library)
-    compiler->compile = (pD3DCompile)(void *)GetProcAddress(compiler->library,
-        "D3DCompile");
-
+  compiler->compile = loadCompiler(&compiler->library);
   if (!compiler->compile)
   {
     DEBUG_ERROR("The shader compiler, d3dcompiler_47.dll, is not available");
@@ -142,4 +145,27 @@ bool d3d11Shader_pixel(D3D11ShaderCompiler * compiler, ID3D11Device * device,
     return false;
   }
   return true;
+}
+
+/* The render thread is the only one that calls this, with the device objects of
+ * the backend made on its first frame, and the compiler stays loaded, as the
+ * backend may need a shader again when the device is made again. */
+HRESULT WINAPI lgD3DCompile(const void * data, SIZE_T dataSize,
+    const char * filename, const D3D_SHADER_MACRO * defines,
+    ID3DInclude * include, const char * entrypoint, const char * target,
+    UINT flags1, UINT flags2, ID3DBlob ** code, ID3DBlob ** errors)
+{
+  static HMODULE     library;
+  static pD3DCompile compile;
+
+  if (!compile)
+    compile = loadCompiler(&library);
+  if (!compile)
+  {
+    DEBUG_ERROR("The shader compiler, d3dcompiler_47.dll, is not available");
+    return HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+  }
+
+  return compile(data, dataSize, filename, defines, include, entrypoint, target,
+      flags1, flags2, code, errors);
 }

@@ -35,6 +35,26 @@ if(ENABLE_OPENGL)
     cimgui/imgui/backends/imgui_impl_opengl2.cpp
   )
   target_compile_definitions(lg_gui PUBLIC CIMGUI_USE_OPENGL2=1)
+
+  # the backend calls OpenGL itself, and a library that is listed before the one
+  # that needs it is not searched again by the linker
+  if(WIN32)
+    target_link_libraries(lg_gui PUBLIC opengl32)
+  endif()
+endif()
+
+if(ENABLE_D3D11)
+  set(IMGUI_DX11_BACKEND
+    cimgui/imgui/backends/imgui_impl_dx11.cpp
+  )
+  target_sources(lg_gui PRIVATE ${IMGUI_DX11_BACKEND})
+
+  # The backend compiles its shaders with D3DCompile, which would make the
+  # client need d3dcompiler_47.dll to start at all. Its call goes to a function
+  # of the renderer's instead, which loads that DLL when it is first used.
+  set_source_files_properties(${IMGUI_DX11_BACKEND} PROPERTIES
+    COMPILE_DEFINITIONS D3DCompile=lgD3DCompile
+  )
 endif()
 
 if(ENABLE_EGL)

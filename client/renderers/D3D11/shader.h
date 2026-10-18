@@ -48,4 +48,13 @@ bool d3d11Shader_pixel(D3D11ShaderCompiler * compiler, ID3D11Device * device,
     const char * name, const char * source, const char * function,
     ID3D11PixelShader ** shader);
 
+/* What Dear ImGui's Direct3D 11 backend calls as D3DCompile, which it is built to
+ * call by this name (repos/gui/CMakeLists.txt) so that linking it does not make
+ * d3dcompiler_47.dll a library that the client needs to start. It loads the
+ * compiler when it is first called, and keeps it. */
+HRESULT WINAPI lgD3DCompile(const void * data, SIZE_T dataSize,
+    const char * filename, const D3D_SHADER_MACRO * defines,
+    ID3DInclude * include, const char * entrypoint, const char * target,
+    UINT flags1, UINT flags2, ID3DBlob ** code, ID3DBlob ** errors);
+
 #endif
